@@ -1,0 +1,49 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "type": "java",
+      "name": "PvPLeaderboardPluginTest",
+      "request": "launch",
+      "mainClass": "com.pvp.leaderboard.PvPLeaderboardPluginTest",
+      "projectName": "pvp-leaderboard",
+      "vmArgs": "-ea -Dsun.java2d.d3d=false"
+    },
+    {
+      "type": "java",
+      "name": "RuneLite: PvPLeaderboardPluginTest",
+      "request": "launch",
+      "mainClass": "com.pvp.leaderboard.PvPLeaderboardPluginTest",
+      "projectName": "PvPLeaderboardPlugin",
+      "vmArgs": "-ea -Dsun.java2d.d3d=false"
+    }
+  ]
+}
+
+{
+    "version": "0.2.0",
+    "configurations": [
+      {
+        "type": "java",
+        "name": "PvPLeaderboardPluginTest",
+        "request": "launch",
+        "mainClass": "com.pvp.leaderboard.PvPLeaderboardPluginTest",
+        "projectName": "pvp-leaderboard",
+        "cwd": "${workspaceFolder}",
+        "console": "integratedTerminal",
+        "vmArgs": "-ea -Dsun.java2d.d3d=false"
+      },
+      {
+        "type": "java",
+        "name": "RuneLite: PvPLeaderboardPluginTest",
+        "request": "launch",
+        "mainClass": "com.pvp.leaderboard.PvPLeaderboardPluginTest",
+        "projectName": "PvPLeaderboardPlugin",
+        "cwd": "${workspaceFolder}",
+        "console": "integratedTerminal",
+        "vmArgs": "-ea -Dsun.java2d.d3d=false"
+      }
+    ]
+  }
+  
+  

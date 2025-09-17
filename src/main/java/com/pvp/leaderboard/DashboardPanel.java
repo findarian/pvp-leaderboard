@@ -1,6 +1,7 @@
 package com.pvp.leaderboard;
 
 import net.runelite.client.ui.PluginPanel;
+import net.runelite.client.config.ConfigManager;
 import javax.swing.*;
 import javax.swing.table.DefaultTableModel;
 import java.awt.*;
@@ -25,6 +26,9 @@ import java.security.MessageDigest;
 import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Collections;
+import java.util.LinkedHashMap;
+import java.util.concurrent.ConcurrentHashMap;
 
 public class DashboardPanel extends PluginPanel
 {
@@ -45,7 +49,8 @@ public class DashboardPanel extends PluginPanel
     private JLabel kdLabel;
     private JPanel chartPanel;
     private java.util.List<Double> winRateHistory = new java.util.ArrayList<>();
-    private JPanel additionalStatsPanel;
+    private JPanel additionalStatsPanel; // legacy container (kept for compatibility)
+    private AdditionalStatsPanel extraStatsPanel; // new compact additional stats panel
     private DefaultTableModel rankBreakdownModel;
     private JTable rankBreakdownTable;
     private boolean isLoggedIn = false;
@@ -59,10 +64,28 @@ public class DashboardPanel extends PluginPanel
     private String selectedBucket = "overall";
     private java.util.List<Double> tierHistory = new java.util.ArrayList<>();
     private JsonArray allMatches = null;
-    private JButton[] bucketButtons = new JButton[5];
     private JButton refreshButton;
+    private JButton[] bucketButtons = new JButton[5];
     private long lastRefreshTime = 0;
     private static final long REFRESH_COOLDOWN_MS = 60000; // 1 minute
+    private JButton loadMoreButton;
+    private String currentMatchesPlayerId = null;
+    private String matchesNextToken = null;
+    private static final int MATCHES_PAGE_SIZE = 100;
+    private final Map<String, MatchesCache> matchesCache = new HashMap<>();
+    // Shard lookup caching
+    private final Map<String, ShardEntry> shardCache = Collections.synchronizedMap(
+        new LinkedHashMap<String, ShardEntry>(128, 0.75f, true)
+        {
+            @Override
+            protected boolean removeEldestEntry(Map.Entry<String, ShardEntry> eldest)
+            {
+                return size() > 512; // LRU cap
+            }
+        }
+    );
+    private final ConcurrentHashMap<String, Long> shardThrottle = new ConcurrentHashMap<>();
+    private static final long SHARD_CACHE_EXPIRY_MS = 60L * 60L * 1000L;
     private static final Map<String, Color> RANK_COLORS = new HashMap<String, Color>() {{
         put("Bronze", new Color(184, 115, 51));
         put("Iron", new Color(192, 192, 192));
@@ -82,16 +105,36 @@ public class DashboardPanel extends PluginPanel
     }
 
     private PvPLeaderboardConfig config;
+    private final ConfigManager configManager;
     private ProfileState currentProfile = new ProfileState();
     private Map<String, Integer> bucketRankNumbers = new HashMap<>();
+    private PvPLeaderboardPlugin plugin; 
     
     private String canonName(String name) {
         return String.valueOf(name != null ? name : "").trim().replaceAll("\\s+", " ").toLowerCase();
     }
+
+    private static String normalizeDisplayName(String name)
+    {
+        if (name == null) return "";
+        String s = name;
+        s = s.replace('\u00A0', ' ');
+        s = s.replaceAll("[\\u200B\\u200C\\u200D\\uFEFF]", "");
+        s = s.trim().replaceAll("\\s+", " ");
+        return s;
+    }
+
+    private static String normalizePlayerId(String name)
+    {
+        String display = normalizeDisplayName(name);
+        return display.replaceAll("\\s+", "-");
+    }
     
-    public DashboardPanel(PvPLeaderboardConfig config)
+    public DashboardPanel(PvPLeaderboardConfig config, ConfigManager configManager, PvPLeaderboardPlugin plugin)
     {
         this.config = config;
+        this.configManager = configManager;
+        this.plugin = plugin;
         progressBars = new JProgressBar[5];
         progressLabels = new JLabel[5];
         
@@ -107,12 +150,10 @@ public class DashboardPanel extends PluginPanel
     private void showAdditionalStats(boolean show)
     {
         isLoggedIn = show;
-        if (additionalStatsPanel != null)
-        {
-            additionalStatsPanel.setVisible(show);
-            revalidate();
-            repaint();
-        }
+        if (additionalStatsPanel != null) { additionalStatsPanel.setVisible(show); }
+        if (extraStatsPanel != null) { extraStatsPanel.setVisible(show); }
+        revalidate();
+        repaint();
     }
     
     private JPanel createMainPanel()
@@ -120,12 +161,12 @@ public class DashboardPanel extends PluginPanel
         JPanel mainPanel = new JPanel();
         mainPanel.setLayout(new BoxLayout(mainPanel, BoxLayout.Y_AXIS));
         
-        // Auth Bar (Login Section)
+        // Auth Bar (Login/Search Section)
         JPanel authContainer = new JPanel(new FlowLayout(FlowLayout.LEFT, 0, 0));
         authContainer.add(createAuthBar());
         mainPanel.add(authContainer);
         mainPanel.add(Box.createVerticalStrut(16));
-        
+
         // Profile Header
         mainPanel.add(createProfileHeader());
         mainPanel.add(Box.createVerticalStrut(24));
@@ -134,12 +175,16 @@ public class DashboardPanel extends PluginPanel
         mainPanel.add(createRankProgressSection());
         mainPanel.add(Box.createVerticalStrut(24));
         
-        // Performance Overview
-        mainPanel.add(createPerformanceOverview());
-        mainPanel.add(Box.createVerticalStrut(24));
+        // Compact performance overview
+        mainPanel.add(createCompactPerformanceOverview());
+        mainPanel.add(Box.createVerticalStrut(12));
         
-        // Additional Stats
-        mainPanel.add(createAdditionalStats());
+        // Additional Stats (new compact panel) - hidden until login
+        extraStatsPanel = new AdditionalStatsPanel();
+        extraStatsPanel.setVisible(false);
+        // Initialize bucket to config's current setting
+        try { setStatsBucketFromConfig(config.rankBucket()); } catch (Exception ignore) {}
+        mainPanel.add(extraStatsPanel);
         mainPanel.add(Box.createVerticalStrut(24));
         
         // Match History
@@ -186,8 +231,9 @@ public class DashboardPanel extends PluginPanel
         
         authBar.add(Box.createVerticalStrut(5));
         
-        loginButton = new JButton("Login to view stats in runelite");
-        loginButton.setMaximumSize(new Dimension(200, 25));
+        loginButton = new JButton("Login to view more stats");
+        loginButton.setPreferredSize(new Dimension(210, 25));
+        loginButton.setMaximumSize(new Dimension(220, 25));
         loginButton.addActionListener(e -> handleLogin());
         authBar.add(loginButton);
         
@@ -254,48 +300,40 @@ public class DashboardPanel extends PluginPanel
         return section;
     }
     
-    private JPanel createPerformanceOverview()
+    private JPanel createCompactPerformanceOverview()
     {
-        JPanel mainPanel = new JPanel();
-        mainPanel.setLayout(new BoxLayout(mainPanel, BoxLayout.Y_AXIS));
-        mainPanel.setBorder(BorderFactory.createTitledBorder("Performance Overview"));
-        
-        JPanel contentPanel = new JPanel();
-        contentPanel.setLayout(new BoxLayout(contentPanel, BoxLayout.Y_AXIS));
-        
-        // Stats summary row
-        JPanel summaryPanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 12, 0));
+        JPanel panel = new JPanel();
+        panel.setLayout(new BoxLayout(panel, BoxLayout.Y_AXIS));
+        panel.setBorder(BorderFactory.createTitledBorder("Performance Overview"));
+
+        JPanel summaryRow = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 0));
         winPercentLabel = new JLabel("Win %: -");
-        tiesLabel = new JLabel("Ties: -");
+        kdLabel = new JLabel("KD: -");
         killsLabel = new JLabel("Kills: -");
         deathsLabel = new JLabel("Deaths: -");
-        kdLabel = new JLabel("KD: -");
-        
-        summaryPanel.add(winPercentLabel);
-        summaryPanel.add(tiesLabel);
-        summaryPanel.add(killsLabel);
-        summaryPanel.add(deathsLabel);
-        summaryPanel.add(kdLabel);
-        
-        contentPanel.add(summaryPanel);
-        contentPanel.add(Box.createVerticalStrut(8));
-        
-        // Win rate chart
-        chartPanel = createWinRateChart();
-        contentPanel.add(chartPanel);
-        contentPanel.add(Box.createVerticalStrut(16));
-        
-        // Rank breakdown table
-        contentPanel.add(createRankBreakdownTable());
-        
-        JScrollPane scrollPane = new JScrollPane(contentPanel);
-        scrollPane.setVerticalScrollBarPolicy(JScrollPane.VERTICAL_SCROLLBAR_NEVER);
-        scrollPane.setHorizontalScrollBarPolicy(JScrollPane.HORIZONTAL_SCROLLBAR_AS_NEEDED);
-        scrollPane.setBorder(null);
-        scrollPane.setPreferredSize(new Dimension(0, 500));
-        
-        mainPanel.add(scrollPane);
-        return mainPanel;
+        tiesLabel = new JLabel("Ties: -");
+        Font small = winPercentLabel.getFont().deriveFont(Font.PLAIN, Math.max(10f, winPercentLabel.getFont().getSize2D() - 1f));
+        winPercentLabel.setFont(small);
+        kdLabel.setFont(small);
+        killsLabel.setFont(small);
+        deathsLabel.setFont(small);
+        tiesLabel.setFont(small);
+        summaryRow.add(winPercentLabel);
+        summaryRow.add(new JLabel("|"));
+        summaryRow.add(kdLabel);
+        summaryRow.add(new JLabel("|"));
+        summaryRow.add(killsLabel);
+        summaryRow.add(new JLabel(":"));
+        summaryRow.add(deathsLabel);
+        summaryRow.add(new JLabel("|"));
+        summaryRow.add(tiesLabel);
+        panel.add(summaryRow);
+
+        // Compact rank breakdown table (short height) with horizontal scroll
+        JPanel breakdown = createRankBreakdownTable();
+        breakdown.setPreferredSize(new Dimension(0, 100));
+        panel.add(breakdown);
+        return panel;
     }
     
     private JPanel createAdditionalStats()
@@ -335,13 +373,17 @@ public class DashboardPanel extends PluginPanel
         additionalStatsPanel.add(statsScrollPane);
         additionalStatsPanel.add(Box.createVerticalStrut(16));
         
-        // Bucket selector above the title - horizontal with scroll
-        JPanel buttonPanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 0));
+        // Bucket selector across two rows (to guarantee visibility in narrow panel)
+        JPanel row1 = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 0));
+        JPanel row2 = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 0));
         String[] buckets = {"Overall", "NH", "Veng", "Multi", "DMM"};
         for (int i = 0; i < buckets.length; i++) {
             String bucket = buckets[i];
             JButton btn = new JButton(bucket);
-            btn.setPreferredSize(new Dimension(70, 25));
+            int chipWidth = 64; // fit within sidebar
+            btn.setPreferredSize(new Dimension(chipWidth, 25));
+            btn.setMinimumSize(btn.getPreferredSize());
+            btn.setFocusable(false);
             btn.addActionListener(e -> {
                 selectedBucket = bucket.toLowerCase();
                 updateBucketButtonStates(bucket);
@@ -350,16 +392,19 @@ public class DashboardPanel extends PluginPanel
                 }
             });
             bucketButtons[i] = btn;
-            buttonPanel.add(btn);
+            if (i < 2) row1.add(btn); else row2.add(btn);
         }
         updateBucketButtonStates("Overall");
-        
-        JScrollPane buttonScrollPane = new JScrollPane(buttonPanel);
-        buttonScrollPane.setVerticalScrollBarPolicy(JScrollPane.VERTICAL_SCROLLBAR_NEVER);
-        buttonScrollPane.setHorizontalScrollBarPolicy(JScrollPane.HORIZONTAL_SCROLLBAR_AS_NEEDED);
-        buttonScrollPane.setBorder(null);
-        buttonScrollPane.setPreferredSize(new Dimension(0, 35));
-        additionalStatsPanel.add(buttonScrollPane);
+
+        JPanel chipsContainer = new JPanel();
+        chipsContainer.setLayout(new BoxLayout(chipsContainer, BoxLayout.Y_AXIS));
+        chipsContainer.setAlignmentX(LEFT_ALIGNMENT);
+        row1.setAlignmentX(LEFT_ALIGNMENT);
+        row2.setAlignmentX(LEFT_ALIGNMENT);
+        chipsContainer.add(row1);
+        chipsContainer.add(Box.createVerticalStrut(4));
+        chipsContainer.add(row2);
+        additionalStatsPanel.add(chipsContainer);
         
         // Tier Graph title - left aligned
         JPanel titlePanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 0, 0));
@@ -376,6 +421,8 @@ public class DashboardPanel extends PluginPanel
         tierScrollPane.setPreferredSize(new Dimension(0, 260));
         additionalStatsPanel.add(tierScrollPane);
         
+        // Preview button removed per request
+        
         return additionalStatsPanel;
     }
     
@@ -384,13 +431,22 @@ public class DashboardPanel extends PluginPanel
         JPanel panel = new JPanel(new BorderLayout());
         panel.setBorder(BorderFactory.createTitledBorder("Match History"));
         
-        String[] columns = {"Result", "Opponent", "Match Type", "Match", "Change", "Time"};
+        String[] columns = {"Res", "Opponent", "Type", "Match", "Change", "Time"};
         tableModel = new DefaultTableModel(columns, 0);
         matchHistoryTable = new JTable(tableModel);
         matchHistoryTable.setFillsViewportHeight(true);
         matchHistoryTable.setAutoResizeMode(JTable.AUTO_RESIZE_OFF);
-        
+        try {
+            matchHistoryTable.getColumnModel().getColumn(0).setPreferredWidth(40);
+            matchHistoryTable.getColumnModel().getColumn(1).setPreferredWidth(140);
+            matchHistoryTable.getColumnModel().getColumn(2).setPreferredWidth(60);
+            matchHistoryTable.getColumnModel().getColumn(3).setPreferredWidth(220);
+            matchHistoryTable.getColumnModel().getColumn(4).setPreferredWidth(180);
+            matchHistoryTable.getColumnModel().getColumn(5).setPreferredWidth(120);
+        } catch (Exception ignore) {}
+
         JScrollPane scrollPane = new JScrollPane(matchHistoryTable);
+        scrollPane.setHorizontalScrollBarPolicy(JScrollPane.HORIZONTAL_SCROLLBAR_AS_NEEDED);
         scrollPane.setPreferredSize(new Dimension(0, 300));
         scrollPane.setHorizontalScrollBarPolicy(JScrollPane.HORIZONTAL_SCROLLBAR_AS_NEEDED);
         scrollPane.setVerticalScrollBarPolicy(JScrollPane.VERTICAL_SCROLLBAR_AS_NEEDED);
@@ -415,9 +471,11 @@ public class DashboardPanel extends PluginPanel
         // Use Cognito OAuth flow
         try
         {
-            CognitoAuthService authService = new CognitoAuthService();
+            if (authService == null) {
+                authService = new CognitoAuthService(configManager);
+            }
             authService.login().thenAccept(success -> {
-                if (success) {
+                if (success && authService != null && authService.isLoggedIn() && authService.getStoredIdToken() != null) {
                     SwingUtilities.invokeLater(() -> completeLogin());
                 } else {
                     SwingUtilities.invokeLater(() -> {
@@ -426,7 +484,7 @@ public class DashboardPanel extends PluginPanel
                 }
             }).exceptionally(ex -> {
                 SwingUtilities.invokeLater(() -> {
-                    JOptionPane.showMessageDialog(this, "Login error: " + ex.getMessage(), "Error", JOptionPane.ERROR_MESSAGE);
+                    JOptionPane.showMessageDialog(this, "Login error: " + (ex.getMessage() == null ? ex.toString() : ex.getMessage()), "Error", JOptionPane.ERROR_MESSAGE);
                 });
                 return null;
             });
@@ -439,6 +497,45 @@ public class DashboardPanel extends PluginPanel
     
     public void loadMatchHistory(String playerId)
     {
+        currentMatchesPlayerId = normalizePlayerId(playerId);
+        matchesNextToken = null;
+
+        // Serve from cache immediately if present
+        MatchesCache cached = matchesCache.get(currentMatchesPlayerId);
+        if (cached != null && cached.matches != null)
+        {
+            // Inline applyMatchesToUI to avoid method dependency
+            tableModel.setRowCount(0);
+            int wins = 0, losses = 0, ties = 0;
+            JsonArray matches = cached.matches;
+            for (int i = 0; i < matches.size(); i++)
+            {
+                JsonObject match = matches.get(i).getAsJsonObject();
+                String result = match.has("result") ? match.get("result").getAsString() : "";
+                String opponent = match.has("opponent_id") ? match.get("opponent_id").getAsString() : "";
+                String matchType = match.has("bucket") ? match.get("bucket").getAsString().toUpperCase() : "Unknown";
+                String playerRank = computeRank(match, "player_");
+                String opponentRank = computeRank(match, "opponent_");
+                String matchDisplay = playerRank + " vs " + opponentRank;
+        String change = computeRatingChangePlain(match);
+                String time = match.has("when") ? formatTime(match.get("when").getAsLong()) : "";
+                if ("win".equalsIgnoreCase(result)) wins++;
+                else if ("loss".equalsIgnoreCase(result)) losses++;
+                else if ("tie".equalsIgnoreCase(result)) ties++;
+                tableModel.addRow(new Object[]{result, opponent, matchType, matchDisplay, change, time});
+            }
+            updatePerformanceStats(wins, losses, ties);
+            updateWinRateChart(matches);
+            updateRankBreakdown(matches);
+            allMatches = matches;
+            updateBucketBarsFromMatches();
+            if (extraStatsPanel != null) {
+                extraStatsPanel.setMatches(matches);
+            }
+            matchesNextToken = cached.nextToken;
+            if (loadMoreButton != null) loadMoreButton.setVisible(matchesNextToken != null && !matchesNextToken.isEmpty());
+        }
+
         SwingWorker<Void, Void> worker = new SwingWorker<Void, Void>()
         {
             @Override
@@ -446,10 +543,10 @@ public class DashboardPanel extends PluginPanel
             {
                 try
                 {
-                    loadPlayerStats(playerId);
+                    String normalizedId = currentMatchesPlayerId;
+                    loadPlayerStats(normalizedId);
                     
-                    // Use player_id parameter like website does for matches
-                    String apiUrl = "https://kekh0x6kfk.execute-api.us-east-1.amazonaws.com/prod/matches?player_id=" + URLEncoder.encode(playerId, "UTF-8") + "&limit=500";
+                    String apiUrl = "https://kekh0x6kfk.execute-api.us-east-1.amazonaws.com/prod/matches?player_id=" + URLEncoder.encode(normalizedId, "UTF-8") + "&limit=" + MATCHES_PAGE_SIZE;
                     URL url = new URL(apiUrl);
                     HttpURLConnection conn = (HttpURLConnection) url.openConnection();
                     conn.setRequestMethod("GET");
@@ -465,7 +562,8 @@ public class DashboardPanel extends PluginPanel
                     
                     JsonObject jsonResponse = JsonParser.parseString(response.toString()).getAsJsonObject();
                     JsonArray matches = jsonResponse.getAsJsonArray("matches");
-                    
+                    String nextToken = jsonResponse.has("next_token") && !jsonResponse.get("next_token").isJsonNull() ? jsonResponse.get("next_token").getAsString() : null;
+
                     SwingUtilities.invokeLater(() ->
                     {
                         tableModel.setRowCount(0);
@@ -504,6 +602,20 @@ public class DashboardPanel extends PluginPanel
                         // Update bucket bars from matches after they're loaded
                         allMatches = matches;
                         updateBucketBarsFromMatches();
+                        if (extraStatsPanel != null) {
+                            extraStatsPanel.setMatches(matches);
+                        }
+
+                        matchesNextToken = nextToken;
+                        if (loadMoreButton != null) {
+                            loadMoreButton.setVisible(matchesNextToken != null && !matchesNextToken.isEmpty());
+                        }
+
+                        // Update cache
+                        if (currentMatchesPlayerId != null)
+                        {
+                            matchesCache.put(currentMatchesPlayerId, new MatchesCache(matches.deepCopy(), matchesNextToken, System.currentTimeMillis()));
+                        }
                     });
                 }
                 catch (Exception e)
@@ -514,6 +626,54 @@ public class DashboardPanel extends PluginPanel
             }
         };
         worker.execute();
+    }
+
+    private void applyMatchesToUI(JsonArray matches, String nextToken, boolean updateCache)
+    {
+        tableModel.setRowCount(0);
+        int wins = 0, losses = 0, ties = 0;
+
+        for (int i = 0; i < matches.size(); i++)
+        {
+            JsonObject match = matches.get(i).getAsJsonObject();
+            String result = match.has("result") ? match.get("result").getAsString() : "";
+            String opponent = match.has("opponent_id") ? match.get("opponent_id").getAsString() : "";
+            String matchType = match.has("bucket") ? match.get("bucket").getAsString().toUpperCase() : "Unknown";
+            String playerRank = computeRank(match, "player_");
+            String opponentRank = computeRank(match, "opponent_");
+            String matchDisplay = playerRank + " vs " + opponentRank;
+            String change = computeRatingChange(match);
+            String time = match.has("when") ? formatTime(match.get("when").getAsLong()) : "";
+
+            if ("win".equalsIgnoreCase(result)) wins++;
+            else if ("loss".equalsIgnoreCase(result)) losses++;
+            else if ("tie".equalsIgnoreCase(result)) ties++;
+
+            tableModel.addRow(new Object[]{result, opponent, matchType, matchDisplay, change, time});
+        }
+
+        updatePerformanceStats(wins, losses, ties);
+        updateWinRateChart(matches);
+        updateRankBreakdown(matches);
+
+        if (isLoggedIn) {
+            allMatches = matches;
+            updateAdditionalStats(matches);
+        }
+
+        allMatches = matches;
+        updateBucketBarsFromMatches();
+
+        matchesNextToken = nextToken;
+        if (loadMoreButton != null) {
+            loadMoreButton.setVisible(matchesNextToken != null && !matchesNextToken.isEmpty());
+        }
+        if (updateCache && currentMatchesPlayerId != null) {
+            matchesCache.put(currentMatchesPlayerId, new MatchesCache(matches, matchesNextToken, System.currentTimeMillis()));
+        }
+        if (extraStatsPanel != null) {
+            extraStatsPanel.setMatches(matches);
+        }
     }
     
     private String computeRank(JsonObject match, String prefix)
@@ -549,7 +709,7 @@ public class DashboardPanel extends PluginPanel
                 
                 if (!fromLabel.trim().isEmpty() || !toLabel.trim().isEmpty())
                 {
-                    return mmrText + "<br><small>" + (fromLabel.trim().isEmpty() ? "?" : fromLabel) + " → " + (toLabel.trim().isEmpty() ? "?" : toLabel) + "</small>";
+                    return mmrText + " | " + (fromLabel.trim().isEmpty() ? "?" : fromLabel) + " → " + (toLabel.trim().isEmpty() ? "?" : toLabel);
                 }
                 return mmrText;
             }
@@ -596,9 +756,16 @@ public class DashboardPanel extends PluginPanel
             String deltaText = "tie".equals(result) ? "0% change" : 
                               String.format("%+.2f%% change", rawDelta);
             
-            return progressLine + "<br><small>" + deltaText + "</small>";
+            return progressLine + " | " + deltaText;
         }
         return "-";
+    }
+
+    // Plain variant for Match History table to avoid HTML snippets
+    private String computeRatingChangePlain(JsonObject match)
+    {
+        String text = computeRatingChange(match);
+        return text.replace("<br><small>", " | ").replace("</small>", "");
     }
     
     private double calculateProgressFromMMR(double mmr)
@@ -698,7 +865,7 @@ public class DashboardPanel extends PluginPanel
         try
         {
             // Use user endpoint by player_id like website does
-            String apiUrl = "https://kekh0x6kfk.execute-api.us-east-1.amazonaws.com/prod/user?player_id=" + URLEncoder.encode(playerId, "UTF-8");
+            String apiUrl = "https://kekh0x6kfk.execute-api.us-east-1.amazonaws.com/prod/user?player_id=" + URLEncoder.encode(normalizePlayerId(playerId), "UTF-8");
             URL url = new URL(apiUrl);
             HttpURLConnection conn = (HttpURLConnection) url.openConnection();
             conn.setRequestMethod("GET");
@@ -713,6 +880,10 @@ public class DashboardPanel extends PluginPanel
             reader.close();
             
             JsonObject stats = JsonParser.parseString(response.toString()).getAsJsonObject();
+            if (stats.has("account_hash") && !stats.get("account_hash").isJsonNull())
+            {
+                try { lastLoadedAccountHash = stats.get("account_hash").getAsString(); } catch (Exception ignore) {}
+            }
             
 
             
@@ -853,82 +1024,85 @@ public class DashboardPanel extends PluginPanel
         }
     }
     
-    private int getRankNumberFromLeaderboard(String playerName, String bucket)
+    public int getRankNumberFromLeaderboard(String playerName, String bucket)
+    {
+        return getRankFromShard(playerName, (lastLoadedAccountHash != null ? lastLoadedAccountHash : null), bucket);
+    }
+
+    private String lastLoadedAccountHash = null;
+
+    private int getRankFromShard(String playerName, String accountHash, String bucket)
     {
         try
         {
-            String s3Key;
-            switch (bucket.toLowerCase()) {
-                case "overall":
-                    s3Key = "/leaderboard.json";
-                    break;
-                case "nh":
-                    s3Key = "/leaderboard_nh.json";
-                    break;
-                case "veng":
-                    s3Key = "/leaderboard_veng.json";
-                    break;
-                case "multi":
-                    s3Key = "/leaderboard_multi.json";
-                    break;
-                case "dmm":
-                    s3Key = "/leaderboard_dmm.json";
-                    break;
-                default:
-                    return -1;
+            String canon = canonName(playerName);
+            boolean useAccount = accountHash != null && !accountHash.isEmpty();
+            String key = useAccount ? accountHash : canon;
+            if (key == null || key.isEmpty()) return -1;
+            String shard = key.substring(0, Math.min(2, key.length())).toLowerCase();
+            String dir = bucket.equalsIgnoreCase("overall") ? "overall" : bucket.toLowerCase();
+            String urlStr = "https://devsecopsautomated.com/rank_idx/" + dir + "/" + shard + ".json";
+
+            String cacheKey = dir + "/" + shard;
+            long now = System.currentTimeMillis();
+            ShardEntry cached = shardCache.get(cacheKey);
+            if (cached != null && now - cached.timestamp < SHARD_CACHE_EXPIRY_MS)
+            {
+                JsonObject obj = cached.payload;
+                if (useAccount && obj.has("account_rank_index_map"))
+                {
+                    JsonObject m = obj.getAsJsonObject("account_rank_index_map");
+                    if (m.has(accountHash)) return m.get(accountHash).getAsInt();
+                }
+                if (obj.has("name_rank_index_map"))
+                {
+                    JsonObject m = obj.getAsJsonObject("name_rank_index_map");
+                    if (m.has(canon)) return m.get(canon).getAsInt();
+                }
             }
-            
-            String s3Url = "https://devsecopsautomated.com" + s3Key;
-            URL url = new URL(s3Url);
+
+            Long lastReq = shardThrottle.getOrDefault(cacheKey, 0L);
+            if (now - lastReq < 60_000L && cached == null)
+            {
+                return -1;
+            }
+
+            URL url = new URL(urlStr);
             HttpURLConnection conn = (HttpURLConnection) url.openConnection();
             conn.setRequestMethod("GET");
-            conn.setRequestProperty("Cache-Control", "no-store");
-            
             if (conn.getResponseCode() != 200) return -1;
-            
-            BufferedReader reader = new BufferedReader(new InputStreamReader(conn.getInputStream()));
-            StringBuilder response = new StringBuilder();
-            String line;
-            while ((line = reader.readLine()) != null)
+
+            BufferedReader r = new BufferedReader(new InputStreamReader(conn.getInputStream(), java.nio.charset.StandardCharsets.UTF_8));
+            StringBuilder sb = new StringBuilder();
+            String ln; while ((ln = r.readLine()) != null) sb.append(ln); r.close();
+            JsonObject obj = JsonParser.parseString(sb.toString()).getAsJsonObject();
+            shardCache.put(cacheKey, new ShardEntry(obj, now));
+            shardThrottle.put(cacheKey, now);
+
+            if (useAccount && obj.has("account_rank_index_map"))
             {
-                response.append(line);
+                JsonObject m = obj.getAsJsonObject("account_rank_index_map");
+                if (m.has(accountHash)) return m.get(accountHash).getAsInt();
             }
-            reader.close();
-            
-            JsonObject data = JsonParser.parseString(response.toString()).getAsJsonObject();
-            if (!data.has("players")) return -1;
-            
-            JsonArray players = data.getAsJsonArray("players");
-            
-            // If no players in leaderboard, return rank 1 like website does
-            if (players.size() == 0) return 1;
-            
-            String canonPlayerName = canonName(playerName);
-            
-            for (int i = 0; i < players.size(); i++)
+            if (obj.has("name_rank_index_map"))
             {
-                JsonObject player = players.get(i).getAsJsonObject();
-                String foundName = null;
-                
-                if (player.has("player_names") && !player.get("player_names").isJsonNull())
-                {
-                    JsonArray names = player.getAsJsonArray("player_names");
-                    if (names.size() > 0) {
-                        foundName = names.get(0).getAsString();
-                    }
-                }
-                
-                if (foundName != null && canonName(foundName).equals(canonPlayerName))
-                {
-                    return i + 1;
-                }
+                JsonObject m = obj.getAsJsonObject("name_rank_index_map");
+                if (m.has(canon)) return m.get(canon).getAsInt();
             }
         }
-        catch (Exception e)
-        {
-            // Silent failure
-        }
+        catch (Exception ignore) {}
         return -1;
+    }
+
+    private static class ShardEntry
+    {
+        final JsonObject payload;
+        final long timestamp;
+        ShardEntry(JsonObject payload, long timestamp)
+        {
+            this.payload = payload;
+            this.timestamp = timestamp;
+        }
     }
     
     private RankInfo rankLabelAndProgressFromMMR(double mmrVal)
@@ -1113,14 +1287,20 @@ public class DashboardPanel extends PluginPanel
     {
         JPanel panel = new JPanel(new BorderLayout());
         
-        String[] columns = {"Opponent Tier", "Kills", "Deaths", "KD"};
+        String[] columns = {"Tier", "K", "D", "KD"};
         rankBreakdownModel = new DefaultTableModel(columns, 0);
         rankBreakdownTable = new JTable(rankBreakdownModel);
-        rankBreakdownTable.setFillsViewportHeight(false);
-        rankBreakdownTable.setPreferredScrollableViewportSize(new Dimension(0, 150));
+        rankBreakdownTable.setFillsViewportHeight(true);
+        rankBreakdownTable.setAutoResizeMode(JTable.AUTO_RESIZE_OFF);
+        rankBreakdownTable.getColumnModel().getColumn(0).setPreferredWidth(100);
+        rankBreakdownTable.getColumnModel().getColumn(1).setPreferredWidth(30);
+        rankBreakdownTable.getColumnModel().getColumn(2).setPreferredWidth(30);
+        rankBreakdownTable.getColumnModel().getColumn(3).setPreferredWidth(40);
         
         JScrollPane scrollPane = new JScrollPane(rankBreakdownTable);
-        scrollPane.setPreferredSize(new Dimension(0, 150));
+        scrollPane.setVerticalScrollBarPolicy(JScrollPane.VERTICAL_SCROLLBAR_AS_NEEDED);
+        scrollPane.setHorizontalScrollBarPolicy(JScrollPane.HORIZONTAL_SCROLLBAR_AS_NEEDED);
+        scrollPane.setPreferredSize(new Dimension(0, 100));
         panel.add(scrollPane, BorderLayout.CENTER);
         
         return panel;
@@ -1207,7 +1387,7 @@ public class DashboardPanel extends PluginPanel
         return System.currentTimeMillis() % 10000 > 3000;
     }
     
-    private CognitoAuthService authService = new CognitoAuthService();
+    private CognitoAuthService authService;
     
     private void completeLogin()
     {
@@ -1227,8 +1407,24 @@ public class DashboardPanel extends PluginPanel
     
     private void searchUserOnWebsite()
     {
-        String playerName = websiteSearchField.getText().trim();
-        if (playerName.isEmpty()) return;
+        String input = websiteSearchField.getText().trim();
+        if (input.isEmpty()) return;
+        String exact = normalizeDisplayName(input);
+        // If we already have account_hash cached from a prior /user load, open directly without an API call
+        try
+        {
+            if (lastLoadedAccountHash != null && !lastLoadedAccountHash.isEmpty())
+            {
+                String accountSha = generateAccountSha(lastLoadedAccountHash);
+                String profileUrl = "https://devsecopsautomated.com/profile.html?acct=" + accountSha;
+                Desktop.getDesktop().browse(URI.create(profileUrl));
+                return;
+            }
+        }
+        catch (Exception ignore)
+        {
+            // Fallback to API path below
+        }
         
         SwingWorker<String, Void> worker = new SwingWorker<String, Void>()
         {
@@ -1238,7 +1434,7 @@ public class DashboardPanel extends PluginPanel
                 try
                 {
                     // Get account hash from API - match website logic
-                    String apiUrl = "https://kekh0x6kfk.execute-api.us-east-1.amazonaws.com/prod/user?player_id=" + URLEncoder.encode(playerName, "UTF-8");
+                    String apiUrl = "https://kekh0x6kfk.execute-api.us-east-1.amazonaws.com/prod/user?player_id=" + URLEncoder.encode(exact, "UTF-8");
                     URL url = new URL(apiUrl);
                     HttpURLConnection conn = (HttpURLConnection) url.openConnection();
                     conn.setRequestMethod("GET");
@@ -1295,7 +1491,7 @@ public class DashboardPanel extends PluginPanel
     
     private void searchUserOnPlugin()
     {
-        String playerName = pluginSearchField.getText().trim();
+        String playerName = normalizeDisplayName(pluginSearchField.getText().trim());
         if (playerName.isEmpty()) return;
         
         playerNameLabel.setText(playerName);
@@ -1311,6 +1507,64 @@ public class DashboardPanel extends PluginPanel
         {
             showAdditionalStats(true);
         }
+    }
+
+    public void lookupPlayerFromRightClick(String name)
+    {
+        String exact = normalizeDisplayName(name);
+        if (websiteSearchField != null)
+        {
+            websiteSearchField.setText(exact);
+        }
+        if (pluginSearchField != null)
+        {
+            pluginSearchField.setText(exact);
+        }
+        searchUserOnPlugin();
+    }
+
+    public void preloadSelfRankNumbers(String displayName)
+    {
+        final String playerName = normalizeDisplayName(displayName);
+        if (playerName.isEmpty()) return;
+        SwingWorker<Void, Void> worker = new SwingWorker<Void, Void>()
+        {
+            @Override
+            protected Void doInBackground() throws Exception
+            {
+                try
+                {
+                    String apiUrl = "https://kekh0x6kfk.execute-api.us-east-1.amazonaws.com/prod/user?player_id=" + URLEncoder.encode(normalizePlayerId(playerName), "UTF-8");
+                    URL url = new URL(apiUrl);
+                    HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+                    conn.setRequestMethod("GET");
+                    BufferedReader reader = new BufferedReader(new InputStreamReader(conn.getInputStream()));
+                    StringBuilder response = new StringBuilder();
+                    String line;
+                    while ((line = reader.readLine()) != null)
+                    {
+                        response.append(line);
+                    }
+                    reader.close();
+                    JsonObject stats = JsonParser.parseString(response.toString()).getAsJsonObject();
+                    if (stats.has("account_hash") && !stats.get("account_hash").isJsonNull())
+                    {
+                        try { lastLoadedAccountHash = stats.get("account_hash").getAsString(); } catch (Exception ignore) {}
+                    }
+                }
+                catch (Exception ignore)
+                {
+                }
+                return null;
+            }
+
+            @Override
+            protected void done()
+            {
+                updateAllRankNumbers(playerName);
+            }
+        };
+        worker.execute();
     }
     
     private String generateAccountSha(String accountHash) throws Exception
@@ -1329,6 +1583,10 @@ public class DashboardPanel extends PluginPanel
     
     private void updateAdditionalStats(JsonArray matches)
     {
+        if (highestRankLabel == null || lowestRankLabel == null || highestRankTimeLabel == null || lowestRankTimeLabel == null)
+        {
+            return; // UI not initialized yet; avoid NPE
+        }
         String highestRankDefeated = null;
         String lowestRankLostTo = null;
         String highestTime = null;
@@ -1601,10 +1859,10 @@ public class DashboardPanel extends PluginPanel
         double kd = losses > 0 ? (wins / (double) losses) : (wins > 0 ? wins : 0);
         
         winPercentLabel.setText(String.format("Win %%: %.1f%%", winPercent));
-        tiesLabel.setText("Ties: " + ties);
+        kdLabel.setText(String.format("KD: %.2f", kd));
         killsLabel.setText("Kills: " + wins);
         deathsLabel.setText("Deaths: " + losses);
-        kdLabel.setText(String.format("KD: %.1f", kd));
+        tiesLabel.setText("Ties: " + ties);
     }
     
     private JPanel createWinRateChart()
@@ -1725,6 +1983,22 @@ public class DashboardPanel extends PluginPanel
                 }
             });
         }
+
+        // Optimistically add a synthetic row to match history when available
+        try
+        {
+            String opponent = lowestRankLostTo != null ? "Opponent" : "Opponent";
+            String result = highestRankDefeated != null ? "win" : (lowestRankLostTo != null ? "loss" : null);
+            if (result != null && tableModel != null)
+            {
+                String matchType = selectedBucket.toUpperCase();
+                String matchDisplay = (highestRankDefeated != null ? highestRankDefeated : (lowestRankLostTo != null ? lowestRankLostTo : "-")) + " vs ?";
+                String change = "—";
+                String time = formatTime(System.currentTimeMillis() / 1000);
+                tableModel.insertRow(0, new Object[]{result, opponent, matchType, matchDisplay, change, time});
+            }
+        }
+        catch (Exception ignore) {}
     }
     
     public void updateTierGraphRealTime(String bucket, double mmr)
@@ -1794,6 +2068,22 @@ public class DashboardPanel extends PluginPanel
                 JOptionPane.INFORMATION_MESSAGE);
         }
     }
+
+    private void setStatsBucketFromConfig(PvPLeaderboardConfig.RankBucket b)
+    {
+        if (extraStatsPanel == null || b == null) return;
+        String bucket;
+        switch (b)
+        {
+            case NH: bucket = "nh"; break;
+            case VENG: bucket = "veng"; break;
+            case MULTI: bucket = "multi"; break;
+            case DMM: bucket = "dmm"; break;
+            case OVERALL:
+            default: bucket = "overall"; break;
+        }
+        extraStatsPanel.setBucket(bucket);
+    }
     
     private static class RankInfo
     {
@@ -1859,6 +2149,19 @@ public class DashboardPanel extends PluginPanel
         ProfileState()
         {
             this.name = null;
+        }
+    }
+
+    private static class MatchesCache
+    {
+        final JsonArray matches;
+        final String nextToken;
+        final long timestampMs;
+        MatchesCache(JsonArray matches, String nextToken, long timestampMs)
+        {
+            this.matches = matches;
+            this.nextToken = nextToken;
+            this.timestampMs = timestampMs;
         }
     }
 }

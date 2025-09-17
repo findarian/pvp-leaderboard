@@ -2,6 +2,9 @@ package com.pvp.leaderboard;
 
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
+import net.runelite.client.config.ConfigManager;
+import javax.swing.JOptionPane;
+import javax.swing.SwingUtilities;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
 import com.sun.net.httpserver.HttpServer;
@@ -14,7 +17,6 @@ import java.security.MessageDigest;
 import java.security.SecureRandom;
 import java.util.Base64;
 import java.util.concurrent.CompletableFuture;
-import java.util.prefs.Preferences;
 
 public class CognitoAuthService {
     private static final String COGNITO_DOMAIN = "osrs-mmr-a8959e04.auth.us-east-1.amazoncognito.com";
@@ -22,108 +24,144 @@ public class CognitoAuthService {
     private static final String REDIRECT_URI = "http://127.0.0.1:49215/callback";
     private static final int CALLBACK_PORT = 49215;
     
-    private final Preferences prefs = Preferences.userNodeForPackage(CognitoAuthService.class);
-    private HttpServer callbackServer;
+    private final ConfigManager configManager;
+    private String transientVerifier;
+    // Local HTTP server for OAuth callback
+    private HttpServer httpServer;
     private String accessToken;
+    private String idToken;
     private String refreshToken;
     private long tokenExpiry;
     
-    public CompletableFuture<Boolean> login() {
-        CompletableFuture<Boolean> future = new CompletableFuture<>();
-        
-        try {
-            // Start callback server
-            startCallbackServer(future);
-            
-            // Generate PKCE
-            String verifier = generatePKCEVerifier();
-            String challenge = generatePKCEChallenge(verifier);
-//            String state = generateState();
-            
-            // Build login URL
-            String loginUrl = String.format(
-                "https://%s/login?client_id=%s&response_type=code&scope=openid+email+profile&redirect_uri=%s&code_challenge_method=S256&code_challenge=%s&state=test",
-                COGNITO_DOMAIN, CLIENT_ID, URLEncoder.encode(REDIRECT_URI, "UTF-8"), challenge
-            );
-            
-            // Store verifier for callback
-            prefs.put("pkce_verifier", verifier);
-            
-            // Open browser
-            Desktop.getDesktop().browse(URI.create(loginUrl));
-            
-        } catch (Exception e) {
-            future.completeExceptionally(e);
-        }
-        
-        return future;
+    public CognitoAuthService(ConfigManager configManager) {
+        this.configManager = configManager;
     }
-    
-    private void startCallbackServer(CompletableFuture<Boolean> future) throws IOException {
-        callbackServer = HttpServer.create(new InetSocketAddress("127.0.0.1", CALLBACK_PORT), 0);
-        callbackServer.createContext("/callback", new CallbackHandler(future));
-        callbackServer.start();
-    }
-    
-    private class CallbackHandler implements HttpHandler {
-        private final CompletableFuture<Boolean> future;
-        
-        CallbackHandler(CompletableFuture<Boolean> future) {
-            this.future = future;
-        }
-        
-        @Override
-        public void handle(HttpExchange exchange) throws IOException {
-            try {
-                String query = exchange.getRequestURI().getQuery();
-                String code = extractParam(query, "code");
 
-                
-                // Exchange code for tokens
-                exchangeCodeForTokens(code);
-                
-                // Send success response
-                String response = "Login successful! You can close this window.";
-                exchange.sendResponseHeaders(200, response.length());
-                exchange.getResponseBody().write(response.getBytes());
-                exchange.close();
-                
-                future.complete(true);
-                
+    // No-arg constructor for tests or environments without ConfigManager
+    public CognitoAuthService() {
+        this.configManager = null;
+    }
+
+    public CompletableFuture<Boolean> login() {
+        return CompletableFuture.supplyAsync(() -> {
+            try {
+                // Generate PKCE
+                String verifier = generatePKCEVerifier();
+                String challenge = generatePKCEChallenge(verifier);
+                if (configManager != null) {
+                    configManager.setConfiguration("PvPLeaderboard", "pkce_verifier", verifier);
+                } else {
+                    transientVerifier = verifier;
+                }
+
+                // Start local HTTP server to capture callback
+                CompletableFuture<String> codeFuture = new CompletableFuture<>();
+                startCallbackServer(codeFuture);
+
+                // Open browser to login
+                String loginUrl = String.format(
+                    "https://%s/login?client_id=%s&response_type=code&scope=openid+email+profile&redirect_uri=%s&code_challenge_method=S256&code_challenge=%s&state=runelite",
+                    COGNITO_DOMAIN, CLIENT_ID, URLEncoder.encode(REDIRECT_URI, "UTF-8"), challenge
+                );
+                Desktop.getDesktop().browse(URI.create(loginUrl));
+
+                // Wait for code up to 180s
+                String code = codeFuture.get(180, java.util.concurrent.TimeUnit.SECONDS);
+                stopCallbackServer();
+                if (code == null || code.isEmpty()) return false;
+                exchangeCodeForTokens(code.trim());
+                return true;
             } catch (Exception e) {
-                future.completeExceptionally(e);
-            } finally {
-                callbackServer.stop(0);
+                stopCallbackServer();
+                return false;
             }
-        }
+        });
+    }
+    
+    private void startCallbackServer(CompletableFuture<String> codeFuture) throws IOException {
+        if (httpServer != null) stopCallbackServer();
+        InetSocketAddress addr = new InetSocketAddress("127.0.0.1", CALLBACK_PORT);
+        httpServer = HttpServer.create(addr, 0);
+        httpServer.createContext("/callback", new HttpHandler() {
+            @Override
+            public void handle(HttpExchange ex) throws IOException {
+                try {
+                    URI uri = ex.getRequestURI();
+                    String query = uri.getRawQuery();
+                    String code = extractParam(query, "code");
+                    String html = "<html><head><title>Login Complete</title></head><body style=\"background:#111;color:#ffcc00;font-family:Arial\"><h2>Login complete</h2><p>You may now return to RuneLite.</p></body></html>";
+                    byte[] bytes = html.getBytes(StandardCharsets.UTF_8);
+                    ex.getResponseHeaders().set("Content-Type", "text/html; charset=utf-8");
+                    ex.sendResponseHeaders(200, bytes.length);
+                    try (OutputStream os = ex.getResponseBody()) { os.write(bytes); }
+                    if (code != null && !code.isEmpty() && !codeFuture.isDone()) codeFuture.complete(code);
+                } catch (Exception ignore) {
+                    try { if (!codeFuture.isDone()) codeFuture.complete(null); } catch (Exception ignored) {}
+                }
+            }
+        });
+        httpServer.start();
+    }
+
+    private void stopCallbackServer() {
+        try { if (httpServer != null) httpServer.stop(0); } catch (Exception ignore) {}
+        httpServer = null;
     }
     
     private void exchangeCodeForTokens(String code) throws Exception {
-        String verifier = prefs.get("pkce_verifier", "");
+        String verifier = null;
+        if (configManager != null) {
+            Object v = configManager.getConfiguration("PvPLeaderboard", "pkce_verifier");
+            verifier = v != null ? String.valueOf(v) : null;
+        } else {
+            verifier = transientVerifier;
+        }
         
-        String postData = String.format(
-            "grant_type=authorization_code&client_id=%s&code=%s&redirect_uri=%s&code_verifier=%s",
-            CLIENT_ID, code, URLEncoder.encode(REDIRECT_URI, "UTF-8"), verifier
-        );
+        // Form-encode ALL values to avoid '+' being treated as space etc.
+        String postData =
+            "grant_type=" + URLEncoder.encode("authorization_code", "UTF-8") +
+            "&client_id=" + URLEncoder.encode(CLIENT_ID, "UTF-8") +
+            "&code=" + URLEncoder.encode(code, "UTF-8") +
+            "&redirect_uri=" + URLEncoder.encode(REDIRECT_URI, "UTF-8") +
+            "&code_verifier=" + URLEncoder.encode(String.valueOf(verifier), "UTF-8");
         
         URL url = new URL("https://" + COGNITO_DOMAIN + "/oauth2/token");
         HttpURLConnection conn = (HttpURLConnection) url.openConnection();
         conn.setRequestMethod("POST");
         conn.setRequestProperty("Content-Type", "application/x-www-form-urlencoded");
+        conn.setRequestProperty("Accept", "application/json");
         conn.setDoOutput(true);
         
-        conn.getOutputStream().write(postData.getBytes());
+        try (OutputStream os = conn.getOutputStream()) {
+            os.write(postData.getBytes(StandardCharsets.UTF_8));
+        }
         
-        BufferedReader reader = new BufferedReader(new InputStreamReader(conn.getInputStream()));
-        String response = reader.lines().reduce("", String::concat);
-        reader.close();
+        int status = conn.getResponseCode();
+        InputStream is = status >= 200 && status < 300 ? conn.getInputStream() : conn.getErrorStream();
+        if (is == null) {
+            throw new IOException("No response from token endpoint (status=" + status + ")");
+        }
+        StringBuilder sb = new StringBuilder();
+        try (BufferedReader reader = new BufferedReader(new InputStreamReader(is, StandardCharsets.UTF_8))) {
+            String line; while ((line = reader.readLine()) != null) sb.append(line);
+        }
+        String response = sb.toString();
+        if (status < 200 || status >= 300) {
+            throw new IOException("Token exchange failed (status=" + status + "): " + response);
+        }
         
         JsonObject tokens = JsonParser.parseString(response).getAsJsonObject();
-        accessToken = tokens.get("access_token").getAsString();
-        tokenExpiry = System.currentTimeMillis() + (tokens.get("expires_in").getAsInt() * 1000L);
+        accessToken = tokens.has("access_token") && !tokens.get("access_token").isJsonNull() ? tokens.get("access_token").getAsString() : null;
+        idToken = tokens.has("id_token") && !tokens.get("id_token").isJsonNull() ? tokens.get("id_token").getAsString() : null;
+        refreshToken = tokens.has("refresh_token") && !tokens.get("refresh_token").isJsonNull() ? tokens.get("refresh_token").getAsString() : null;
+        int expiresIn = tokens.has("expires_in") ? tokens.get("expires_in").getAsInt() : 3600;
+        tokenExpiry = System.currentTimeMillis() + (expiresIn * 1000L);
         
         // Clean up
-        prefs.remove("pkce_verifier");
+        if (configManager != null) {
+            configManager.unsetConfiguration("PvPLeaderboard", "pkce_verifier");
+        }
+        transientVerifier = null;
     }
     
     public String getAccessToken() {
@@ -139,12 +177,12 @@ public class CognitoAuthService {
     public void logout() {
         accessToken = null;
         tokenExpiry = 0;
+        try { if (configManager != null) configManager.unsetConfiguration("PvPLeaderboard", "pkce_verifier"); } catch (Exception ignore) {}
+        transientVerifier = null;
     }
     
     public String getStoredIdToken() {
-        // Return access token as ID token for testing
-        // In real implementation, would store and return actual ID token
-        return accessToken;
+        return idToken;
     }
     
     private String generatePKCEVerifier() {

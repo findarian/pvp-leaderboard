@@ -8,21 +8,31 @@ import net.runelite.api.GameState;
 import net.runelite.api.events.GameStateChanged;
 import net.runelite.api.events.HitsplatApplied;
 import net.runelite.api.events.ActorDeath;
+import net.runelite.api.events.MenuEntryAdded;
+import net.runelite.api.events.MenuOptionClicked;
 import net.runelite.api.Player;
 import net.runelite.api.Varbits;
+import net.runelite.api.MenuAction;
 import net.runelite.client.config.ConfigManager;
 import net.runelite.client.eventbus.Subscribe;
 import net.runelite.client.plugins.Plugin;
 import net.runelite.client.plugins.PluginDescriptor;
 import net.runelite.client.ui.ClientToolbar;
 import net.runelite.client.ui.NavigationButton;
+import net.runelite.client.util.Text;
 import net.runelite.client.ui.overlay.OverlayManager;
 import net.runelite.client.util.ImageUtil;
+import net.runelite.client.game.SpriteManager;
+import net.runelite.api.SpriteID;
 import java.awt.image.BufferedImage;
+import javax.swing.SwingUtilities;
+import net.runelite.client.menus.MenuManager;
+import java.util.concurrent.TimeUnit;
+import javax.swing.*;
 
 @Slf4j
 @PluginDescriptor(
-	name = "PvPLeaderboard"
+	name = "PvP Leaderboard"
 )
 public class PvPLeaderboardPlugin extends Plugin
 {
@@ -33,16 +43,27 @@ public class PvPLeaderboardPlugin extends Plugin
 	private PvPLeaderboardConfig config;
 
 	@Inject
+	private ConfigManager configManager;
+
+	@Inject
 	private ClientToolbar clientToolbar;
 
 	@Inject
 	private OverlayManager overlayManager;
 
 	@Inject
+	private MenuManager menuManager;
+
+	@Inject
 	private RankCacheService rankCacheService;
 
 	@Inject
 	private RankOverlay rankOverlay;
+
+    @Inject
+    private SpriteManager spriteManager;
+
+	// ScoreboardOverlay and NearbyLeaderboardOverlay removed per request
 
 	private DashboardPanel dashboardPanel;
 	private NavigationButton navButton;
@@ -62,9 +83,31 @@ public class PvPLeaderboardPlugin extends Plugin
 	@Override
 	protected void startUp() throws Exception
 	{
-		dashboardPanel = new DashboardPanel(config);
+        dashboardPanel = new DashboardPanel(config, configManager, this);
+
+		// Add right-click player menu item once on startup
+		menuManager.addPlayerMenuItem("pvp lookup");
 		
-		final BufferedImage icon = ImageUtil.loadImageResource(getClass(), "/util/clue_arrow.png");
+        // Use in-game white PvP skull for the sidebar icon (PLAYER_KILLER_SKULL = 439)
+        final BufferedImage icon = ImageUtil.loadImageResource(getClass(), "/util/clue_arrow.png");
+        try {
+            spriteManager.getSpriteAsync(439, 0, img -> {
+                if (img != null && navButton != null) {
+                    SwingUtilities.invokeLater(() -> {
+                        // Rebuild nav button with new icon because NavigationButton is immutable
+                        NavigationButton updated = NavigationButton.builder()
+                            .tooltip("PvP Leaderboard")
+                            .icon(img)
+                            .priority(5)
+                            .panel(dashboardPanel)
+                            .build();
+                        clientToolbar.removeNavigation(navButton);
+                        navButton = updated;
+                        clientToolbar.addNavigation(navButton);
+                    });
+                }
+            });
+        } catch (Exception ignore) {}
 		navButton = NavigationButton.builder()
 			.tooltip("PvP Leaderboard")
 			.icon(icon)
@@ -73,6 +116,8 @@ public class PvPLeaderboardPlugin extends Plugin
 			.build();
 
 		clientToolbar.addNavigation(navButton);
+		// Warm caches synchronously
+		forcePrewarmRankCaches();
 		overlayManager.add(rankOverlay);
 		log.info("PvP Leaderboard started!");
 	}
@@ -80,10 +125,49 @@ public class PvPLeaderboardPlugin extends Plugin
 	@Override
 	protected void shutDown() throws Exception
 	{
+		menuManager.removePlayerMenuItem("pvp lookup");
 		clientToolbar.removeNavigation(navButton);
 		overlayManager.remove(rankOverlay);
 		log.info("PvP Leaderboard stopped!");
 	}
+    @Subscribe
+    public void onMenuEntryAdded(MenuEntryAdded event)
+    {
+        // no-op: we add the menu on startup to avoid duplicates
+    }
+
+    // Removed sprite preview tooling per request
+
+    @Subscribe
+    public void onMenuOptionClicked(MenuOptionClicked event)
+    {
+        if (event.getMenuAction() != MenuAction.RUNELITE_PLAYER) {
+            return;
+        }
+        if (!"pvp lookup".equals(event.getMenuOption())) {
+            return;
+        }
+
+        String target = event.getMenuTarget();
+        if (target == null) {
+            return;
+        }
+
+        String cleaned = Text.removeTags(target);
+        // Remove trailing (level-xxx)
+        cleaned = cleaned.replaceAll("\\s*\\(level-\\d+\\)$", "");
+        String playerName = Text.toJagexName(cleaned).replace('\u00A0',' ').trim().replaceAll("\\s+"," ");
+
+        if (dashboardPanel != null) {
+            dashboardPanel.lookupPlayerFromRightClick(playerName);
+        }
+
+        // Open plugin side panel
+        if (clientToolbar != null && navButton != null) {
+            SwingUtilities.invokeLater(() -> clientToolbar.openPanel(navButton));
+        }
+    }
+
 
 	@Subscribe
 	public void onGameStateChanged(GameStateChanged gameStateChanged)
@@ -92,6 +176,34 @@ public class PvPLeaderboardPlugin extends Plugin
 		{
 			accountHash = client.getAccountHash();
 			log.info("PvP Leaderboard ready! Account hash: " + accountHash);
+			if (config.onlyFetchOnLogin())
+			{
+				// Clear caches to allow one-time fetch after login
+				// RankOverlay will attempt once per player when seen
+			}
+			// Default lookup to local player and populate panel
+			try
+			{
+				if (client.getLocalPlayer() != null && dashboardPanel != null)
+				{
+					String self = client.getLocalPlayer().getName();
+					dashboardPanel.lookupPlayerFromRightClick(self);
+				}
+			}
+			catch (Exception ignore) {}
+		}
+	}
+
+	private void forcePrewarmRankCaches()
+	{
+		String[] buckets = {"overall", "nh", "veng", "multi", "dmm"};
+		for (String b : buckets)
+		{
+			try
+			{
+				rankCacheService.forceRefreshBucket(b);
+			}
+			catch (Exception ignore) {}
 		}
 	}
 
@@ -185,6 +297,17 @@ public class PvPLeaderboardPlugin extends Plugin
 		log.info("Fight started against: " + opponent + ", Multi: " + wasInMulti + ", Spellbook: " + fightStartSpellbook);
 	}
 
+	public String getCurrentOpponent()
+	{
+		return opponent;
+	}
+
+	public String getDisplayedRankFor(String name)
+	{
+		if (name == null) return null;
+		return rankOverlay != null ? rankOverlay.getCachedRankFor(name) : null;
+	}
+
 	private void endFight(String result)
 	{
 		fightEndSpellbook = client.getVarbitValue(Varbits.SPELLBOOK);
@@ -192,15 +315,15 @@ public class PvPLeaderboardPlugin extends Plugin
 		
 		if (opponent != null)
 		{
-			String opponentRank = getPlayerRank(opponent);
-			String bucket = determineBucket();
+            String bucket = determineBucket();
+            String opponentRank = resolvePlayerRank(opponent, bucket);
 			double currentMMR = estimateCurrentMMR();
 			
-			if ("win".equals(result))
+            if ("win".equals(result) && opponentRank != null)
 			{
 				updateHighestRankDefeated(opponentRank);
 			}
-			else if ("loss".equals(result))
+            else if ("loss".equals(result) && opponentRank != null)
 			{
 				updateLowestRankLostTo(opponentRank);
 			}
@@ -210,9 +333,18 @@ public class PvPLeaderboardPlugin extends Plugin
 			{
 				dashboardPanel.updateTierGraphRealTime(bucket, currentMMR);
 			}
+
+			// Optionally show fight rank box overlay via existing rankOverlay drawing (toggle from config)
+			// The rankOverlay renders icons and can be extended later; for now, rely on icon above name.
 			
-			// Submit match result to API
-			submitMatchResult(result, fightEndTime);
+            // Submit match result to API and optimistically update UI on success
+            submitMatchResult(result, fightEndTime);
+            try {
+                if (dashboardPanel != null) {
+                    dashboardPanel.updateAdditionalStatsFromPlugin("win".equals(result) ? opponentRank : null,
+                        "loss".equals(result) ? opponentRank : null);
+                }
+            } catch (Exception ignore) {}
 		}
 		
 		log.info("Fight ended with result: " + result + ", Multi during fight: " + wasInMulti + ", Start spellbook: " + fightStartSpellbook + ", End spellbook: " + fightEndSpellbook);
@@ -270,6 +402,37 @@ public class PvPLeaderboardPlugin extends Plugin
 		// In a real implementation, this would query the leaderboard API
 		return "Bronze 3"; // Placeholder
 	}
+
+    private String resolvePlayerRank(String playerName, String bucket)
+    {
+        try
+        {
+            // Use shard number to compute tier/division text when available
+            int rankIndex = -1;
+            if (dashboardPanel != null)
+            {
+                rankIndex = dashboardPanel.getRankNumberFromLeaderboard(playerName, bucket);
+            }
+            if (rankIndex >= 0)
+            {
+                // Map index to tier/division roughly by thresholds used in DashboardPanel
+                String[] tiers = {"Bronze 3","Bronze 2","Bronze 1",
+                    "Iron 3","Iron 2","Iron 1",
+                    "Steel 3","Steel 2","Steel 1",
+                    "Black 3","Black 2","Black 1",
+                    "Mithril 3","Mithril 2","Mithril 1",
+                    "Adamant 3","Adamant 2","Adamant 1",
+                    "Rune 3","Rune 2","Rune 1",
+                    "Dragon 3","Dragon 2","Dragon 1","3rd Age"};
+                if (rankIndex >= 0 && rankIndex < tiers.length)
+                {
+                    return tiers[rankIndex];
+                }
+            }
+        }
+        catch (Exception ignore) {}
+        return null;
+    }
 	
 	private void updateHighestRankDefeated(String rank)
 	{
