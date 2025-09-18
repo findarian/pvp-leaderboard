@@ -124,6 +124,16 @@ public class DashboardPanel extends PluginPanel
         return String.valueOf(name != null ? name : "").trim().replaceAll("\\s+", " ").toLowerCase();
     }
 
+    private Client getClientSafe()
+    {
+        try { return plugin != null ? pluginClientAccessor() : null; } catch (Exception ignore) { return null; }
+    }
+    // Indirection to avoid direct private field access; plugin exposes client via accessor
+    private Client pluginClientAccessor()
+    {
+        try { java.lang.reflect.Field f = PvPLeaderboardPlugin.class.getDeclaredField("client"); f.setAccessible(true); return (Client) f.get(plugin); } catch (Exception e) { return null; }
+    }
+
     private static String normalizeDisplayName(String name) {
         if (name == null) return null;
         return name.trim().replaceAll("\\s+", " ");
@@ -132,7 +142,7 @@ public class DashboardPanel extends PluginPanel
     private static String normalizePlayerId(String name)
     {
         String display = normalizeDisplayName(name);
-        return display.replaceAll("\\s+", "-");
+        return display; // keep spaces intact for player_id; URL-encoding will handle safely
     }
     
     public DashboardPanel(PvPLeaderboardConfig config, ConfigManager configManager, PvPLeaderboardPlugin plugin)
@@ -488,20 +498,20 @@ public class DashboardPanel extends PluginPanel
                         SwingUtilities.invokeLater(() -> {
                         setLoginBusy(false);
                         // UI error popups always allowed
-                        JOptionPane.showMessageDialog(this, "Login failed", "Error", JOptionPane.ERROR_MESSAGE);
+                        // Popup disabled per requirement
                     });
                 }
             }).exceptionally(ex -> {
                 SwingUtilities.invokeLater(() -> {
                     setLoginBusy(false);
-                    JOptionPane.showMessageDialog(this, "Login error: " + (ex.getMessage() == null ? ex.toString() : ex.getMessage()), "Error", JOptionPane.ERROR_MESSAGE);
+                    // Popup disabled per requirement
                 });
                 return null;
             });
         }
         catch (Exception e)
         {
-            JOptionPane.showMessageDialog(this, "Failed to open login page", "Login Error", JOptionPane.ERROR_MESSAGE);
+            // Popup disabled per requirement
         }
     }
 
@@ -589,7 +599,7 @@ public class DashboardPanel extends PluginPanel
                     {
                         final int s = status; final String resp = response;
                         SwingUtilities.invokeLater(() -> {
-                            JOptionPane.showMessageDialog(DashboardPanel.this, "Failed to load matches: " + HttpUtil.toUserMessage(s, resp), "Error", JOptionPane.ERROR_MESSAGE);
+                            // Popup disabled per requirement
                         });
                         return null;
                     }
@@ -1818,12 +1828,12 @@ public class DashboardPanel extends PluginPanel
                     }
                     else
                     {
-                        JOptionPane.showMessageDialog(DashboardPanel.this, "Player not found (Capitalization sensitive)", "Error", JOptionPane.ERROR_MESSAGE);
+                        // Popup disabled per requirement
                     }
                 }
                 catch (Exception e)
                 {
-                    JOptionPane.showMessageDialog(DashboardPanel.this, "Failed to open profile", "Error", JOptionPane.ERROR_MESSAGE);
+                    // Popup disabled per requirement
                 }
             }
         };
@@ -1832,7 +1842,13 @@ public class DashboardPanel extends PluginPanel
     
     private void searchUserOnPlugin()
     {
-        String playerName = normalizeDisplayName(pluginSearchField.getText().trim());
+        String input = pluginSearchField != null ? pluginSearchField.getText().trim() : "";
+        if (input.isEmpty() && plugin != null && getClientSafe() != null && getClientSafe().getLocalPlayer() != null)
+        {
+            input = getClientSafe().getLocalPlayer().getName();
+            if (pluginSearchField != null) pluginSearchField.setText(input);
+        }
+        String playerName = normalizeDisplayName(input);
         if (playerName.isEmpty()) return;
         
         playerNameLabel.setText(playerName);
@@ -2387,10 +2403,7 @@ public class DashboardPanel extends PluginPanel
         if (timeSinceLastRefresh < REFRESH_COOLDOWN_MS)
         {
             long remainingSeconds = (REFRESH_COOLDOWN_MS - timeSinceLastRefresh) / 1000;
-            JOptionPane.showMessageDialog(this, 
-                "Please wait " + remainingSeconds + " seconds before refreshing again.", 
-                "Refresh Cooldown", 
-                JOptionPane.INFORMATION_MESSAGE);
+            // Popup disabled per requirement
             return;
         }
         
@@ -2402,10 +2415,7 @@ public class DashboardPanel extends PluginPanel
         }
         else
         {
-            JOptionPane.showMessageDialog(this, 
-                "No player data to refresh. Search for a player first.", 
-                "No Data", 
-                JOptionPane.INFORMATION_MESSAGE);
+            // Popup disabled per requirement
         }
     }
 
