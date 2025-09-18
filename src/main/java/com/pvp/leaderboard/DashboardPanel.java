@@ -1,6 +1,7 @@
 package com.pvp.leaderboard;
 
 import net.runelite.client.ui.PluginPanel;
+import net.runelite.api.Client;
 import net.runelite.client.config.ConfigManager;
 import javax.swing.*;
 import javax.swing.table.DefaultTableModel;
