@@ -3,8 +3,6 @@ package com.pvp.leaderboard;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import net.runelite.client.config.ConfigManager;
-import javax.swing.JOptionPane;
-import javax.swing.SwingUtilities;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
 import com.sun.net.httpserver.HttpServer;
@@ -17,6 +15,9 @@ import java.security.MessageDigest;
 import java.security.SecureRandom;
 import java.util.Base64;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 
 public class CognitoAuthService {
     private static final String COGNITO_DOMAIN = "osrs-mmr-a8959e04.auth.us-east-1.amazoncognito.com";
@@ -33,6 +34,7 @@ public class CognitoAuthService {
     private String idToken;
     private String refreshToken;
     private long tokenExpiry;
+    private ScheduledExecutorService refreshScheduler;
     
     public CognitoAuthService(ConfigManager configManager) {
         this.configManager = configManager;
@@ -81,6 +83,7 @@ public class CognitoAuthService {
                     return false;
                 }
                 exchangeCodeForTokens(code.trim());
+                ensureRefreshScheduler();
                 return true;
             } catch (Exception e) {
                 stopCallbackServer();
@@ -198,6 +201,9 @@ public class CognitoAuthService {
         }
         transientVerifier = null;
         transientState = null;
+
+        // Start/refresh auto refresh loop when we have a refresh token
+        ensureRefreshScheduler();
     }
     
     public String getAccessToken() {
@@ -249,6 +255,8 @@ public class CognitoAuthService {
         idToken = null;
         refreshToken = null;
         tokenExpiry = 0;
+        try { if (refreshScheduler != null) { refreshScheduler.shutdownNow(); } } catch (Exception ignore) {}
+        refreshScheduler = null;
         try { if (configManager != null) configManager.unsetConfiguration("PvPLeaderboard", "pkce_verifier"); } catch (Exception ignore) {}
         try { if (configManager != null) configManager.unsetConfiguration("PvPLeaderboard", "oauth_state"); } catch (Exception ignore) {}
         transientVerifier = null;
@@ -278,6 +286,87 @@ public class CognitoAuthService {
         } catch (Exception e) {
             return false;
         }
+    }
+
+    private synchronized void ensureRefreshScheduler() {
+        if (refreshToken == null || refreshToken.isEmpty()) return;
+        if (refreshScheduler == null || refreshScheduler.isShutdown()) {
+            refreshScheduler = Executors.newSingleThreadScheduledExecutor(r -> {
+                Thread t = new Thread(r, "pvp-auth-refresh");
+                t.setDaemon(true);
+                return t;
+            });
+        }
+        scheduleNextRefresh();
+    }
+
+    private void scheduleNextRefresh() {
+        if (refreshScheduler == null || refreshScheduler.isShutdown()) return;
+        long now = System.currentTimeMillis();
+        // Refresh 60s before expiry; fallback to 55min if expiry unknown
+        long target = tokenExpiry > 0 ? (tokenExpiry - 60_000L) : (now + 55L * 60L * 1000L);
+        long delayMs = Math.max(5_000L, target - now);
+        refreshScheduler.schedule(this::refreshFlow, delayMs, TimeUnit.MILLISECONDS);
+    }
+
+    private void refreshFlow() {
+        try {
+            // If logged out, skip
+            if (refreshToken == null || refreshToken.isEmpty()) return;
+            // If not close to expiry, reschedule
+            long now = System.currentTimeMillis();
+            if (tokenExpiry > 0 && now < tokenExpiry - 120_000L) {
+                scheduleNextRefresh();
+                return;
+            }
+            refreshWithToken();
+        } catch (Exception ignore) {
+            // On failure, retry in 2 minutes
+            try { if (refreshScheduler != null) refreshScheduler.schedule(this::refreshFlow, 120_000L, TimeUnit.MILLISECONDS); } catch (Exception ignored) {}
+            return;
+        }
+        // On success, schedule next
+        scheduleNextRefresh();
+    }
+
+    private void refreshWithToken() throws Exception {
+        if (refreshToken == null || refreshToken.isEmpty()) throw new IOException("No refresh token");
+        String postData =
+            "grant_type=" + URLEncoder.encode("refresh_token", "UTF-8") +
+            "&client_id=" + URLEncoder.encode(CLIENT_ID, "UTF-8") +
+            "&refresh_token=" + URLEncoder.encode(refreshToken, "UTF-8");
+
+        URL url = new URL("https://" + COGNITO_DOMAIN + "/oauth2/token");
+        HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+        conn.setRequestMethod("POST");
+        conn.setRequestProperty("Content-Type", "application/x-www-form-urlencoded");
+        conn.setRequestProperty("Accept", "application/json");
+        conn.setDoOutput(true);
+        try (OutputStream os = conn.getOutputStream()) {
+            os.write(postData.getBytes(StandardCharsets.UTF_8));
+        }
+
+        int status = conn.getResponseCode();
+        InputStream is = status >= 200 && status < 300 ? conn.getInputStream() : conn.getErrorStream();
+        if (is == null) throw new IOException("No response from token endpoint (status=" + status + ")");
+        StringBuilder sb = new StringBuilder();
+        try (BufferedReader reader = new BufferedReader(new InputStreamReader(is, StandardCharsets.UTF_8))) {
+            String line; while ((line = reader.readLine()) != null) sb.append(line);
+        }
+        if (status < 200 || status >= 300) {
+            throw new IOException("Refresh failed (status=" + status + "): " + sb);
+        }
+        JsonObject tokens = JsonParser.parseString(sb.toString()).getAsJsonObject();
+        String newAccessToken = tokens.has("access_token") && !tokens.get("access_token").isJsonNull() ? tokens.get("access_token").getAsString() : null;
+        String newIdToken = tokens.has("id_token") && !tokens.get("id_token").isJsonNull() ? tokens.get("id_token").getAsString() : null;
+        int expiresIn = tokens.has("expires_in") ? tokens.get("expires_in").getAsInt() : 3600;
+        if (newAccessToken == null) throw new IOException("No access token in refresh");
+        accessToken = newAccessToken;
+        if (newIdToken != null) {
+            if (!validateIdTokenClaims(newIdToken)) throw new IOException("Invalid refreshed ID token");
+            idToken = newIdToken;
+        }
+        tokenExpiry = System.currentTimeMillis() + (expiresIn * 1000L);
     }
 
     

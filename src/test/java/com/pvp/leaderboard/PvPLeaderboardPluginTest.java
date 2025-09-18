@@ -5,7 +5,8 @@ import net.runelite.client.externalplugins.ExternalPluginManager;
 
 public class PvPLeaderboardPluginTest
 {
-	public static void main(String[] args) throws Exception
+    @SuppressWarnings({"unchecked", "varargs"})
+    public static void main(String[] args) throws Exception
 	{
 		ExternalPluginManager.loadBuiltin(PvPLeaderboardPlugin.class);
 		RuneLite.main(args);

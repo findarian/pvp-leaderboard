@@ -15,6 +15,7 @@ import net.runelite.api.Varbits;
 import net.runelite.api.MenuAction;
 import net.runelite.client.config.ConfigManager;
 import net.runelite.client.eventbus.Subscribe;
+import net.runelite.client.events.ConfigChanged;
 import net.runelite.client.plugins.Plugin;
 import net.runelite.client.plugins.PluginDescriptor;
 import net.runelite.client.ui.ClientToolbar;
@@ -26,7 +27,6 @@ import net.runelite.client.game.SpriteManager;
 import java.awt.image.BufferedImage;
 import javax.swing.SwingUtilities;
 import net.runelite.client.menus.MenuManager;
-import java.util.concurrent.TimeUnit;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 
@@ -34,6 +34,7 @@ import java.util.concurrent.ScheduledExecutorService;
 @PluginDescriptor(
 	name = "PvP Leaderboard"
 )
+@SuppressWarnings("deprecation")
 public class PvPLeaderboardPlugin extends Plugin
 {
 	@Inject
@@ -80,9 +81,7 @@ public class PvPLeaderboardPlugin extends Plugin
 	private String highestRankDefeated = null;
 	private String lowestRankLostTo = null;
 	private long fightStartTime = 0;
-	private long lastCombatTime = 0;
-	private MatchResultService matchResultService = new MatchResultService();
-	private static final long FIGHT_TIMEOUT_MS = 30000; // 30 seconds
+    private MatchResultService matchResultService = new MatchResultService();
     private ScheduledExecutorService fightScheduler;
     private volatile long selfDeathMs = 0L;
     private volatile long opponentDeathMs = 0L;
@@ -104,8 +103,14 @@ private volatile boolean shardReady = false;
             });
         } catch (Exception ignore) {}
 
-		// Add right-click player menu item once on startup
-		menuManager.addPlayerMenuItem("pvp lookup");
+        // Add right-click player menu item based on config (default ON)
+        try {
+            if (config.enablePvpLookupMenu()) {
+                menuManager.addPlayerMenuItem("pvp lookup");
+            } else {
+                menuManager.removePlayerMenuItem("pvp lookup");
+            }
+        } catch (Exception ignore) {}
 		
         // Use in-game white PvP skull for the sidebar icon (PLAYER_KILLER_SKULL = 439)
         final BufferedImage icon = ImageUtil.loadImageResource(getClass(), "/util/clue_arrow.png");
@@ -157,7 +162,50 @@ private volatile boolean shardReady = false;
     @Subscribe
     public void onMenuEntryAdded(MenuEntryAdded event)
     {
-        // no-op: we add the menu on startup to avoid duplicates
+        // no-op: menu item managed on startup and config change
+    }
+
+    @Subscribe
+    public void onConfigChanged(ConfigChanged event)
+    {
+        if (event == null) return;
+        if (!"PvPLeaderboard".equals(event.getGroup())) return;
+        if ("enablePvpLookupMenu".equals(event.getKey()))
+        {
+            try {
+                if (config.enablePvpLookupMenu()) {
+                    menuManager.addPlayerMenuItem("pvp lookup");
+                } else {
+                    menuManager.removePlayerMenuItem("pvp lookup");
+                }
+            } catch (Exception ignore) {}
+            return;
+        }
+
+        // Ensure self rank refreshes when the selected bucket changes
+        if ("rankBucket".equals(event.getKey()))
+        {
+            try { if (rankOverlay != null) rankOverlay.scheduleSelfRankRefresh(0L); } catch (Exception ignore) {}
+            try {
+                if (dashboardPanel != null && client != null && client.getLocalPlayer() != null)
+                {
+                    final String selfName = client.getLocalPlayer().getName();
+                    final String currentBucket = bucketKey(config.rankBucket());
+                    // Fast-follow: push API-derived tier into overlay immediately
+                    java.util.concurrent.CompletableFuture.supplyAsync(() -> {
+                        try { return dashboardPanel.fetchSelfTierFromApi(selfName, currentBucket); } catch (Exception e) { return null; }
+                    }).thenAccept(tier -> {
+                        if (tier != null && !tier.isEmpty() && rankOverlay != null) {
+                            rankOverlay.setRankFromApi(selfName, tier);
+                        }
+                    });
+                    // Update sidebar rank numbers for the new bucket only
+                    try { dashboardPanel.updateAllRankNumbers(selfName); } catch (Exception ignore) {}
+                    // Update Additional Stats bucket selector (graph/table)
+                    try { dashboardPanel.setStatsBucketFromConfig(config.rankBucket()); } catch (Exception ignore) {}
+                }
+            } catch (Exception ignore) {}
+        }
     }
 
     // Removed sprite preview tooling per request
@@ -165,6 +213,9 @@ private volatile boolean shardReady = false;
     @Subscribe
     public void onMenuOptionClicked(MenuOptionClicked event)
     {
+        if (!config.enablePvpLookupMenu()) {
+            return;
+        }
         if (event.getMenuAction() != MenuAction.RUNELITE_PLAYER) {
             return;
         }
@@ -231,7 +282,7 @@ private volatile boolean shardReady = false;
 			{
 				if (client.getLocalPlayer() != null && dashboardPanel != null)
 				{
-					String self = client.getLocalPlayer().getName();
+                    String self = client.getLocalPlayer().getName();
 					dashboardPanel.lookupPlayerFromRightClick(self);
                     // Preload account hash linkage for self so overall lookups use account shard immediately
                     try { dashboardPanel.preloadSelfRankNumbers(self); } catch (Exception ignore) {}
@@ -290,8 +341,7 @@ private volatile boolean shardReady = false;
 				// Only proceed if we have a valid player opponent
 				if (opponentName != null && isPlayerOpponent(opponentName))
 				{
-                    // Update last combat time
-                    lastCombatTime = System.currentTimeMillis();
+                    // Combat activity marker (no-op)
 					
 					if (!inFight)
 					{
@@ -329,11 +379,15 @@ private volatile boolean shardReady = false;
                 }
                 scheduleDoubleKoCheck("loss");
             }
-            else if (opponent != null && player.getName().equals(opponent))
+            else if (opponent != null)
             {
-                // Opponent died
-                opponentDeathMs = System.currentTimeMillis();
-                scheduleDoubleKoCheck("win");
+                String name = player.getName();
+                if (name != null && name.equals(opponent))
+                {
+                    // Opponent died
+                    opponentDeathMs = System.currentTimeMillis();
+                    scheduleDoubleKoCheck("win");
+                }
             }
 		}
 	}
@@ -345,7 +399,7 @@ private volatile boolean shardReady = false;
 		wasInMulti = client.getVarbitValue(Varbits.MULTICOMBAT_AREA) == 1;
 		fightStartSpellbook = client.getVarbitValue(Varbits.SPELLBOOK);
 		fightStartTime = System.currentTimeMillis() / 1000;
-		lastCombatTime = System.currentTimeMillis();
+        
         log.info("Fight started against: " + opponent + ", Multi: " + wasInMulti + ", Spellbook: " + fightStartSpellbook);
 	}
 
@@ -495,14 +549,15 @@ private volatile boolean shardReady = false;
 		fightStartSpellbook = -1;
 		fightEndSpellbook = -1;
 		opponent = null;
-		fightStartTime = 0;
-		lastCombatTime = 0;
+        fightStartTime = 0;
 	}
 
 	private String getPlayerAttacker()
 	{
 		// Find a player who is attacking the local player
-		for (Player player : client.getPlayers())
+        java.util.List<Player> players = client.getPlayers();
+        if (players == null) return null;
+        for (Player player : players)
 		{
 			if (player != client.getLocalPlayer() && player.getInteracting() == client.getLocalPlayer())
 			{
@@ -516,7 +571,9 @@ private volatile boolean shardReady = false;
 	{
 		// Find the player who is currently attacking the local player at time of death
 		Player localPlayer = client.getLocalPlayer();
-		for (Player player : client.getPlayers())
+        java.util.List<Player> players = client.getPlayers();
+        if (players == null) return null;
+        for (Player player : players)
 		{
 			if (player != localPlayer && player.getInteracting() == localPlayer)
 			{
@@ -526,12 +583,7 @@ private volatile boolean shardReady = false;
 		return null;
 	}
 
-	private String getPlayerRank(String playerName)
-	{
-		// Simplified rank estimation based on combat level or other factors
-		// In a real implementation, this would query the leaderboard API
-		return "Bronze 3"; // Placeholder
-	}
+    
 
     public String resolvePlayerRank(String playerName, String bucket)
     {
@@ -566,7 +618,7 @@ private volatile boolean shardReady = false;
                 if (client != null && client.getLocalPlayer() != null && client.getLocalPlayer().getName() != null)
                 {
                     String self = client.getLocalPlayer().getName();
-                    if (self.equals(playerName) && dashboardPanel != null)
+                    if (self != null && self.equals(playerName) && dashboardPanel != null)
                     {
                         String tier = dashboardPanel.fetchSelfTierFromApi(playerName, bucket);
                         if (tier != null && !tier.isEmpty()) return tier;
@@ -761,9 +813,12 @@ private volatile boolean shardReady = false;
 		if (name == null || "Unknown".equals(name)) return false;
 		
 		// Check if the name exists in the players list
-		for (Player player : client.getPlayers())
+        java.util.List<Player> players = client.getPlayers();
+        if (players == null) return false;
+        for (Player player : players)
 		{
-			if (player.getName() != null && player.getName().equals(name))
+            String pn = player.getName();
+            if (pn != null && pn.equals(name))
 			{
 				return true;
 			}

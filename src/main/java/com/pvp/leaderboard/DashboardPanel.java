@@ -42,7 +42,7 @@ public class DashboardPanel extends PluginPanel
     private JLabel playerNameLabel;
     private final JProgressBar[] progressBars;
     private final JLabel[] progressLabels;
-    private JPanel statsGrid;
+    
     private JLabel winPercentLabel;
     private JLabel tiesLabel;
     private JLabel killsLabel;
@@ -56,7 +56,7 @@ public class DashboardPanel extends PluginPanel
     private JTable rankBreakdownTable;
     private boolean isLoggedIn = false;
     private String idToken = null;
-    private String accessToken = null;
+    
     private JLabel highestRankLabel;
     private JLabel highestRankTimeLabel;
     private JLabel lowestRankLabel;
@@ -117,7 +117,6 @@ public class DashboardPanel extends PluginPanel
 
     private PvPLeaderboardConfig config;
     private final ConfigManager configManager;
-    private ProfileState currentProfile = new ProfileState();
     private Map<String, Integer> bucketRankNumbers = new HashMap<>();
     private PvPLeaderboardPlugin plugin; 
     
@@ -352,6 +351,7 @@ public class DashboardPanel extends PluginPanel
         return panel;
     }
     
+    @SuppressWarnings("unused")
     private JPanel createAdditionalStats()
     {
         additionalStatsPanel = new JPanel();
@@ -496,7 +496,7 @@ public class DashboardPanel extends PluginPanel
                 if (success && authService != null && authService.isLoggedIn() && authService.getStoredIdToken() != null) {
                     SwingUtilities.invokeLater(() -> { setLoginBusy(false); completeLogin(); });
                 } else {
-                        SwingUtilities.invokeLater(() -> {
+                    SwingUtilities.invokeLater(() -> {
                         setLoginBusy(false);
                         // UI error popups always allowed
                         // Popup disabled per requirement
@@ -598,7 +598,6 @@ public class DashboardPanel extends PluginPanel
                     String response = HttpUtil.readResponseBody(conn);
                     if (status < 200 || status >= 300)
                     {
-                        final int s = status; final String resp = response;
                         SwingUtilities.invokeLater(() -> {
                             // Popup disabled per requirement
                         });
@@ -720,6 +719,7 @@ public class DashboardPanel extends PluginPanel
         catch (Exception ignore) {}
     }
 
+    @SuppressWarnings("unused")
     private void applyMatchesToUI(JsonArray matches, String nextToken, boolean updateCache)
     {
         tableModel.setRowCount(0);
@@ -1026,7 +1026,7 @@ public class DashboardPanel extends PluginPanel
                 {
                     double mmr = stats.get("mmr").getAsDouble();
                     RankInfo overall = rankLabelAndProgressFromMMR(mmr);
-
+                    
                     // Show progress immediately without waiting for network
                     SwingUtilities.invokeLater(() -> setBucketBar("overall", overall.rank, overall.division, overall.progress));
 
@@ -1114,29 +1114,29 @@ public class DashboardPanel extends PluginPanel
                 String currentBucket = bucketKey(config != null ? config.rankBucket() : null);
                 if (bucket.equals(currentBucket))
                 {
-                    SwingWorker<Integer, Void> worker = new SwingWorker<Integer, Void>()
+                SwingWorker<Integer, Void> worker = new SwingWorker<Integer, Void>()
+                {
+                    @Override
+                    protected Integer doInBackground() throws Exception
                     {
-                        @Override
-                        protected Integer doInBackground() throws Exception
+                        return getRankNumberFromLeaderboard(playerName, bucket);
+                    }
+                    
+                    @Override
+                    protected void done()
+                    {
+                        try
                         {
-                            return getRankNumberFromLeaderboard(playerName, bucket);
+                            int rankNumber = get();
+                            setBucketBarWithRank(bucket, finalRank, finalDiv, pct, rankNumber);
                         }
-                        
-                        @Override
-                        protected void done()
+                        catch (Exception e)
                         {
-                            try
-                            {
-                                int rankNumber = get();
-                                setBucketBarWithRank(bucket, finalRank, finalDiv, pct, rankNumber);
-                            }
-                            catch (Exception e)
-                            {
-                                setBucketBar(bucket, finalRank, finalDiv, pct);
-                            }
+                            setBucketBar(bucket, finalRank, finalDiv, pct);
                         }
-                    };
-                    worker.execute();
+                    }
+                };
+                worker.execute();
                 }
                 else
                 {
@@ -1281,7 +1281,9 @@ public class DashboardPanel extends PluginPanel
             // Always shard by player name prefix for file selection, even when using account lookups
             if (canon == null || canon.isEmpty()) return null;
             String shard = canon.substring(0, Math.min(2, canon.length())).toLowerCase();
-            String dir = bucket.equalsIgnoreCase("overall") ? "overall" : bucket.toLowerCase();
+            String dir = (bucket == null || bucket.trim().isEmpty() || "overall".equalsIgnoreCase(bucket))
+                ? "overall"
+                : bucket.toLowerCase();
             String urlStr = "https://devsecopsautomated.com/rank_idx/" + dir + "/" + shard + ".json";
 
             String cacheKey = dir + "/" + shard;
@@ -1337,11 +1339,11 @@ public class DashboardPanel extends PluginPanel
                 }
 
                 // Fetch
-                URL url = new URL(urlStr);
-                HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+            URL url = new URL(urlStr);
+            HttpURLConnection conn = (HttpURLConnection) url.openConnection();
                 conn.setConnectTimeout(5000);
                 conn.setReadTimeout(10000);
-                conn.setRequestMethod("GET");
+            conn.setRequestMethod("GET");
                 int status = conn.getResponseCode();
                 if (status != 200)
                 {
@@ -1349,12 +1351,12 @@ public class DashboardPanel extends PluginPanel
                     return null;
                 }
 
-                BufferedReader r = new BufferedReader(new InputStreamReader(conn.getInputStream(), java.nio.charset.StandardCharsets.UTF_8));
-                StringBuilder sb = new StringBuilder();
-                String ln; while ((ln = r.readLine()) != null) sb.append(ln); r.close();
-                JsonObject obj = JsonParser.parseString(sb.toString()).getAsJsonObject();
-                shardCache.put(cacheKey, new ShardEntry(obj, now));
-                shardThrottle.put(cacheKey, now);
+            BufferedReader r = new BufferedReader(new InputStreamReader(conn.getInputStream(), java.nio.charset.StandardCharsets.UTF_8));
+            StringBuilder sb = new StringBuilder();
+            String ln; while ((ln = r.readLine()) != null) sb.append(ln); r.close();
+            JsonObject obj = JsonParser.parseString(sb.toString()).getAsJsonObject();
+            shardCache.put(cacheKey, new ShardEntry(obj, now));
+            shardThrottle.put(cacheKey, now);
                 shardFailUntil.remove(cacheKey);
                 ShardRank out = extractShardRank(obj, useAccount, accountHash, canon);
                 long dtMs = (System.nanoTime() - t0) / 1_000_000L;
@@ -1526,11 +1528,16 @@ public class DashboardPanel extends PluginPanel
         progressLabels[index].setText(labelText);
         progressLabels[index].setForeground(getRankColor(rank));
         
-        int pctValue = (int) Math.max(0, Math.min(100, pct));
+        int pctValue = (int) Math.round(Math.max(0.0, Math.min(100.0, pct)));
+        if (pctValue >= 99) {
+            pctValue = 100; // ensure full bar visually fills at 100%
+        }
         progressBars[index].setMaximum(100);
         progressBars[index].setValue(pctValue);
         progressBars[index].setString(String.format("%.1f%%", pct));
         progressBars[index].setForeground(getRankColor(rank));
+        progressBars[index].revalidate();
+        progressBars[index].repaint();
     }
     
     private void updateRankNumber(int index, int rankNumber)
@@ -1557,90 +1564,7 @@ public class DashboardPanel extends PluginPanel
     
 
     
-    private void updateProgressBar(int index, String bucketName, String rank, int division, double progress)
-    {
-        updateProgressBar(index, bucketName, rank, division, progress, -1);
-    }
-    
-    private void updateProgressBar(int index, String bucketName, String rank, int division, double progress, int rankNumber)
-    {
-        if (rank.equals("Bronze") && division == 3 && progress == 0)
-        {
-            // No data case - show like website
-            progressLabels[index].setText(bucketName + " - — (0.0%)");
-            progressBars[index].setValue(0);
-            progressBars[index].setString("0.0%");
-        }
-        else
-        {
-            String rankText = rank + (division > 0 ? " " + division : "");
-            String rankNumText = (rankNumber > 0 && index == 0) ? " - Rank " + rankNumber : ""; // Only show rank number for Overall
-            progressLabels[index].setText(bucketName + " - " + rankText + rankNumText);
-            int pctValue = (int)Math.max(0, Math.min(100, progress));
-            progressBars[index].setMaximum(100);
-            progressBars[index].setValue(pctValue);
-            progressBars[index].setString(String.format("%.1f%%", progress));
-        }
-    }
-    
-    private RankInfo calculateRankFromMMR(double mmr)
-    {
-        String[][] thresholds = {
-            {"Bronze", "3", "0"}, {"Bronze", "2", "170"}, {"Bronze", "1", "240"},
-            {"Iron", "3", "310"}, {"Iron", "2", "380"}, {"Iron", "1", "450"},
-            {"Steel", "3", "520"}, {"Steel", "2", "590"}, {"Steel", "1", "660"},
-            {"Black", "3", "730"}, {"Black", "2", "800"}, {"Black", "1", "870"},
-            {"Mithril", "3", "940"}, {"Mithril", "2", "1010"}, {"Mithril", "1", "1080"},
-            {"Adamant", "3", "1150"}, {"Adamant", "2", "1250"}, {"Adamant", "1", "1350"},
-            {"Rune", "3", "1450"}, {"Rune", "2", "1550"}, {"Rune", "1", "1650"},
-            {"Dragon", "3", "1750"}, {"Dragon", "2", "1850"}, {"Dragon", "1", "1950"},
-            {"3rd Age", "0", "2100"}
-        };
-        
-        String[] current = thresholds[0];
-        for (String[] threshold : thresholds)
-        {
-            if (mmr >= Double.parseDouble(threshold[2]))
-            {
-                current = threshold;
-            }
-            else
-            {
-                break;
-            }
-        }
-        
-        String rank = current[0];
-        int division = Integer.parseInt(current[1]);
-        double progress = 0;
-        
-        if (!rank.equals("3rd Age"))
-        {
-            int currentIndex = -1;
-            for (int i = 0; i < thresholds.length; i++)
-            {
-                if (thresholds[i][0].equals(rank) && thresholds[i][1].equals(String.valueOf(division)))
-                {
-                    currentIndex = i;
-                    break;
-                }
-            }
-            
-            if (currentIndex >= 0 && currentIndex < thresholds.length - 1)
-            {
-                double currentThreshold = Double.parseDouble(current[2]);
-                double nextThreshold = Double.parseDouble(thresholds[currentIndex + 1][2]);
-                double span = nextThreshold - currentThreshold;
-                progress = Math.max(0, Math.min(100, ((mmr - currentThreshold) / span) * 100));
-            }
-        }
-        else
-        {
-            progress = 100;
-        }
-        
-        return new RankInfo(rank, division, progress);
-    }
+    // Removed legacy progress bar helpers; UI uses setBucketBar/rankLabelAndProgressFromMMR
     
     private JPanel createRankBreakdownTable()
     {
@@ -1714,31 +1638,13 @@ public class DashboardPanel extends PluginPanel
         }
     }
     
+    @SuppressWarnings("unused")
     private void startTokenPolling()
     {
-        SwingWorker<Void, Void> worker = new SwingWorker<Void, Void>()
-        {
-            @Override
-            protected Void doInBackground() throws Exception
-            {
-                // Poll for token from callback (simulate OAuth flow completion)
-                for (int i = 0; i < 30; i++) // Poll for 30 seconds
-                {
-                    Thread.sleep(1000);
-                    
-                    // Check if callback completed (in real implementation, check callback server/file)
-                    if (checkCallbackCompletion())
-                    {
-                        SwingUtilities.invokeLater(() -> completeLogin());
-                        break;
-                    }
-                }
-                return null;
-            }
-        };
-        worker.execute();
+        // Removed (login flow updated to callback-only)
     }
     
+    @SuppressWarnings("unused")
     private boolean checkCallbackCompletion()
     {
         // Simulate callback completion after 3 seconds
@@ -1858,14 +1764,12 @@ public class DashboardPanel extends PluginPanel
         }
         final String playerName = normalizeDisplayName(input);
         if (playerName.isEmpty()) return;
-
+        
         playerNameLabel.setText(playerName);
-
+        
         // Update player name in current profile for rank lookups
-        if (currentProfile != null) {
-            currentProfile.name = playerName;
-        }
-
+        // no-op: ProfileState no longer carries fields
+        
         // Use /user API to populate panel first; match history remains as-is
         SwingWorker<Void, Void> worker = new SwingWorker<Void, Void>()
         {
@@ -2006,10 +1910,10 @@ public class DashboardPanel extends PluginPanel
             {
                 // Keep existing behavior to load matches for the player
                 loadMatchHistory(playerName);
-                if (isLoggedIn)
-                {
-                    showAdditionalStats(true);
-                }
+        if (isLoggedIn)
+        {
+            showAdditionalStats(true);
+        }
             }
         };
         worker.execute();
@@ -2051,9 +1955,9 @@ public class DashboardPanel extends PluginPanel
                     if (status >= 200 && status < 300)
                     {
                         JsonObject stats = JsonParser.parseString(response).getAsJsonObject();
-                        if (stats.has("account_hash") && !stats.get("account_hash").isJsonNull())
-                        {
-                            try { lastLoadedAccountHash = stats.get("account_hash").getAsString(); } catch (Exception ignore) {}
+                    if (stats.has("account_hash") && !stats.get("account_hash").isJsonNull())
+                    {
+                        try { lastLoadedAccountHash = stats.get("account_hash").getAsString(); } catch (Exception ignore) {}
                         }
                     }
                 }
@@ -2352,12 +2256,11 @@ public class DashboardPanel extends PluginPanel
     {
         authService.logout();
         idToken = null;
-        accessToken = null;
+        
     }
     
     private void updatePerformanceStats(int wins, int losses, int ties)
     {
-        int totalMatches = wins + losses + ties;
         int nonTieMatches = wins + losses;
         
         double winPercent = nonTieMatches > 0 ? (wins * 100.0 / nonTieMatches) : 0;
@@ -2370,6 +2273,7 @@ public class DashboardPanel extends PluginPanel
         tiesLabel.setText("Ties: " + ties);
     }
     
+    @SuppressWarnings("unused")
     private JPanel createWinRateChart()
     {
         JPanel panel = new JPanel()
@@ -2551,8 +2455,7 @@ public class DashboardPanel extends PluginPanel
         
         if (timeSinceLastRefresh < REFRESH_COOLDOWN_MS)
         {
-            long remainingSeconds = (REFRESH_COOLDOWN_MS - timeSinceLastRefresh) / 1000;
-            // Popup disabled per requirement
+            // Popup disabled per requirement; ignore remaining cooldown seconds
             return;
         }
         
@@ -2568,7 +2471,7 @@ public class DashboardPanel extends PluginPanel
         }
     }
 
-    private void setStatsBucketFromConfig(PvPLeaderboardConfig.RankBucket b)
+    public void setStatsBucketFromConfig(PvPLeaderboardConfig.RankBucket b)
     {
         if (extraStatsPanel == null || b == null) return;
         String bucket;
@@ -2598,7 +2501,7 @@ public class DashboardPanel extends PluginPanel
         }
     }
     
-    private void updateAllRankNumbers(String playerName)
+    public void updateAllRankNumbers(String playerName)
     {
         String[] buckets = {"overall", "nh", "veng", "multi", "dmm"};
         
@@ -2660,26 +2563,16 @@ public class DashboardPanel extends PluginPanel
         }
     }
     
-    private static class ProfileState
-    {
-        String name;
-        
-        ProfileState()
-        {
-            this.name = null;
-        }
-    }
+    
 
     private static class MatchesCache
     {
         final JsonArray matches;
         final String nextToken;
-        final long timestampMs;
         MatchesCache(JsonArray matches, String nextToken, long timestampMs)
         {
             this.matches = matches;
             this.nextToken = nextToken;
-            this.timestampMs = timestampMs;
         }
     }
 }

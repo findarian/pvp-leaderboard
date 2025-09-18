@@ -312,9 +312,7 @@ public class AdditionalStatsPanel extends JPanel {
     private static int asInt(JsonObject o, String k) {
         try { return o.has(k) && !o.get(k).isJsonNull() ? o.get(k).getAsInt() : 0; } catch (Exception e) { return 0; }
     }
-    private static double safeDouble(JsonObject o, String k) {
-        try { return o.has(k) && !o.get(k).isJsonNull() ? o.get(k).getAsDouble() : 0.0; } catch (Exception e) { return 0.0; }
-    }
+    
 
     private static String rankLabel(String rank, int division) {
         if (rank == null || rank.isEmpty()) return "";
@@ -346,15 +344,7 @@ public class AdditionalStatsPanel extends JPanel {
             {"Dragon","3","1750"},{"Dragon","2","1850"},{"Dragon","1","1950"},
             {"3rd Age","0","2100"}
     };
-    private static double tierValueFromMMR(double mmr) {
-        String[] curr = THRESHOLDS[0];
-        for (String[] t : THRESHOLDS) { if (mmr >= Double.parseDouble(t[2])) curr = t; else break; }
-        if ("3rd Age".equals(curr[0])) return 100.0;
-        int idx = indexOfThreshold(curr);
-        String[] next = (idx >= 0 && idx < THRESHOLDS.length - 1) ? THRESHOLDS[idx + 1] : curr;
-        double lo = Double.parseDouble(curr[2]), hi = Double.parseDouble(next[2]);
-        return Math.max(0, Math.min(100, (mmr - lo) / Math.max(1, (hi - lo)) * 100.0));
-    }
+    
     private static int indexOfThreshold(String[] t) {
         for (int i = 0; i < THRESHOLDS.length; i++) {
             if (Arrays.equals(THRESHOLDS[i], t)) return i;
@@ -370,14 +360,14 @@ public class AdditionalStatsPanel extends JPanel {
             g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
             int w = getWidth(), h = getHeight();
             int top = 20, bottom = 20; int innerH = Math.max(1, h - top - bottom);
-            String[] order = {"Bronze","Iron","Steel","Black","Mithril","Adamant","Rune","Dragon","3rd Age"};
+            // draw labels for each tier/division step
             g2.setColor(new Color(120,120,120));
             int steps = 24;
             for (int gi = 0; gi <= steps; gi++) {
                 double frac = gi / (double) steps;
                 int y = top + innerH - (int) Math.round(frac * innerH);
                 g2.drawLine(0, y, w, y);
-                int base = gi / 3; int off = gi % 3; String baseRank = order[base];
+                int base = gi / 3; int off = gi % 3; String baseRank = THRESHOLDS[Math.min(base * 3, THRESHOLDS.length - 1)][0];
                 String label = baseRank.equals("3rd Age") ? baseRank : baseRank + " " + (3 - off);
                 g2.drawString(label, 2, y + 5);
             }
@@ -397,7 +387,6 @@ public class AdditionalStatsPanel extends JPanel {
             int innerW = Math.max(1, w - left - right);
             int innerH = Math.max(1, h - top - bottom);
 
-            String[] order = {"Bronze","Iron","Steel","Black","Mithril","Adamant","Rune","Dragon","3rd Age"};
             g2.setColor(new Color(120,120,120));
             int steps = 24;
             for (int gi = 0; gi <= steps; gi++) {
@@ -423,47 +412,5 @@ public class AdditionalStatsPanel extends JPanel {
         }
     }
 
-    // Layout that wraps components to new rows and reports correct preferred size for BoxLayout parents
-    private static class WrapFlowLayout extends FlowLayout {
-        public WrapFlowLayout(int align, int hgap, int vgap) { super(align, hgap, vgap); }
-        @Override public Dimension preferredLayoutSize(Container target) { return layoutSize(target, true); }
-        @Override public Dimension minimumLayoutSize(Container target) { Dimension d = layoutSize(target, false); d.width -= (getHgap() + 1); return d; }
-
-        private Dimension layoutSize(Container target, boolean preferred) {
-            synchronized (target.getTreeLock()) {
-                int maxWidth = target.getParent() == null ? target.getWidth() : target.getParent().getWidth();
-                if (maxWidth <= 0) maxWidth = Integer.MAX_VALUE; // during first pass, no width yet
-
-                Insets insets = target.getInsets();
-                int hgap = getHgap();
-                int vgap = getVgap();
-                int maxOnLine = maxWidth - (insets.left + insets.right + hgap * 2);
-
-                int x = 0;
-                int y = insets.top + vgap;
-                int rowHeight = 0;
-                int requiredWidth = 0;
-
-                for (Component m : target.getComponents()) {
-                    if (!m.isVisible()) continue;
-                    Dimension d = preferred ? m.getPreferredSize() : m.getMinimumSize();
-                    if (x == 0 || x + d.width <= maxOnLine) {
-                        if (x > 0) x += hgap;
-                        x += d.width;
-                        rowHeight = Math.max(rowHeight, d.height);
-                    } else {
-                        // new row
-                        y += rowHeight + vgap;
-                        requiredWidth = Math.max(requiredWidth, x);
-                        x = d.width;
-                        rowHeight = d.height;
-                    }
-                }
-
-                y += rowHeight + insets.bottom + vgap;
-                requiredWidth = Math.max(requiredWidth, x) + insets.left + insets.right + hgap * 2;
-                return new Dimension(requiredWidth, y);
-            }
-        }
-    }
+    
 }

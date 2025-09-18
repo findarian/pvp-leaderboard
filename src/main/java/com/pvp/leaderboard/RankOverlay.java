@@ -21,6 +21,7 @@ import java.util.LinkedHashMap;
 import java.util.concurrent.ConcurrentHashMap;
 
 @Slf4j
+@SuppressWarnings("deprecation")
 public class RankOverlay extends Overlay
 {
     private final Client client;
@@ -36,7 +37,7 @@ public class RankOverlay extends Overlay
     private final Map<String, BufferedImage> rankIconCache = new ConcurrentHashMap<>();
     private String lastBucketKey = null;
     private long lastShardNotReadyLogMs = 0L;
-    private long lastBucketNotReadyLogMs = 0L;
+    
     private long lastScheduleMs = 0L;
     private volatile boolean selfRankAttempted = false;
     private volatile long nextSelfRankAllowedAtMs = 0L;
@@ -217,9 +218,17 @@ public class RankOverlay extends Overlay
             attemptedLookup.clear();
             attemptedAtMs.clear();
             lastBucketKey = currentBucket;
-            // Allow self lookup again immediately on bucket change
+            // Allow self lookup again immediately on bucket change and clear cached overlay values for self
             selfRankAttempted = false;
             nextSelfRankAllowedAtMs = 0L;
+            try {
+                if (client != null && client.getLocalPlayer() != null && client.getLocalPlayer().getName() != null)
+                {
+                    String self = client.getLocalPlayer().getName();
+                    displayedRanks.remove(self);
+                    try { nameRankCache.remove(cacheKeyFor(self)); } catch (Exception ignore) {}
+                }
+            } catch (Exception ignore) {}
         }
 
         // Always prioritize fetching the local player's rank first, but only once until explicitly refreshed
@@ -266,7 +275,7 @@ public class RankOverlay extends Overlay
         java.util.HashSet<String> present = new java.util.HashSet<>();
         for (Player player : client.getPlayers())
         {
-            if (player.getName() == null)
+            if (player == null || player.getName() == null)
             {
                 continue;
             }
@@ -390,28 +399,10 @@ public class RankOverlay extends Overlay
                 }
                 else
                 {
-                    int centerX;
-                    if (nameLocation != null)
-                    {
-                        int nameWidth = fm.stringWidth(playerName);
-                        centerX = nameLocation.getX() + Math.max(0, nameWidth) / 2 + offsetX + config.rankIconOffsetXOthers();
-                        x = centerX - iconSize / 2;
-                        y = nameLocation.getY() - fm.getAscent() - iconSize - 2 + offsetY + config.rankIconOffsetYOthers();
-                    }
-                    else
-                    {
-                        Point headLoc = player.getCanvasTextLocation(graphics, "", player.getLogicalHeight() + 40);
-                        if (headLoc != null)
-                        {
-                            x = headLoc.getX() - iconSize / 2 + offsetX + config.rankIconOffsetXOthers();
-                            y = headLoc.getY() - iconSize - 2 + offsetY + config.rankIconOffsetYOthers();
-                        }
-                        else
-                        {
-                            x = nameLocation.getX() - iconSize / 2 + offsetX + config.rankIconOffsetXOthers();
-                            y = nameLocation.getY() - fm.getAscent() - iconSize - 2 + offsetY + config.rankIconOffsetYOthers();
-                        }
-                    }
+                    int nameWidth = fm.stringWidth(playerName);
+                    int centerX = nameLocation.getX() + Math.max(0, nameWidth) / 2 + offsetX + config.rankIconOffsetXOthers();
+                    x = centerX - iconSize / 2;
+                    y = nameLocation.getY() - fm.getAscent() - iconSize - 2 + offsetY + config.rankIconOffsetYOthers();
                 }
                 PvPLeaderboardConfig.RankDisplayMode mode = config.rankDisplayMode();
                 if (mode == PvPLeaderboardConfig.RankDisplayMode.RANK_NUMBER)
@@ -501,18 +492,7 @@ public class RankOverlay extends Overlay
             graphics.drawImage(icon, x, y, size, size, null);
             return;
         }
-        // Unranked icon disabled (feature removed); show nothing and fall back to colored circle text abbrev
-        Color rankColor = getRankColor(rankName);
-        graphics.setColor(rankColor);
-        graphics.fillOval(x, y, size, size);
-        graphics.setColor(Color.WHITE);
-        graphics.setFont(new Font(Font.SANS_SERIF, Font.BOLD, Math.max(10, size - 4)));
-        FontMetrics fm = graphics.getFontMetrics();
-        String displayText = getRankAbbreviation(rankName);
-        int textWidth = fm.stringWidth(displayText);
-        int textX = x + (size - textWidth) / 2;
-        int textY = y + (size + fm.getAscent() - fm.getDescent()) / 2 - 1;
-        graphics.drawString(displayText, textX, textY);
+        // No sprite found; skip rendering to avoid extra overdraw
         return;
     }
 
@@ -677,20 +657,5 @@ public class RankOverlay extends Overlay
         }
     }
 
-    private String getRankAbbreviation(String rank)
-    {
-        switch (rank)
-        {
-            case "Bronze": return "Br";
-            case "Iron": return "Ir";
-            case "Steel": return "St";
-            case "Black": return "Bl";
-            case "Mithril": return "Mi";
-            case "Adamant": return "Ad";
-            case "Rune": return "Ru";
-            case "Dragon": return "Dr";
-            case "3rd Age": return "3A";
-            default: return "?";
-        }
-    }
+    // Removed unused abbreviation helper
 }

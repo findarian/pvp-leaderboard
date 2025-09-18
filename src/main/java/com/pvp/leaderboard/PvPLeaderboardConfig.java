@@ -31,6 +31,16 @@ public interface PvPLeaderboardConfig extends Config
 		return true;
 	}
 
+	@ConfigItem(
+		keyName = "enablePvpLookupMenu",
+		name = "Enable 'pvp lookup' right-click",
+		description = "Adds the 'pvp lookup' option to player right-click menu"
+	)
+	default boolean enablePvpLookupMenu()
+	{
+		return true; // ON by default
+	}
+
     enum RankDisplayMode { TEXT { public String toString(){return "Text";} }, RANK_NUMBER { public String toString(){return "Rank";} }, ICON { public String toString(){return "Icon";} } }
 
 	@ConfigItem(

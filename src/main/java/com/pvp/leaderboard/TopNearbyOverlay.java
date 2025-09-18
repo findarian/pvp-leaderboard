@@ -15,6 +15,7 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 
+@SuppressWarnings("deprecation")
 public class TopNearbyOverlay extends Overlay
 {
     private final Client client;
@@ -53,11 +54,13 @@ public class TopNearbyOverlay extends Overlay
         List<PlayerEntry> entries = new ArrayList<>();
         for (Player p : client.getPlayers())
         {
-            if (p == null || p.getName() == null) continue;
-            if (selfName != null && p.getName().equals(selfName)) continue;
-            String rank = plugin.getDisplayedRankFor(p.getName());
+            if (p == null) continue;
+            String pname = p.getName();
+            if (pname == null) continue;
+            if (selfName != null && pname.equals(selfName)) continue;
+            String rank = plugin.getDisplayedRankFor(pname);
             if (rank == null) continue;
-            entries.add(new PlayerEntry(p.getName(), rank, rankOrder(rank)));
+            entries.add(new PlayerEntry(pname, rank, rankOrder(rank)));
         }
 
         // Top N
