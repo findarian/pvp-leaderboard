@@ -141,21 +141,21 @@ public interface PvPLeaderboardConfig extends Config
 		return true;
 	}
 
-	@ConfigItem(
-		keyName = "showTopNearbyOverlay",
-		name = "Ranked players nearby (Top)",
-		description = "Show a floating box with you and the top 10 nearby ranked players"
-	)
+    @ConfigItem(
+        keyName = "showTopNearbyOverlay",
+        name = "Best players nearby",
+        description = "Show a floating box with you and the top 10 nearby ranked players"
+    )
 	default boolean showTopNearbyOverlay()
 	{
 		return false;
 	}
 
-	@ConfigItem(
-		keyName = "showBottomNearbyOverlay",
-		name = "Ranked players nearby (Bottom)",
-		description = "Show a floating box with the bottom 10 nearby ranked players"
-	)
+    @ConfigItem(
+        keyName = "showBottomNearbyOverlay",
+        name = "Worst players nearby",
+        description = "Show a floating box with the bottom 10 nearby ranked players"
+    )
 	default boolean showBottomNearbyOverlay()
 	{
 		return false;

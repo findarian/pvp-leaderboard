@@ -46,7 +46,7 @@ public class TopNearbyOverlay extends Overlay
         panelComponent.getChildren().clear();
 
         panelComponent.getChildren().add(TitleComponent.builder()
-            .text("Top Players Nearby")
+            .text("Best Players Nearby")
             .color(Color.YELLOW)
             .build());
         String selfName = client.getLocalPlayer() != null ? client.getLocalPlayer().getName() : null;

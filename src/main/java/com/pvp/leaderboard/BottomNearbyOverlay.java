@@ -46,7 +46,7 @@ public class BottomNearbyOverlay extends Overlay
         panelComponent.getChildren().clear();
 
         panelComponent.getChildren().add(TitleComponent.builder()
-            .text("Bottom Players Nearby")
+            .text("Worst Players Nearby")
             .color(Color.YELLOW)
             .build());
         String selfName = client.getLocalPlayer() != null ? client.getLocalPlayer().getName() : null;
