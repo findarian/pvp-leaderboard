@@ -174,6 +174,21 @@ private volatile boolean shardReady = false;
             dashboardPanel.lookupPlayerFromRightClick(playerName);
         }
 
+        // Show rank above the player's head via API (fallback path, bypass sharding for this user)
+        try {
+            if (rankOverlay != null && dashboardPanel != null && playerName != null && !playerName.isEmpty())
+            {
+                String bucket = bucketKey(config.rankBucket());
+                java.util.concurrent.CompletableFuture.supplyAsync(() -> {
+                    try { return dashboardPanel.fetchTierFromApi(playerName, bucket); } catch (Exception e) { return null; }
+                }).thenAccept(tier -> {
+                    if (tier != null && !tier.isEmpty()) {
+                        rankOverlay.setRankFromApi(playerName, tier);
+                    }
+                });
+            }
+        } catch (Exception ignore) {}
+
         // Force overlay to fetch and display the player's rank via shards
         try {
             if (rankOverlay != null && playerName != null && !playerName.isEmpty())
@@ -437,6 +452,21 @@ private volatile boolean shardReady = false;
                 if (tier != null && !tier.isEmpty()) return tier;
                 return "Rank " + rankIndex;
             }
+
+            // Fallback for self only when shard misses: derive tier from API
+            try
+            {
+                if (client != null && client.getLocalPlayer() != null && client.getLocalPlayer().getName() != null)
+                {
+                    String self = client.getLocalPlayer().getName();
+                    if (self.equals(playerName) && dashboardPanel != null)
+                    {
+                        String tier = dashboardPanel.fetchSelfTierFromApi(playerName, bucket);
+                        if (tier != null && !tier.isEmpty()) return tier;
+                    }
+                }
+            }
+            catch (Exception ignore) {}
         }
         catch (Exception ignore) {}
         return null;

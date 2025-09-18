@@ -21,6 +21,16 @@ public interface PvPLeaderboardConfig extends Config
 		return true;
 	}
 
+	@ConfigItem(
+		keyName = "showOtherRanks",
+		name = "Show other player ranks",
+		description = "Display ranks above other players"
+	)
+	default boolean showOtherRanks()
+	{
+		return true;
+	}
+
     enum RankDisplayMode { TEXT { public String toString(){return "Text";} }, RANK_NUMBER { public String toString(){return "Rank";} }, ICON { public String toString(){return "Icon";} } }
 
 	@ConfigItem(

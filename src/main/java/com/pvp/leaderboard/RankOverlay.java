@@ -136,6 +136,18 @@ public class RankOverlay extends Overlay
         catch (Exception ignore) {}
     }
 
+    public void setRankFromApi(String playerName, String rank)
+    {
+        if (playerName == null || playerName.trim().isEmpty()) return;
+        if (rank == null || rank.trim().isEmpty()) return;
+        try
+        {
+            displayedRanks.put(playerName, rank);
+            try { nameRankCache.put(cacheKeyFor(playerName), new CacheEntry(rank, System.currentTimeMillis())); } catch (Exception ignore) {}
+        }
+        catch (Exception ignore) {}
+    }
+
     public java.awt.image.BufferedImage resolveRankIcon(String fullRank)
     {
         if (fullRank == null || fullRank.isEmpty())
@@ -252,9 +264,17 @@ public class RankOverlay extends Overlay
         java.util.HashSet<String> present = new java.util.HashSet<>();
         for (Player player : client.getPlayers())
         {
-            if ((!config.showOwnRank() && player == client.getLocalPlayer()) || player.getName() == null)
+            if (player.getName() == null)
             {
                 continue;
+            }
+            if (player != client.getLocalPlayer() && !config.showOtherRanks())
+            {
+                continue; // skip others when disabled
+            }
+            if (player == client.getLocalPlayer() && !config.showOwnRank())
+            {
+                continue; // skip self when disabled
             }
 
             String playerName = player.getName();

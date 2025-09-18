@@ -88,6 +88,9 @@ public class DashboardPanel extends PluginPanel
     private final ConcurrentHashMap<String, Long> shardThrottle = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, Long> shardFailUntil = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, Object> shardLocks = new ConcurrentHashMap<>();
+    // Negative cache for missing players (avoid repeated network/errors)
+    private final ConcurrentHashMap<String, Long> missingPlayerUntilMs = new ConcurrentHashMap<>();
+    private static final long MISSING_PLAYER_BACKOFF_MS = 60L * 60L * 1000L; // 1 hour
     private static final long SHARD_FAIL_BACKOFF_MS = 60L * 60L * 1000L; // 1 hour
     private static final long SHARD_CACHE_EXPIRY_MS = 60L * 60L * 1000L;
     // Global fetch throttle to reduce bursty lookups in populated areas
@@ -954,9 +957,7 @@ public class DashboardPanel extends PluginPanel
             String response = HttpUtil.readResponseBody(conn);
             if (status < 200 || status >= 300)
             {
-                SwingUtilities.invokeLater(() ->
-                    JOptionPane.showMessageDialog(DashboardPanel.this, "Failed to load player: " + HttpUtil.toUserMessage(status, response), "Error", JOptionPane.ERROR_MESSAGE)
-                );
+                // Suppress popup after matches if the player isn't on the leaderboard
                 return;
             }
 
@@ -1158,6 +1159,90 @@ public class DashboardPanel extends PluginPanel
         return sr != null ? sr.tier : null;
     }
 
+    // Fallback for self: fetch tier via API when shard rank is missing
+    public String fetchSelfTierFromApi(String playerName, String bucket)
+    {
+        try
+        {
+            String canonBucket = bucket == null ? "overall" : bucket.toLowerCase();
+            String pid = normalizePlayerId(playerName);
+            if (pid == null || pid.isEmpty()) return null;
+            if ("overall".equals(canonBucket))
+            {
+                String apiUrl = "https://kekh0x6kfk.execute-api.us-east-1.amazonaws.com/prod/user?player_id=" + URLEncoder.encode(pid, "UTF-8");
+                URL url = new URL(apiUrl);
+                HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+                conn.setRequestMethod("GET");
+                conn.setConnectTimeout(5000);
+                conn.setReadTimeout(8000);
+                int status = conn.getResponseCode();
+                String response = HttpUtil.readResponseBody(conn);
+                if (status >= 200 && status < 300 && response != null && !response.isEmpty())
+                {
+                    JsonObject stats = JsonParser.parseString(response).getAsJsonObject();
+                    if (stats.has("mmr") && !stats.get("mmr").isJsonNull())
+                    {
+                        double mmr = stats.get("mmr").getAsDouble();
+                        RankInfo ri = rankLabelAndProgressFromMMR(mmr);
+                        return ri != null ? (ri.rank + (ri.division > 0 ? " " + ri.division : "")) : null;
+                    }
+                }
+                return null;
+            }
+            else
+            {
+                // Pull recent matches and infer tier for the requested bucket from latest match
+                String apiUrl = "https://kekh0x6kfk.execute-api.us-east-1.amazonaws.com/prod/matches?player_id=" + URLEncoder.encode(pid, "UTF-8") + "&limit=50";
+                URL url = new URL(apiUrl);
+                HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+                conn.setRequestMethod("GET");
+                conn.setConnectTimeout(5000);
+                conn.setReadTimeout(8000);
+                int status = conn.getResponseCode();
+                String response = HttpUtil.readResponseBody(conn);
+                if (status < 200 || status >= 300 || response == null || response.isEmpty()) return null;
+                JsonObject obj = JsonParser.parseString(response).getAsJsonObject();
+                JsonArray matches = obj.has("matches") ? obj.getAsJsonArray("matches") : null;
+                if (matches == null) return null;
+                JsonObject latest = null;
+                for (int i = 0; i < matches.size(); i++)
+                {
+                    JsonObject m = matches.get(i).getAsJsonObject();
+                    String b = m.has("bucket") && !m.get("bucket").isJsonNull() ? m.get("bucket").getAsString().toLowerCase() : "";
+                    if (!canonBucket.equals(b)) continue;
+                    if (latest == null || (m.has("when") && latest.has("when") && m.get("when").getAsLong() > latest.get("when").getAsLong()))
+                    {
+                        latest = m;
+                    }
+                }
+                if (latest == null) return null;
+                if (latest.has("player_mmr") && !latest.get("player_mmr").isJsonNull())
+                {
+                    double mmr = latest.get("player_mmr").getAsDouble();
+                    RankInfo ri = rankLabelAndProgressFromMMR(mmr);
+                    return ri != null ? (ri.rank + (ri.division > 0 ? " " + ri.division : "")) : null;
+                }
+                if (latest.has("player_rank") && !latest.get("player_rank").isJsonNull())
+                {
+                    String rank = latest.get("player_rank").getAsString();
+                    int div = latest.has("player_division") && !latest.get("player_division").isJsonNull() ? latest.get("player_division").getAsInt() : 0;
+                    return rank + (div > 0 ? " " + div : "");
+                }
+                return null;
+            }
+        }
+        catch (Exception ignore)
+        {
+            return null;
+        }
+    }
+
+    // Alias for general use (not self-only)
+    public String fetchTierFromApi(String playerName, String bucket)
+    {
+        return fetchSelfTierFromApi(playerName, bucket);
+    }
+
     private String lastLoadedAccountHash = null;
 
     private ShardRank getRankTupleFromShard(String playerName, String accountHash, String bucket)
@@ -1165,6 +1250,17 @@ public class DashboardPanel extends PluginPanel
         long t0 = System.nanoTime();
         try
         {
+            // Negative cache check: suppress lookups if this player recently failed
+            try
+            {
+                String missKey = (bucket == null ? "overall" : bucket.toLowerCase()) + "|" + canonName(playerName);
+                Long until = missingPlayerUntilMs.get(missKey);
+                if (until != null && System.currentTimeMillis() < until)
+                {
+                    return null;
+                }
+            }
+            catch (Exception ignore) {}
             String canon = canonName(playerName);
             boolean useAccount = accountHash != null && !accountHash.isEmpty();
             String key = useAccount ? accountHash : canon;
@@ -1245,6 +1341,10 @@ public class DashboardPanel extends PluginPanel
                 ShardRank out = extractShardRank(obj, useAccount, accountHash, canon);
                 long dtMs = (System.nanoTime() - t0) / 1_000_000L;
                 try { System.out.println("[ShardFetch] url=" + urlStr + " status=" + status + " dtMs=" + dtMs + " found=" + (out != null)); } catch (Exception ignore) {}
+                if (out == null)
+                {
+                    try { missingPlayerUntilMs.put((dir + "|" + canon), System.currentTimeMillis() + MISSING_PLAYER_BACKOFF_MS); } catch (Exception ignore) {}
+                }
                 return out;
             }
         }
