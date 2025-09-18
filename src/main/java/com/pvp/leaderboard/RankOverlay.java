@@ -26,7 +26,6 @@ public class RankOverlay extends Overlay
     private final Client client;
     private final PvPLeaderboardConfig config;
     private final PvPLeaderboardPlugin plugin;
-    private final RankCacheService rankCache;
     private final ItemManager itemManager;
 
     private final ConcurrentHashMap<String, String> displayedRanks = new ConcurrentHashMap<>();
@@ -42,6 +41,7 @@ public class RankOverlay extends Overlay
     private volatile boolean selfRankAttempted = false;
     private volatile long nextSelfRankAllowedAtMs = 0L;
     private static final long RANK_CACHE_TTL_MS = 60L * 60L * 1000L;
+    private static final long NAME_RETRY_BACKOFF_MS = 60L * 60L * 1000L;
     private final Map<String, CacheEntry> nameRankCache = Collections.synchronizedMap(
         new LinkedHashMap<String, CacheEntry>(512, 0.75f, true)
         {
@@ -69,7 +69,9 @@ public class RankOverlay extends Overlay
         {
             if (client != null && client.getLocalPlayer() != null && client.getLocalPlayer().getName() != null)
             {
-                displayedRanks.remove(client.getLocalPlayer().getName());
+                String self = client.getLocalPlayer().getName();
+                displayedRanks.remove(self);
+                try { nameRankCache.remove(cacheKeyFor(self)); } catch (Exception ignore) {}
             }
         }
         catch (Exception ignore) {}
@@ -177,15 +179,15 @@ public class RankOverlay extends Overlay
     private java.awt.Point dragStart = null;
 
     @Inject
-    public RankOverlay(Client client, PvPLeaderboardConfig config, RankCacheService rankCache, ItemManager itemManager, PvPLeaderboardPlugin plugin)
+    public RankOverlay(Client client, PvPLeaderboardConfig config, ItemManager itemManager, PvPLeaderboardPlugin plugin)
     {
         this.client = client;
         this.config = config;
-        this.rankCache = rankCache;
         this.itemManager = itemManager;
         this.plugin = plugin;
         setPosition(OverlayPosition.DYNAMIC);
-        setLayer(OverlayLayer.ABOVE_WIDGETS);
+        // Draw over the 3D scene but under widgets/menus so menus cover the rank text
+        setLayer(OverlayLayer.ABOVE_SCENE);
         setPriority(OverlayPriority.HIGHEST);
     }
 
@@ -297,14 +299,15 @@ public class RankOverlay extends Overlay
             {
                 Long firstAttempt = attemptedAtMs.get(playerName);
                 long now = System.currentTimeMillis();
-                if (firstAttempt != null && now - firstAttempt < 60_000L) {
+                if (firstAttempt != null && now - firstAttempt < NAME_RETRY_BACKOFF_MS) {
                     continue; // skip re-attempts for 60s
                 }
-                if (attemptedLookup.putIfAbsent(playerName, Boolean.TRUE) != null) {
-                    attemptedAtMs.putIfAbsent(playerName, firstAttempt != null ? firstAttempt : now);
+                // Skip scheduling if name is within 1h cache window of a previous miss
+                // This mirrors DashboardPanel's negative cache but avoids any network
+                if (firstAttempt != null && now - firstAttempt < NAME_RETRY_BACKOFF_MS)
+                {
                     continue;
                 }
-                attemptedAtMs.put(playerName, now);
                 // Limit concurrent lookups based on throttle level
                 int level = config != null ? Math.max(0, Math.min(10, config.lookupThrottleLevel())) : 0;
                 int maxConcurrent;
@@ -327,7 +330,13 @@ public class RankOverlay extends Overlay
 
                 if (fetchInFlight.putIfAbsent(playerName, Boolean.TRUE) == null)
                 {
-                    log.info("[Overlay] fetch once for player={} bucket={}", playerName, bucketKey(config.rankBucket()));
+                    attemptedLookup.put(playerName, Boolean.TRUE);
+                    attemptedAtMs.put(playerName, now);
+                    // Only log once per name per bucket to avoid spam in crowded areas
+                    if (loggedFetch.putIfAbsent(playerName, Boolean.TRUE) == null)
+                    {
+                        log.info("[Overlay] fetch once for player={} bucket={}", playerName, bucketKey(config.rankBucket()));
+                    }
                     java.util.concurrent.CompletableFuture.supplyAsync(() -> {
                         try {
                             return plugin != null ? plugin.resolvePlayerRank(playerName, bucketKey(config.rankBucket())) : null;

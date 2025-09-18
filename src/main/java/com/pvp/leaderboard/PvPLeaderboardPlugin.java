@@ -23,12 +23,12 @@ import net.runelite.client.util.Text;
 import net.runelite.client.ui.overlay.OverlayManager;
 import net.runelite.client.util.ImageUtil;
 import net.runelite.client.game.SpriteManager;
-import net.runelite.api.SpriteID;
 import java.awt.image.BufferedImage;
 import javax.swing.SwingUtilities;
 import net.runelite.client.menus.MenuManager;
 import java.util.concurrent.TimeUnit;
-import javax.swing.*;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
 
 @Slf4j
 @PluginDescriptor(
@@ -54,8 +54,6 @@ public class PvPLeaderboardPlugin extends Plugin
 	@Inject
 	private MenuManager menuManager;
 
-	@Inject
-	private RankCacheService rankCacheService;
 
 	@Inject
 	private RankOverlay rankOverlay;
@@ -85,6 +83,10 @@ public class PvPLeaderboardPlugin extends Plugin
 	private long lastCombatTime = 0;
 	private MatchResultService matchResultService = new MatchResultService();
 	private static final long FIGHT_TIMEOUT_MS = 30000; // 30 seconds
+    private ScheduledExecutorService fightScheduler;
+    private volatile long selfDeathMs = 0L;
+    private volatile long opponentDeathMs = 0L;
+    private volatile boolean fightFinalized = false;
 private volatile boolean shardReady = false;
 
 	@Override
@@ -92,6 +94,15 @@ private volatile boolean shardReady = false;
 	{
         shardReady = false;
         dashboardPanel = new DashboardPanel(config, configManager, this);
+
+        // Initialize scheduler for fight event checks (double-KO detection)
+        try {
+            fightScheduler = Executors.newSingleThreadScheduledExecutor(r -> {
+                Thread t = new Thread(r, "pvp-fight-events");
+                t.setDaemon(true);
+                return t;
+            });
+        } catch (Exception ignore) {}
 
 		// Add right-click player menu item once on startup
 		menuManager.addPlayerMenuItem("pvp lookup");
@@ -140,6 +151,7 @@ private volatile boolean shardReady = false;
 		overlayManager.remove(rankOverlay);
         overlayManager.remove(topNearbyOverlay);
         overlayManager.remove(bottomNearbyOverlay);
+        try { if (fightScheduler != null) { fightScheduler.shutdownNow(); } } catch (Exception ignore) {}
 		log.info("PvP Leaderboard stopped!");
 	}
     @Subscribe
@@ -168,6 +180,8 @@ private volatile boolean shardReady = false;
         String cleaned = Text.removeTags(target);
         // Remove trailing (level-xxx)
         cleaned = cleaned.replaceAll("\\s*\\(level-\\d+\\)$", "");
+        // Remove any parenthetical annotation like (Skill 1234)
+        cleaned = cleaned.replaceAll("\\([^)]*\\)", "");
         String playerName = Text.toJagexName(cleaned).replace('\u00A0',' ').trim().replaceAll("\\s+"," ");
 
         if (dashboardPanel != null) {
@@ -219,11 +233,22 @@ private volatile boolean shardReady = false;
 				{
 					String self = client.getLocalPlayer().getName();
 					dashboardPanel.lookupPlayerFromRightClick(self);
+                    // Preload account hash linkage for self so overall lookups use account shard immediately
+                    try { dashboardPanel.preloadSelfRankNumbers(self); } catch (Exception ignore) {}
                     // Ensure overlay fetches self rank immediately for the currently selected bucket
                     try { if (rankOverlay != null) rankOverlay.scheduleSelfRankRefresh(0L); } catch (Exception ignore) {}
 				}
 			}
 			catch (Exception ignore) {}
+		}
+        else if (gameStateChanged.getGameState() == GameState.LOGIN_SCREEN)
+		{
+			// If combat was in progress, immediately treat as tie on logout
+			try {
+				if (inFight) {
+					endFightTimeout();
+				}
+			} catch (Exception ignore) {}
 		}
 		else if (gameStateChanged.getGameState() == GameState.HOPPING || gameStateChanged.getGameState() == GameState.LOADING)
 		{
@@ -265,8 +290,8 @@ private volatile boolean shardReady = false;
 				// Only proceed if we have a valid player opponent
 				if (opponentName != null && isPlayerOpponent(opponentName))
 				{
-					// Update last combat time
-					lastCombatTime = System.currentTimeMillis();
+                    // Update last combat time
+                    lastCombatTime = System.currentTimeMillis();
 					
 					if (!inFight)
 					{
@@ -281,12 +306,7 @@ private volatile boolean shardReady = false;
 			}
 		}
 		
-		// Check for fight timeout
-		if (inFight && System.currentTimeMillis() - lastCombatTime > FIGHT_TIMEOUT_MS)
-		{
-			log.info("Fight timed out after 30 seconds of no combat");
-			endFightTimeout();
-		}
+		// Fight timeout is handled by scheduled checker
 	}
 
 	@Subscribe
@@ -297,22 +317,24 @@ private volatile boolean shardReady = false;
 			Player player = (Player) actorDeath.getActor();
 			Player localPlayer = client.getLocalPlayer();
 			
-			if (player == localPlayer)
-			{
-				// Find who actually killed the local player
-				String actualKiller = findActualKiller();
-				if (actualKiller != null)
-				{
-					opponent = actualKiller;
-				}
-				// Local player died = loss
-				endFight("loss");
-			}
-			else if (opponent != null && player.getName().equals(opponent))
-			{
-				// Opponent died = win
-				endFight("win");
-			}
+            if (player == localPlayer)
+            {
+                // Local player died
+                selfDeathMs = System.currentTimeMillis();
+                // Find who actually killed the local player
+                String actualKiller = findActualKiller();
+                if (actualKiller != null)
+                {
+                    opponent = actualKiller;
+                }
+                scheduleDoubleKoCheck("loss");
+            }
+            else if (opponent != null && player.getName().equals(opponent))
+            {
+                // Opponent died
+                opponentDeathMs = System.currentTimeMillis();
+                scheduleDoubleKoCheck("win");
+            }
 		}
 	}
 
@@ -324,7 +346,7 @@ private volatile boolean shardReady = false;
 		fightStartSpellbook = client.getVarbitValue(Varbits.SPELLBOOK);
 		fightStartTime = System.currentTimeMillis() / 1000;
 		lastCombatTime = System.currentTimeMillis();
-		log.info("Fight started against: " + opponent + ", Multi: " + wasInMulti + ", Spellbook: " + fightStartSpellbook);
+        log.info("Fight started against: " + opponent + ", Multi: " + wasInMulti + ", Spellbook: " + fightStartSpellbook);
 	}
 
 	public String getCurrentOpponent()
@@ -337,6 +359,32 @@ private volatile boolean shardReady = false;
 		if (name == null) return null;
 		return rankOverlay != null ? rankOverlay.getCachedRankFor(name) : null;
 	}
+
+    public void refreshSelfRankNow()
+    {
+        try
+        {
+            if (rankOverlay != null)
+            {
+                rankOverlay.scheduleSelfRankRefresh(0L);
+            }
+            if (dashboardPanel != null && client != null && client.getLocalPlayer() != null)
+            {
+                final String selfName = client.getLocalPlayer().getName();
+                final String currentBucket = bucketKey(config.rankBucket());
+                // Kick API fast-follow to update overlay immediately
+                java.util.concurrent.CompletableFuture.supplyAsync(() -> {
+                    try { return dashboardPanel.fetchSelfTierFromApi(selfName, currentBucket); } catch (Exception e) { return null; }
+                }).thenAccept(tier -> {
+                    if (tier != null && !tier.isEmpty() && rankOverlay != null) {
+                        rankOverlay.setRankFromApi(selfName, tier);
+                    }
+                });
+                try { dashboardPanel.preloadSelfRankNumbers(selfName); } catch (Exception ignore) {}
+            }
+        }
+        catch (Exception ignore) {}
+    }
 
 	private void endFight(String result)
 	{
@@ -369,11 +417,26 @@ private volatile boolean shardReady = false;
 			
             // Submit match result to API and optimistically update UI on success
             submitMatchResult(result, fightEndTime);
-            // After successful submission, schedule a delayed refresh of self rank in overlay
+            // After submission, immediately refresh self rank and push API tier as a fast-follow
             try {
                 if (rankOverlay != null) {
-                    // 15s delay before re-fetching player's rank
-                    rankOverlay.scheduleSelfRankRefresh(15_000L);
+                    rankOverlay.scheduleSelfRankRefresh(0L);
+                }
+            } catch (Exception ignore) {}
+            try {
+                if (dashboardPanel != null && client != null && client.getLocalPlayer() != null)
+                {
+                    final String selfName = client.getLocalPlayer().getName();
+                    final String currentBucket = bucketKey(config.rankBucket());
+                    java.util.concurrent.CompletableFuture.supplyAsync(() -> {
+                        try { return dashboardPanel.fetchSelfTierFromApi(selfName, currentBucket); } catch (Exception e) { return null; }
+                    }).thenAccept(tier -> {
+                        if (tier != null && !tier.isEmpty() && rankOverlay != null) {
+                            rankOverlay.setRankFromApi(selfName, tier);
+                        }
+                    });
+                    // Also refresh side panel rank numbers/account linkage
+                    try { dashboardPanel.preloadSelfRankNumbers(selfName); } catch (Exception ignore) {}
                 }
             } catch (Exception ignore) {}
             try {
@@ -391,8 +454,38 @@ private volatile boolean shardReady = false;
 	
 	private void endFightTimeout()
 	{
+		if (!inFight) return;
 		log.info("Fight timed out - no result submitted");
 		resetFightState();
+	}
+
+	private void scheduleDoubleKoCheck(String fallbackResult)
+	{
+		try
+		{
+			if (fightScheduler == null) return;
+			fightScheduler.schedule(() -> {
+				try
+				{
+					if (!inFight || fightFinalized) return;
+					long a = selfDeathMs;
+					long b = opponentDeathMs;
+					if (a > 0L && b > 0L && Math.abs(a - b) <= 1500L)
+					{
+						fightFinalized = true;
+						endFight("tie");
+						return;
+					}
+					if (fallbackResult != null && !fightFinalized)
+					{
+						fightFinalized = true;
+						endFight(fallbackResult);
+					}
+				}
+				catch (Exception ignore) {}
+			}, 600L, java.util.concurrent.TimeUnit.MILLISECONDS);
+		}
+		catch (Exception ignore) {}
 	}
 	
 	private void resetFightState()
@@ -444,11 +537,25 @@ private volatile boolean shardReady = false;
     {
         try
         {
-            int rankIndex = dashboardPanel != null ? dashboardPanel.getRankNumberByName(playerName, bucket) : -1;
+            boolean isSelf = false;
+            try {
+                isSelf = client != null && client.getLocalPlayer() != null && playerName != null && playerName.equals(client.getLocalPlayer().getName());
+            } catch (Exception ignore) {}
+            int rankIndex = -1;
+            if (dashboardPanel != null)
+            {
+                rankIndex = isSelf ? dashboardPanel.getRankNumberFromLeaderboard(playerName, bucket)
+                                    : dashboardPanel.getRankNumberByName(playerName, bucket);
+            }
             if (rankIndex > 0)
             {
                 String tier = null;
-                try { tier = dashboardPanel != null ? dashboardPanel.getTierLabelByName(playerName, bucket) : null; } catch (Exception ignore) {}
+                try {
+                    tier = dashboardPanel != null
+                        ? (isSelf ? dashboardPanel.getTierLabelFromLeaderboard(playerName, bucket)
+                                  : dashboardPanel.getTierLabelByName(playerName, bucket))
+                        : null;
+                } catch (Exception ignore) {}
                 if (tier != null && !tier.isEmpty()) return tier;
                 return "Rank " + rankIndex;
             }
@@ -476,7 +583,13 @@ private volatile boolean shardReady = false;
     {
         try
         {
-            return dashboardPanel != null ? dashboardPanel.getRankNumberByName(playerName, bucket) : -1;
+            boolean isSelf = false;
+            try {
+                isSelf = client != null && client.getLocalPlayer() != null && playerName != null && playerName.equals(client.getLocalPlayer().getName());
+            } catch (Exception ignore) {}
+            if (dashboardPanel == null) return -1;
+            return isSelf ? dashboardPanel.getRankNumberFromLeaderboard(playerName, bucket)
+                          : dashboardPanel.getRankNumberByName(playerName, bucket);
         }
         catch (Exception ignore) { return -1; }
     }
@@ -680,11 +793,6 @@ private volatile boolean shardReady = false;
 		return configManager.getConfig(PvPLeaderboardConfig.class);
 	}
 
-	@Provides
-	RankCacheService provideRankCacheService()
-	{
-		return new RankCacheService();
-	}
     public boolean isShardReady()
     {
         return shardReady;

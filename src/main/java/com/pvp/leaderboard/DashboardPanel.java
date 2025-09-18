@@ -1261,22 +1261,26 @@ public class DashboardPanel extends PluginPanel
         long t0 = System.nanoTime();
         try
         {
-            // Negative cache check: suppress lookups if this player recently failed
-            try
-            {
-                String missKey = (bucket == null ? "overall" : bucket.toLowerCase()) + "|" + canonName(playerName);
-                Long until = missingPlayerUntilMs.get(missKey);
-                if (until != null && System.currentTimeMillis() < until)
-                {
-                    return null;
-                }
-            }
-            catch (Exception ignore) {}
             String canon = canonName(playerName);
             boolean useAccount = accountHash != null && !accountHash.isEmpty();
-            String key = useAccount ? accountHash : canon;
-            if (key == null || key.isEmpty()) return null;
-            String shard = key.substring(0, Math.min(2, key.length())).toLowerCase();
+            // Negative cache check for name-only lookups. Bypass when using account hash (self),
+            // so self lookups are not blocked by name-level negative cache.
+            if (!useAccount)
+            {
+                try
+                {
+                    String missKey = (bucket == null ? "overall" : bucket.toLowerCase()) + "|" + canon;
+                    Long until = missingPlayerUntilMs.get(missKey);
+                    if (until != null && System.currentTimeMillis() < until)
+                    {
+                        return null;
+                    }
+                }
+                catch (Exception ignore) {}
+            }
+            // Always shard by player name prefix for file selection, even when using account lookups
+            if (canon == null || canon.isEmpty()) return null;
+            String shard = canon.substring(0, Math.min(2, canon.length())).toLowerCase();
             String dir = bucket.equalsIgnoreCase("overall") ? "overall" : bucket.toLowerCase();
             String urlStr = "https://devsecopsautomated.com/rank_idx/" + dir + "/" + shard + ".json";
 
@@ -1287,7 +1291,9 @@ public class DashboardPanel extends PluginPanel
             {
                 ShardRank sr = extractShardRank(cached.payload, useAccount, accountHash, canon);
                 if (sr != null) return sr;
-                // Player not present in current cached shard: allow a refresh if shard fetch was not done in the last 60s
+                // Fresh shard cached and name not present → do not refetch until TTL expiry
+                try { System.out.println("[ShardCache] fresh no_fetch key=" + cacheKey + " ageMs=" + (now - cached.timestamp) + " name=" + canon); } catch (Exception ignore) {}
+                return null;
             }
 
             Long failUntil = shardFailUntil.get(cacheKey);
@@ -1309,6 +1315,7 @@ public class DashboardPanel extends PluginPanel
                 {
                     ShardRank sr = extractShardRank(cached.payload, useAccount, accountHash, canon);
                     if (sr != null) return sr;
+                    try { System.out.println("[ShardCache] fresh no_fetch (lock) key=" + cacheKey + " ageMs=" + (now - cached.timestamp) + " name=" + canon); } catch (Exception ignore) {}
                     return null;
                 }
 
@@ -1849,22 +1856,163 @@ public class DashboardPanel extends PluginPanel
             input = getClientSafe().getLocalPlayer().getName();
             if (pluginSearchField != null) pluginSearchField.setText(input);
         }
-        String playerName = normalizeDisplayName(input);
+        final String playerName = normalizeDisplayName(input);
         if (playerName.isEmpty()) return;
-        
+
         playerNameLabel.setText(playerName);
-        
+
         // Update player name in current profile for rank lookups
         if (currentProfile != null) {
             currentProfile.name = playerName;
         }
-        loadMatchHistory(playerName);
-        
-        // Show additional stats only if logged in
-        if (isLoggedIn)
+
+        // Use /user API to populate panel first; match history remains as-is
+        SwingWorker<Void, Void> worker = new SwingWorker<Void, Void>()
         {
-            showAdditionalStats(true);
-        }
+            @Override
+            protected Void doInBackground() throws Exception
+            {
+                try
+                {
+                    String apiUrl = "https://kekh0x6kfk.execute-api.us-east-1.amazonaws.com/prod/user?player_id=" + URLEncoder.encode(normalizePlayerId(playerName), "UTF-8");
+                    URL url = new URL(apiUrl);
+                    HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+                    conn.setRequestMethod("GET");
+                    conn.setConnectTimeout(10000);
+                    conn.setReadTimeout(15000);
+                    int status = conn.getResponseCode();
+                    String response = HttpUtil.readResponseBody(conn);
+                    if (status >= 200 && status < 300)
+                    {
+                        JsonObject stats = JsonParser.parseString(response).getAsJsonObject();
+                        // Preload account linkage for shard by account when applicable
+                        if (stats.has("account_hash") && !stats.get("account_hash").isJsonNull())
+                        {
+                            try { lastLoadedAccountHash = stats.get("account_hash").getAsString(); } catch (Exception ignore) {}
+                        }
+                        // Update bucket bars from current data. Support both nested buckets and flat keys.
+                        String[] buckets = new String[]{"overall","nh","veng","multi","dmm"};
+                        JsonObject bucketsObj = null;
+                        try { if (stats.has("buckets") && stats.get("buckets").isJsonObject()) bucketsObj = stats.getAsJsonObject("buckets"); } catch (Exception ignore) {}
+                        for (String key : buckets)
+                        {
+                            String rankLabel = null;
+                            int division = 0;
+                            double pct = 0.0;
+                            int worldRankNum = -1;
+
+                            if (bucketsObj != null && bucketsObj.has(key) && bucketsObj.get(key).isJsonObject())
+                            {
+                                JsonObject b = bucketsObj.getAsJsonObject(key);
+                                try {
+                                    if (b.has("mmr") && !b.get("mmr").isJsonNull())
+                                    {
+                                        double mmr = b.get("mmr").getAsDouble();
+                                        RankInfo ri = rankLabelAndProgressFromMMR(mmr);
+                                        if (ri != null) { rankLabel = ri.rank; division = ri.division; pct = ri.progress; }
+                                    }
+                                    // If API provides explicit progress, prefer it
+                                    if (b.has("rank_progress") && b.get("rank_progress").isJsonObject())
+                                    {
+                                        try {
+                                            JsonObject rp = b.getAsJsonObject("rank_progress");
+                                            if (rp.has("progress_to_next_rank_pct") && !rp.get("progress_to_next_rank_pct").isJsonNull())
+                                            {
+                                                pct = Math.max(0, Math.min(100, rp.get("progress_to_next_rank_pct").getAsDouble()));
+                                            }
+                                        } catch (Exception ignore) {}
+                                    }
+                                    if (rankLabel == null && b.has("rank") && !b.get("rank").isJsonNull())
+                                    {
+                                        String raw = b.get("rank").getAsString();
+                                        String formatted = formatTierLabel(raw);
+                                        String[] parts = formatted.split(" ");
+                                        rankLabel = parts.length > 0 ? parts[0] : formatted;
+                                        if (parts.length > 1) { try { division = Integer.parseInt(parts[1]); } catch (Exception ignore) {} }
+                                    }
+                                    if (b.has("division") && !b.get("division").isJsonNull())
+                                    {
+                                        try { division = b.get("division").getAsInt(); } catch (Exception ignore) {}
+                                    }
+                                } catch (Exception ignore) {}
+                            }
+                            else
+                            {
+                                // Flat keys fallback
+                                String mmrKey = key + "_mmr";
+                                String rankKey = key + "_rank";
+                                String divKey = key + "_division";
+                                String worldKey = key + "_world_rank";
+                                try
+                                {
+                                    if ("overall".equals(key) && stats.has("mmr") && !stats.get("mmr").isJsonNull())
+                                    {
+                                        double mmr = stats.get("mmr").getAsDouble();
+                                        RankInfo ri = rankLabelAndProgressFromMMR(mmr);
+                                        if (ri != null) { rankLabel = ri.rank; division = ri.division; pct = ri.progress; }
+                                    }
+                                    else if (stats.has(mmrKey) && !stats.get(mmrKey).isJsonNull())
+                                    {
+                                        double mmr = stats.get(mmrKey).getAsDouble();
+                                        RankInfo ri = rankLabelAndProgressFromMMR(mmr);
+                                        if (ri != null) { rankLabel = ri.rank; division = ri.division; pct = ri.progress; }
+                                    }
+                                    if (rankLabel == null && stats.has(rankKey) && !stats.get(rankKey).isJsonNull())
+                                    {
+                                        String formatted = formatTierLabel(stats.get(rankKey).getAsString());
+                                        String[] parts = formatted.split(" ");
+                                        rankLabel = parts.length > 0 ? parts[0] : formatted;
+                                        if (parts.length > 1) { try { division = Integer.parseInt(parts[1]); } catch (Exception ignore) {} }
+                                    }
+                                    if (stats.has(divKey) && !stats.get(divKey).isJsonNull())
+                                    {
+                                        try { division = stats.get(divKey).getAsInt(); } catch (Exception ignore) {}
+                                    }
+                                    if (stats.has(worldKey) && !stats.get(worldKey).isJsonNull())
+                                    {
+                                        try { worldRankNum = stats.get(worldKey).getAsInt(); } catch (Exception ignore) {}
+                                    }
+                                }
+                                catch (Exception ignore) {}
+                            }
+
+                            // If overall bucket and top-level world_rank exists, use it
+                            if (worldRankNum < 0 && "overall".equals(key))
+                            {
+                                try {
+                                    if (stats.has("world_rank") && !stats.get("world_rank").isJsonNull())
+                                    {
+                                        worldRankNum = stats.get("world_rank").getAsInt();
+                                    }
+                                } catch (Exception ignore) {}
+                            }
+
+                            if (rankLabel != null)
+                            {
+                                final String fKey = key; final String fRank = rankLabel; final int fDiv = division; final double fPct = pct; final int fRankNum = worldRankNum;
+                                SwingUtilities.invokeLater(() -> setBucketBarWithRank(fKey, fRank, fDiv, fPct, fRankNum));
+                            }
+                        }
+                    }
+                }
+                catch (Exception ignore)
+                {
+                }
+                return null;
+            }
+
+            @Override
+            protected void done()
+            {
+                // Keep existing behavior to load matches for the player
+                loadMatchHistory(playerName);
+                if (isLoggedIn)
+                {
+                    showAdditionalStats(true);
+                }
+            }
+        };
+        worker.execute();
     }
 
     public void lookupPlayerFromRightClick(String name)
