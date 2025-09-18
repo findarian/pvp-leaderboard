@@ -45,11 +45,13 @@ public class TopNearbyOverlay extends Overlay
 
         panelComponent.getChildren().clear();
 
+        int fontSize = Math.max(9, config.nearbyOverlayFontSize());
+        Font base = graphics.getFont().deriveFont(Font.BOLD, (float) fontSize);
         panelComponent.getChildren().add(TitleComponent.builder()
             .text("Best Players Nearby")
             .color(Color.YELLOW)
             .build());
-        String selfName = client.getLocalPlayer() != null ? client.getLocalPlayer().getName() : null;
+        // Include self; no need to track separately
 
         List<PlayerEntry> entries = new ArrayList<>();
         for (Player p : client.getPlayers())
@@ -57,7 +59,7 @@ public class TopNearbyOverlay extends Overlay
             if (p == null) continue;
             String pname = p.getName();
             if (pname == null) continue;
-            if (selfName != null && pname.equals(selfName)) continue;
+            // Include the local player as well
             String rank = plugin.getDisplayedRankFor(pname);
             if (rank == null) continue;
             entries.add(new PlayerEntry(pname, rank, rankOrder(rank)));
@@ -70,17 +72,21 @@ public class TopNearbyOverlay extends Overlay
         int topLimit = Math.max(1, Math.min(10, config.topNearbyCount()));
         for (PlayerEntry e : sortedTop)
         {
-            panelComponent.getChildren().add(LineComponent.builder()
+            LineComponent line = LineComponent.builder()
                 .left(e.name + ":")
                 .right(e.rank)
                 .leftColor(Color.WHITE)
                 .rightColor(getRankColor(e.rank))
-                .build());
+                .build();
+            line.setLeftFont(base);
+            line.setRightFont(base);
+            panelComponent.getChildren().add(line);
             shown++;
             if (shown >= topLimit) break;
         }
 
-        panelComponent.setPreferredSize(new Dimension(220, 0));
+        int width = Math.max(140, config.nearbyOverlayWidth());
+        panelComponent.setPreferredSize(new Dimension(width, 0));
         return panelComponent.render(graphics);
     }
 

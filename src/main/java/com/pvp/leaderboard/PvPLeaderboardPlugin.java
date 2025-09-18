@@ -322,8 +322,8 @@ private volatile boolean shardReady = false;
 			Player player = (Player) hitsplatApplied.getActor();
 			Player localPlayer = client.getLocalPlayer();
 			
-			// Only process if hitsplat is from a player (not NPC)
-			if (localPlayer != null && hitsplatApplied.getHitsplat().isMine() && (player == localPlayer || player != localPlayer))
+            // Process both directions: when we hit another player or get hit by another player
+            if (localPlayer != null)
 			{
 				// For player vs player combat, ensure both source and target are players
 				String opponentName = null;
@@ -377,16 +377,49 @@ private volatile boolean shardReady = false;
                 {
                     opponent = actualKiller;
                 }
-                scheduleDoubleKoCheck("loss");
+                // Immediate result unless double-KO window applies
+                if (!fightFinalized)
+                {
+                    if (opponentDeathMs > 0L && Math.abs(selfDeathMs - opponentDeathMs) <= 1500L)
+                    {
+                        fightFinalized = true;
+                        endFight("tie");
+                    }
+                    else
+                    {
+                        fightFinalized = true;
+                        endFight("loss");
+                    }
+                }
             }
-            else if (opponent != null)
+            else
             {
                 String name = player.getName();
-                if (name != null && name.equals(opponent))
+                if (name != null)
                 {
-                    // Opponent died
-                    opponentDeathMs = System.currentTimeMillis();
-                    scheduleDoubleKoCheck("win");
+                    // If we didn't have the opponent set, assume this is the opponent we fought
+                    if (opponent == null)
+                    {
+                        opponent = name;
+                    }
+                    if (name.equals(opponent))
+                    {
+                        // Opponent died
+                        opponentDeathMs = System.currentTimeMillis();
+                        if (!fightFinalized)
+                        {
+                            if (selfDeathMs > 0L && Math.abs(selfDeathMs - opponentDeathMs) <= 1500L)
+                            {
+                                fightFinalized = true;
+                                endFight("tie");
+                            }
+                            else
+                            {
+                                fightFinalized = true;
+                                endFight("win");
+                            }
+                        }
+                    }
                 }
             }
 		}
@@ -506,12 +539,13 @@ private volatile boolean shardReady = false;
 		resetFightState();
 	}
 	
-	private void endFightTimeout()
-	{
-		if (!inFight) return;
-		log.info("Fight timed out - no result submitted");
-		resetFightState();
-	}
+    private void endFightTimeout()
+    {
+        if (!inFight) return;
+        // Do not auto-submit ties on inactivity per latest instructions; just reset.
+        log.info("Fight timed out - no result submitted");
+        resetFightState();
+    }
 
 	private void scheduleDoubleKoCheck(String fallbackResult)
 	{

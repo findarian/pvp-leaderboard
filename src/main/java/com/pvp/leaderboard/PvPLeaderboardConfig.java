@@ -183,6 +183,28 @@ public interface PvPLeaderboardConfig extends Config
 		return 10;
 	}
 
+    @ConfigItem(
+        keyName = "nearbyOverlayWidth",
+        name = "Nearby overlays width",
+        description = "Width in pixels for Best/Worst overlays (applies to both)"
+    )
+    @Range(min = 140, max = 600)
+    default int nearbyOverlayWidth()
+    {
+        return 180;
+    }
+
+    @ConfigItem(
+        keyName = "nearbyOverlayFontSize",
+        name = "Nearby overlays font size",
+        description = "Font size for Best/Worst overlays (applies to both)"
+    )
+    @Range(min = 9, max = 24)
+    default int nearbyOverlayFontSize()
+    {
+        return 15;
+    }
+
 	@ConfigItem(
 		keyName = "lookupThrottleLevel",
 		name = "Throttling (Reduce lag, higher = slower player lookup)",
