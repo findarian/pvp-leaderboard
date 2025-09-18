@@ -26,6 +26,7 @@ public class CognitoAuthService {
     
     private final ConfigManager configManager;
     private String transientVerifier;
+    private String transientState;
     // Local HTTP server for OAuth callback
     private HttpServer httpServer;
     private String accessToken;
@@ -58,21 +59,32 @@ public class CognitoAuthService {
                 CompletableFuture<String> codeFuture = new CompletableFuture<>();
                 startCallbackServer(codeFuture);
 
-                // Open browser to login
+                // Open browser to login with random OAuth state
+                String state = generateRandomState();
+                if (configManager != null) {
+                    configManager.setConfiguration("PvPLeaderboard", "oauth_state", state);
+                } else {
+                    transientState = state;
+                }
                 String loginUrl = String.format(
-                    "https://%s/login?client_id=%s&response_type=code&scope=openid+email+profile&redirect_uri=%s&code_challenge_method=S256&code_challenge=%s&state=runelite",
-                    COGNITO_DOMAIN, CLIENT_ID, URLEncoder.encode(REDIRECT_URI, "UTF-8"), challenge
+                    "https://%s/login?client_id=%s&response_type=code&scope=openid+email+profile&redirect_uri=%s&code_challenge_method=S256&code_challenge=%s&state=%s",
+                    COGNITO_DOMAIN, CLIENT_ID, URLEncoder.encode(REDIRECT_URI, "UTF-8"), challenge, URLEncoder.encode(state, "UTF-8")
                 );
                 Desktop.getDesktop().browse(URI.create(loginUrl));
 
                 // Wait for code up to 180s
                 String code = codeFuture.get(180, java.util.concurrent.TimeUnit.SECONDS);
                 stopCallbackServer();
-                if (code == null || code.isEmpty()) return false;
+                if (code == null || code.isEmpty()) {
+                    // Ensure auth artifacts are cleared on failure
+                    clearTokens();
+                    return false;
+                }
                 exchangeCodeForTokens(code.trim());
                 return true;
             } catch (Exception e) {
                 stopCallbackServer();
+                clearTokens();
                 return false;
             }
         });
@@ -89,12 +101,28 @@ public class CognitoAuthService {
                     URI uri = ex.getRequestURI();
                     String query = uri.getRawQuery();
                     String code = extractParam(query, "code");
-                    String html = "<html><head><title>Login Complete</title></head><body style=\"background:#111;color:#ffcc00;font-family:Arial\"><h2>Login complete</h2><p>You may now return to RuneLite.</p></body></html>";
+                    // Validate returned state to mitigate CSRF
+                    String state = extractParam(query, "state");
+                    String expectedState = null;
+                    if (configManager != null) {
+                        Object s = configManager.getConfiguration("PvPLeaderboard", "oauth_state");
+                        expectedState = s != null ? String.valueOf(s) : null;
+                    } else {
+                        expectedState = transientState;
+                    }
+                    boolean stateOk = expectedState != null && expectedState.equals(state);
+                    String html = stateOk && code != null && !code.isEmpty()
+                        ? "<html><head><title>Login Complete</title></head><body style=\"background:#111;color:#ffcc00;font-family:Arial\"><h2>Login complete</h2><p>You may now return to RuneLite.</p></body></html>"
+                        : "<html><head><title>Login Failed</title></head><body style=\"background:#111;color:#ff6666;font-family:Arial\"><h2>Login failed</h2><p>Invalid login state.</p></body></html>";
                     byte[] bytes = html.getBytes(StandardCharsets.UTF_8);
                     ex.getResponseHeaders().set("Content-Type", "text/html; charset=utf-8");
                     ex.sendResponseHeaders(200, bytes.length);
                     try (OutputStream os = ex.getResponseBody()) { os.write(bytes); }
-                    if (code != null && !code.isEmpty() && !codeFuture.isDone()) codeFuture.complete(code);
+                    if (stateOk && code != null && !code.isEmpty() && !codeFuture.isDone()) {
+                        codeFuture.complete(code);
+                    } else if (!codeFuture.isDone()) {
+                        codeFuture.complete(null);
+                    }
                 } catch (Exception ignore) {
                     try { if (!codeFuture.isDone()) codeFuture.complete(null); } catch (Exception ignored) {}
                 }
@@ -156,12 +184,20 @@ public class CognitoAuthService {
         refreshToken = tokens.has("refresh_token") && !tokens.get("refresh_token").isJsonNull() ? tokens.get("refresh_token").getAsString() : null;
         int expiresIn = tokens.has("expires_in") ? tokens.get("expires_in").getAsInt() : 3600;
         tokenExpiry = System.currentTimeMillis() + (expiresIn * 1000L);
+
+        // Validate ID token claims before proceeding (iss/aud/exp/token_use)
+        if (idToken == null || !validateIdTokenClaims(idToken)) {
+            clearTokens();
+            throw new IOException("Invalid ID token claims");
+        }
         
         // Clean up
         if (configManager != null) {
             configManager.unsetConfiguration("PvPLeaderboard", "pkce_verifier");
+            configManager.unsetConfiguration("PvPLeaderboard", "oauth_state");
         }
         transientVerifier = null;
+        transientState = null;
     }
     
     public String getAccessToken() {
@@ -175,10 +211,7 @@ public class CognitoAuthService {
     }
     
     public void logout() {
-        accessToken = null;
-        tokenExpiry = 0;
-        try { if (configManager != null) configManager.unsetConfiguration("PvPLeaderboard", "pkce_verifier"); } catch (Exception ignore) {}
-        transientVerifier = null;
+        clearTokens();
     }
     
     public String getStoredIdToken() {
@@ -201,6 +234,51 @@ public class CognitoAuthService {
         return Base64.getUrlEncoder().withoutPadding().encodeToString(hash).replace('+', '-').replace('/', '_');
     }
     
+    private String generateRandomState() {
+        String chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~";
+        SecureRandom random = new SecureRandom();
+        StringBuilder sb = new StringBuilder(32);
+        for (int i = 0; i < 32; i++) {
+            sb.append(chars.charAt(random.nextInt(chars.length())));
+        }
+        return sb.toString();
+    }
+
+    private void clearTokens() {
+        accessToken = null;
+        idToken = null;
+        refreshToken = null;
+        tokenExpiry = 0;
+        try { if (configManager != null) configManager.unsetConfiguration("PvPLeaderboard", "pkce_verifier"); } catch (Exception ignore) {}
+        try { if (configManager != null) configManager.unsetConfiguration("PvPLeaderboard", "oauth_state"); } catch (Exception ignore) {}
+        transientVerifier = null;
+        transientState = null;
+    }
+
+    private boolean validateIdTokenClaims(String jwt) {
+        try {
+            String[] parts = jwt.split("\\.");
+            if (parts.length < 2) return false;
+            String payloadJson = new String(Base64.getUrlDecoder().decode(parts[1]), StandardCharsets.UTF_8);
+            JsonObject payload = JsonParser.parseString(payloadJson).getAsJsonObject();
+
+            // Required claims
+            String tokenUse = payload.has("token_use") && !payload.get("token_use").isJsonNull() ? payload.get("token_use").getAsString() : null;
+            String aud = payload.has("aud") && !payload.get("aud").isJsonNull() ? payload.get("aud").getAsString() : null;
+            String iss = payload.has("iss") && !payload.get("iss").isJsonNull() ? payload.get("iss").getAsString() : null;
+            long exp = payload.has("exp") && !payload.get("exp").isJsonNull() ? payload.get("exp").getAsLong() : 0L;
+            long now = System.currentTimeMillis() / 1000L;
+
+            if (!"id".equalsIgnoreCase(tokenUse)) return false;
+            if (aud == null || !aud.equals(CLIENT_ID)) return false;
+            if (iss == null || !iss.startsWith("https://cognito-idp.us-east-1.amazonaws.com/")) return false;
+            if (exp <= (now - 60)) return false; // allow small skew
+
+            return true;
+        } catch (Exception e) {
+            return false;
+        }
+    }
 
     
     private String extractParam(String query, String param) {

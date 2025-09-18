@@ -5,8 +5,7 @@ import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import lombok.extern.slf4j.Slf4j;
 
-import java.io.BufferedReader;
-import java.io.InputStreamReader;
+// removed unused BufferedReader/InputStreamReader after switching to HttpUtil
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.util.concurrent.ConcurrentHashMap;
@@ -22,6 +21,7 @@ public class RankCacheService
     private final ConcurrentHashMap<String, Long> bucketLastRefreshMs = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, Object> bucketLocks = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, Long> playerRetryAfterMs = new ConcurrentHashMap<>(); // key: bucket|player
+    private final ConcurrentHashMap<String, Boolean> bucketReady = new ConcurrentHashMap<>();
     
     public CompletableFuture<String> getPlayerRank(String playerName, Object bucket)
     {
@@ -39,6 +39,7 @@ public class RankCacheService
             
             try
             {
+                log.info("[Shard] lookup start bucket={} player={} canon={}", bucketKey, playerName, canonPlayer);
                 String playerKey = bucketKey + "|" + canonPlayer;
                 long now = System.currentTimeMillis();
 
@@ -75,6 +76,7 @@ public class RankCacheService
                         // On failure, set throttle timers to prevent spam
                         bucketLastRefreshMs.put(bucketKey, now);
                         playerRetryAfterMs.put(playerKey, now + 60_000);
+                        log.warn("[Shard] refresh failed bucket={}", bucketKey, e);
                         throw e;
                     }
                     finally
@@ -87,13 +89,15 @@ public class RankCacheService
                 if (after == null)
                 {
                     playerRetryAfterMs.put(playerKey, System.currentTimeMillis() + 60_000);
+                    log.info("[Shard] not found bucket={} player={} (no retry)", bucketKey, canonPlayer);
                     return null;
                 }
+                log.info("[Shard] hit bucket={} player={} rank={}", bucketKey, canonPlayer, after.rank);
                 return after.rank;
             }
             catch (Exception e)
             {
-                log.error("Failed to fetch rank for player {} in bucket {}", playerName, bucket, e);
+                log.error("[Shard] error player={} bucket={}", playerName, bucket, e);
                 return null;
             }
         });
@@ -121,22 +125,24 @@ public class RankCacheService
     private void refreshBucketCache(String bucket, ConcurrentHashMap<String, CachedRank> bucketCache) throws Exception
     {
         String urlStr = urlForBucket(bucket);
+        log.info("[Shard] refresh url={}", urlStr);
         URL url = new URL(urlStr);
         HttpURLConnection conn = (HttpURLConnection) url.openConnection();
         conn.setRequestMethod("GET");
-        
-        BufferedReader reader = new BufferedReader(new InputStreamReader(conn.getInputStream()));
-        StringBuilder response = new StringBuilder();
-        String line;
-        while ((line = reader.readLine()) != null)
+        conn.setConnectTimeout(10000);
+        conn.setReadTimeout(15000);
+        int status = conn.getResponseCode();
+        String response = HttpUtil.readResponseBody(conn);
+        if (status < 200 || status >= 300)
         {
-            response.append(line);
+            log.warn("[Shard] non-2xx status={} url={}", status, urlStr);
+            return; // Leave cache unchanged on error
         }
-        reader.close();
         
-        JsonObject data = JsonParser.parseString(response.toString()).getAsJsonObject();
+        JsonObject data = JsonParser.parseString(response).getAsJsonObject();
         if (data == null || !data.has("players") || data.get("players").isJsonNull())
         {
+            log.warn("[Shard] empty body url={}", urlStr);
             return; // Nothing to cache
         }
         JsonArray players = data.getAsJsonArray("players");
@@ -199,6 +205,9 @@ public class RankCacheService
                 // Skip malformed entries
             }
         }
+
+        bucketReady.put(safeBucket(bucket), Boolean.TRUE);
+        log.info("[Shard] ready bucket={}", safeBucket(bucket));
     }
 
     private static String safeBucket(Object bucket)
@@ -238,20 +247,26 @@ public class RankCacheService
 
     private static String urlForBucket(String bucket)
     {
+        // Sharded only; overall is synthesized from shards client-side when needed
         switch (safeBucket(bucket))
         {
             case "nh":
-                return S3_BASE + "/leaderboard_nh.json";
+                return S3_BASE + "/shards/nh.json";
             case "veng":
-                return S3_BASE + "/leaderboard_veng.json";
+                return S3_BASE + "/shards/veng.json";
             case "multi":
-                return S3_BASE + "/leaderboard_multi.json";
+                return S3_BASE + "/shards/multi.json";
             case "dmm":
-                return S3_BASE + "/leaderboard_dmm.json";
+                return S3_BASE + "/shards/dmm.json";
             case "overall":
             default:
-                return S3_BASE + "/leaderboard.json";
+                return S3_BASE + "/shards/overall.json";
         }
+    }
+
+    public boolean isBucketReady(Object bucket)
+    {
+        return bucketReady.getOrDefault(safeBucket(bucket), Boolean.FALSE);
     }
     
     private String calculateRankFromMMR(double mmr)

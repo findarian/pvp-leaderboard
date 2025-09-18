@@ -21,14 +21,16 @@ public interface PvPLeaderboardConfig extends Config
 		return true;
 	}
 
+    enum RankDisplayMode { TEXT { public String toString(){return "Text";} }, RANK_NUMBER { public String toString(){return "Rank";} }, ICON { public String toString(){return "Icon";} } }
+
 	@ConfigItem(
-		keyName = "showRankAsText",
-		name = "Show rank as text",
-		description = "Use in-game font label (e.g., Bronze 2) instead of icon"
+		keyName = "rankDisplayMode",
+		name = "Display rank as",
+		description = "How to display ranks above players"
 	)
-	default boolean showRankAsText()
+	default RankDisplayMode rankDisplayMode()
 	{
-		return true;
+		return RankDisplayMode.TEXT;
 	}
 
 	@ConfigItem(
@@ -55,8 +57,8 @@ public interface PvPLeaderboardConfig extends Config
 
 	@ConfigItem(
 		keyName = "rankIconOffsetXSelf",
-		name = "Rank Icon Offset X (Self)",
-		description = "Horizontal X offset for your own rank icon (pixels)"
+		name = "Offset X (Self)",
+		description = "Horizontal X offset for your own rank display (pixels)"
 	)
 	@Range(min = -100, max = 100)
 	default int rankIconOffsetXSelf()
@@ -66,8 +68,8 @@ public interface PvPLeaderboardConfig extends Config
 
 	@ConfigItem(
 		keyName = "rankIconOffsetXOthers",
-		name = "Rank Icon Offset X (Others)",
-		description = "Horizontal X offset for other players' rank icons (pixels)"
+		name = "Offset X (Others)",
+		description = "Horizontal X offset for other players' rank display (pixels)"
 	)
 	@Range(min = -100, max = 100)
 	default int rankIconOffsetXOthers()
@@ -76,12 +78,23 @@ public interface PvPLeaderboardConfig extends Config
 	}
 
 	@ConfigItem(
-		keyName = "rankIconOffsetY",
-		name = "Rank Icon Offset Y",
-		description = "Vertical offset applied to rank icon relative to name (pixels)"
+		keyName = "rankIconOffsetYSelf",
+		name = "Offset Y (Self)",
+		description = "Vertical offset for your own rank display (pixels)"
 	)
 	@Range(min = -100, max = 100)
-	default int rankIconOffsetY()
+	default int rankIconOffsetYSelf()
+	{
+		return 0;
+	}
+
+	@ConfigItem(
+		keyName = "rankIconOffsetYOthers",
+		name = "Offset Y (Others)",
+		description = "Vertical offset for other players' rank display (pixels)"
+	)
+	@Range(min = -100, max = 100)
+	default int rankIconOffsetYOthers()
 	{
 		return 0;
 	}
@@ -96,22 +109,7 @@ public interface PvPLeaderboardConfig extends Config
 		return RankBucket.OVERALL;
 	}
 
-
-
-
-
-	@ConfigItem(
-		keyName = "onlyFetchOnLogin",
-		name = "Grab player info only on login",
-		description = "When enabled, rank lookups are attempted only shortly after logging in"
-	)
-	default boolean onlyFetchOnLogin()
-	{
-		return false;
-	}
-
-
-    // Removed: Nearby Leaderboard mode
+    // removed: onlyFetchOnLogin
 
 	@ConfigItem(
 		keyName = "rankIconWhiteOutline",
@@ -123,7 +121,60 @@ public interface PvPLeaderboardConfig extends Config
 		return true;
 	}
 
-    // Removed: Show unranked players (no special unranked icon)
+	@ConfigItem(
+		keyName = "showTopNearbyOverlay",
+		name = "Ranked players nearby (Top)",
+		description = "Show a floating box with you and the top 10 nearby ranked players"
+	)
+	default boolean showTopNearbyOverlay()
+	{
+		return false;
+	}
+
+	@ConfigItem(
+		keyName = "showBottomNearbyOverlay",
+		name = "Ranked players nearby (Bottom)",
+		description = "Show a floating box with the bottom 10 nearby ranked players"
+	)
+	default boolean showBottomNearbyOverlay()
+	{
+		return false;
+	}
+
+	@ConfigItem(
+		keyName = "topNearbyCount",
+		name = "Top nearby count",
+		description = "Max entries in Top nearby overlay (1-10)"
+	)
+	@Range(min = 1, max = 10)
+	default int topNearbyCount()
+	{
+		return 10;
+	}
+
+	@ConfigItem(
+		keyName = "bottomNearbyCount",
+		name = "Bottom nearby count",
+		description = "Max entries in Bottom nearby overlay (1-10)"
+	)
+	@Range(min = 1, max = 10)
+	default int bottomNearbyCount()
+	{
+		return 10;
+	}
+
+	@ConfigItem(
+		keyName = "lookupThrottleLevel",
+		name = "Throttling (Reduce lag, higher = slower player lookup)",
+		description = "Limits how fast lookups are to reduce lag (0 = off)"
+	)
+	@Range(min = 0, max = 10)
+	default int lookupThrottleLevel()
+	{
+		return 6; // ~560ms per fetch, ~4 concurrent
+	}
+
+    // removed: muteUiErrors
 
 	// Rank bucket selector enum (public via being a member of the interface)
 	enum RankBucket

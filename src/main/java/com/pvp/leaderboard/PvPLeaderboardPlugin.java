@@ -61,6 +61,12 @@ public class PvPLeaderboardPlugin extends Plugin
 	private RankOverlay rankOverlay;
 
     @Inject
+    private TopNearbyOverlay topNearbyOverlay;
+
+    @Inject
+    private BottomNearbyOverlay bottomNearbyOverlay;
+
+    @Inject
     private SpriteManager spriteManager;
 
 	// ScoreboardOverlay and NearbyLeaderboardOverlay removed per request
@@ -79,10 +85,12 @@ public class PvPLeaderboardPlugin extends Plugin
 	private long lastCombatTime = 0;
 	private MatchResultService matchResultService = new MatchResultService();
 	private static final long FIGHT_TIMEOUT_MS = 30000; // 30 seconds
+private volatile boolean shardReady = false;
 
 	@Override
 	protected void startUp() throws Exception
 	{
+        shardReady = false;
         dashboardPanel = new DashboardPanel(config, configManager, this);
 
 		// Add right-click player menu item once on startup
@@ -105,7 +113,7 @@ public class PvPLeaderboardPlugin extends Plugin
                         navButton = updated;
                         clientToolbar.addNavigation(navButton);
                     });
-                }
+}
             });
         } catch (Exception ignore) {}
 		navButton = NavigationButton.builder()
@@ -116,9 +124,11 @@ public class PvPLeaderboardPlugin extends Plugin
 			.build();
 
 		clientToolbar.addNavigation(navButton);
-		// Warm caches synchronously
-		forcePrewarmRankCaches();
+        // Prewarming removed per request; overlay/shard fetch will occur on demand
+        shardReady = true; // allow on-demand lookups immediately
 		overlayManager.add(rankOverlay);
+        overlayManager.add(topNearbyOverlay);
+        overlayManager.add(bottomNearbyOverlay);
 		log.info("PvP Leaderboard started!");
 	}
 
@@ -128,6 +138,8 @@ public class PvPLeaderboardPlugin extends Plugin
 		menuManager.removePlayerMenuItem("pvp lookup");
 		clientToolbar.removeNavigation(navButton);
 		overlayManager.remove(rankOverlay);
+        overlayManager.remove(topNearbyOverlay);
+        overlayManager.remove(bottomNearbyOverlay);
 		log.info("PvP Leaderboard stopped!");
 	}
     @Subscribe
@@ -162,6 +174,14 @@ public class PvPLeaderboardPlugin extends Plugin
             dashboardPanel.lookupPlayerFromRightClick(playerName);
         }
 
+        // Force overlay to fetch and display the player's rank via shards
+        try {
+            if (rankOverlay != null && playerName != null && !playerName.isEmpty())
+            {
+                rankOverlay.forceLookupAndDisplay(playerName);
+            }
+        } catch (Exception ignore) {}
+
         // Open plugin side panel
         if (clientToolbar != null && navButton != null) {
             SwingUtilities.invokeLater(() -> clientToolbar.openPanel(navButton));
@@ -176,11 +196,7 @@ public class PvPLeaderboardPlugin extends Plugin
 		{
 			accountHash = client.getAccountHash();
 			log.info("PvP Leaderboard ready! Account hash: " + accountHash);
-			if (config.onlyFetchOnLogin())
-			{
-				// Clear caches to allow one-time fetch after login
-				// RankOverlay will attempt once per player when seen
-			}
+            shardReady = true; // on-demand shard fetch; no prewarm
 			// Default lookup to local player and populate panel
 			try
 			{
@@ -188,24 +204,23 @@ public class PvPLeaderboardPlugin extends Plugin
 				{
 					String self = client.getLocalPlayer().getName();
 					dashboardPanel.lookupPlayerFromRightClick(self);
+                    // Ensure overlay fetches self rank immediately for the currently selected bucket
+                    try { if (rankOverlay != null) rankOverlay.scheduleSelfRankRefresh(0L); } catch (Exception ignore) {}
 				}
 			}
 			catch (Exception ignore) {}
 		}
-	}
-
-	private void forcePrewarmRankCaches()
-	{
-		String[] buckets = {"overall", "nh", "veng", "multi", "dmm"};
-		for (String b : buckets)
+		else if (gameStateChanged.getGameState() == GameState.HOPPING || gameStateChanged.getGameState() == GameState.LOADING)
 		{
-			try
-			{
-				rankCacheService.forceRefreshBucket(b);
-			}
-			catch (Exception ignore) {}
+			try {
+				if (rankOverlay != null) {
+					rankOverlay.resetLookupStateOnWorldHop();
+				}
+			} catch (Exception ignore) {}
 		}
 	}
+
+    // Prewarm helpers removed
 
 	@Subscribe
 	public void onHitsplatApplied(HitsplatApplied hitsplatApplied)
@@ -339,6 +354,13 @@ public class PvPLeaderboardPlugin extends Plugin
 			
             // Submit match result to API and optimistically update UI on success
             submitMatchResult(result, fightEndTime);
+            // After successful submission, schedule a delayed refresh of self rank in overlay
+            try {
+                if (rankOverlay != null) {
+                    // 15s delay before re-fetching player's rank
+                    rankOverlay.scheduleSelfRankRefresh(15_000L);
+                }
+            } catch (Exception ignore) {}
             try {
                 if (dashboardPanel != null) {
                     dashboardPanel.updateAdditionalStatsFromPlugin("win".equals(result) ? opponentRank : null,
@@ -403,35 +425,44 @@ public class PvPLeaderboardPlugin extends Plugin
 		return "Bronze 3"; // Placeholder
 	}
 
-    private String resolvePlayerRank(String playerName, String bucket)
+    public String resolvePlayerRank(String playerName, String bucket)
     {
         try
         {
-            // Use shard number to compute tier/division text when available
-            int rankIndex = -1;
-            if (dashboardPanel != null)
+            int rankIndex = dashboardPanel != null ? dashboardPanel.getRankNumberByName(playerName, bucket) : -1;
+            if (rankIndex > 0)
             {
-                rankIndex = dashboardPanel.getRankNumberFromLeaderboard(playerName, bucket);
-            }
-            if (rankIndex >= 0)
-            {
-                // Map index to tier/division roughly by thresholds used in DashboardPanel
-                String[] tiers = {"Bronze 3","Bronze 2","Bronze 1",
-                    "Iron 3","Iron 2","Iron 1",
-                    "Steel 3","Steel 2","Steel 1",
-                    "Black 3","Black 2","Black 1",
-                    "Mithril 3","Mithril 2","Mithril 1",
-                    "Adamant 3","Adamant 2","Adamant 1",
-                    "Rune 3","Rune 2","Rune 1",
-                    "Dragon 3","Dragon 2","Dragon 1","3rd Age"};
-                if (rankIndex >= 0 && rankIndex < tiers.length)
-                {
-                    return tiers[rankIndex];
-                }
+                String tier = null;
+                try { tier = dashboardPanel != null ? dashboardPanel.getTierLabelByName(playerName, bucket) : null; } catch (Exception ignore) {}
+                if (tier != null && !tier.isEmpty()) return tier;
+                return "Rank " + rankIndex;
             }
         }
         catch (Exception ignore) {}
         return null;
+    }
+
+    public int getWorldRankIndex(String playerName, String bucket)
+    {
+        try
+        {
+            return dashboardPanel != null ? dashboardPanel.getRankNumberByName(playerName, bucket) : -1;
+        }
+        catch (Exception ignore) { return -1; }
+    }
+
+    private static String bucketKey(PvPLeaderboardConfig.RankBucket bucket)
+    {
+        if (bucket == null) return "overall";
+        switch (bucket)
+        {
+            case OVERALL: return "overall";
+            case NH: return "nh";
+            case VENG: return "veng";
+            case MULTI: return "multi";
+            case DMM: return "dmm";
+            default: return "overall";
+        }
     }
 	
 	private void updateHighestRankDefeated(String rank)
@@ -624,4 +655,8 @@ public class PvPLeaderboardPlugin extends Plugin
 	{
 		return new RankCacheService();
 	}
+    public boolean isShardReady()
+    {
+        return shardReady;
+    }
 }

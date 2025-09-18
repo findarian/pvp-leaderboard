@@ -16,6 +16,8 @@ import java.awt.*;
 import java.awt.event.MouseEvent;
 import java.awt.image.BufferedImage;
 import java.util.Map;
+import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.concurrent.ConcurrentHashMap;
 
 @Slf4j
@@ -23,19 +25,115 @@ public class RankOverlay extends Overlay
 {
     private final Client client;
     private final PvPLeaderboardConfig config;
+    private final PvPLeaderboardPlugin plugin;
     private final RankCacheService rankCache;
     private final ItemManager itemManager;
 
     private final ConcurrentHashMap<String, String> displayedRanks = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, Boolean> fetchInFlight = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, Boolean> attemptedLookup = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, Long> attemptedAtMs = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, Boolean> loggedFetch = new ConcurrentHashMap<>();
     private final Map<String, BufferedImage> rankIconCache = new ConcurrentHashMap<>();
     private String lastBucketKey = null;
+    private long lastShardNotReadyLogMs = 0L;
+    private long lastBucketNotReadyLogMs = 0L;
+    private long lastScheduleMs = 0L;
+    private volatile boolean selfRankAttempted = false;
+    private volatile long nextSelfRankAllowedAtMs = 0L;
+    private static final long RANK_CACHE_TTL_MS = 60L * 60L * 1000L;
+    private final Map<String, CacheEntry> nameRankCache = Collections.synchronizedMap(
+        new LinkedHashMap<String, CacheEntry>(512, 0.75f, true)
+        {
+            @Override
+            protected boolean removeEldestEntry(Map.Entry<String, CacheEntry> eldest)
+            {
+                return size() > 4096;
+            }
+        }
+    );
+    private static class CacheEntry { final String rank; final long ts; CacheEntry(String r, long t){ this.rank=r; this.ts=t; } }
+    private String cacheKeyFor(String name){ return bucketKey(config.rankBucket()) + "|" + (name == null ? "" : name.trim().replaceAll("\\s+"," ")); }
+    private static long computeThrottleDelayMs(int level)
+    {
+        if (level <= 0) return 0L;
+        if (level >= 10) return 2000L;
+        return level * 20L;
+    }
+    public void scheduleSelfRankRefresh(long delayMs)
+    {
+        long now = System.currentTimeMillis();
+        nextSelfRankAllowedAtMs = now + Math.max(0L, delayMs);
+        selfRankAttempted = false;
+        try
+        {
+            if (client != null && client.getLocalPlayer() != null && client.getLocalPlayer().getName() != null)
+            {
+                displayedRanks.remove(client.getLocalPlayer().getName());
+            }
+        }
+        catch (Exception ignore) {}
+    }
+
+    public void resetLookupStateOnWorldHop()
+    {
+        try
+        {
+            displayedRanks.clear();
+            fetchInFlight.clear();
+            attemptedLookup.clear();
+            attemptedAtMs.clear();
+            loggedFetch.clear();
+            lastScheduleMs = 0L;
+            selfRankAttempted = false;
+            nextSelfRankAllowedAtMs = 0L;
+        }
+        catch (Exception ignore) {}
+    }
 
     public String getCachedRankFor(String playerName)
     {
         return displayedRanks.get(playerName);
+    }
+
+    public void forceLookupAndDisplay(String playerName)
+    {
+        if (playerName == null || playerName.trim().isEmpty()) return;
+        try
+        {
+            attemptedLookup.remove(playerName);
+            displayedRanks.remove(playerName);
+            if (fetchInFlight.putIfAbsent(playerName, Boolean.TRUE) == null)
+            {
+                log.info("[Overlay] forced fetch for player={} bucket={}", playerName, bucketKey(config.rankBucket()));
+                java.util.concurrent.CompletableFuture.supplyAsync(() -> {
+                    try {
+                        return plugin != null ? plugin.resolvePlayerRank(playerName, bucketKey(config.rankBucket())) : null;
+                    } catch (Exception e) { return null; }
+                }).thenAccept(rank -> {
+                    try
+                    {
+                        if (rank != null)
+                        {
+                            displayedRanks.put(playerName, rank);
+                            if (loggedFetch.putIfAbsent(playerName, Boolean.TRUE) == null)
+                            {
+                                log.info("Fetched rank for {}: {}", playerName, rank);
+                            }
+                        }
+                        else if (loggedFetch.putIfAbsent(playerName, Boolean.TRUE) == null)
+                        {
+                            log.info("No rank found for {} (no retry)", playerName);
+                        }
+                    }
+                    finally
+                    {
+                        fetchInFlight.remove(playerName);
+                    }
+                });
+            }
+        }
+        catch (Exception ignore) {}
     }
 
     public java.awt.image.BufferedImage resolveRankIcon(String fullRank)
@@ -67,12 +165,13 @@ public class RankOverlay extends Overlay
     private java.awt.Point dragStart = null;
 
     @Inject
-    public RankOverlay(Client client, PvPLeaderboardConfig config, RankCacheService rankCache, ItemManager itemManager)
+    public RankOverlay(Client client, PvPLeaderboardConfig config, RankCacheService rankCache, ItemManager itemManager, PvPLeaderboardPlugin plugin)
     {
         this.client = client;
         this.config = config;
         this.rankCache = rankCache;
         this.itemManager = itemManager;
+        this.plugin = plugin;
         setPosition(OverlayPosition.DYNAMIC);
         setLayer(OverlayLayer.ABOVE_WIDGETS);
         setPriority(OverlayPriority.HIGHEST);
@@ -81,18 +180,76 @@ public class RankOverlay extends Overlay
     @Override
     public Dimension render(Graphics2D graphics)
     {
+        // Gate on shard readiness instead of fixed delay
+        if (plugin != null && !plugin.isShardReady())
+        {
+            long now = System.currentTimeMillis();
+            if (now - lastShardNotReadyLogMs >= 1000L)
+            {
+                log.info("[Overlay] shard not ready yet; skipping render");
+                lastShardNotReadyLogMs = now;
+            }
+            return null;
+        }
         // Show text if enabled, otherwise show icons
 
         String currentBucket = bucketKey(config.rankBucket());
         if (lastBucketKey == null || !lastBucketKey.equals(currentBucket))
         {
+            // Do not clear nameRankCache (1h persistence across buckets); just reset transient state
             displayedRanks.clear();
             fetchInFlight.clear();
             loggedFetch.clear();
             attemptedLookup.clear();
+            attemptedAtMs.clear();
             lastBucketKey = currentBucket;
+            // Allow self lookup again immediately on bucket change
+            selfRankAttempted = false;
+            nextSelfRankAllowedAtMs = 0L;
         }
 
+        // Always prioritize fetching the local player's rank first, but only once until explicitly refreshed
+        if (config.showOwnRank() && client.getLocalPlayer() != null && client.getLocalPlayer().getName() != null)
+        {
+            String selfName = client.getLocalPlayer().getName();
+            long now = System.currentTimeMillis();
+            if (!selfRankAttempted && now >= nextSelfRankAllowedAtMs)
+            {
+                if (fetchInFlight.putIfAbsent(selfName, Boolean.TRUE) == null)
+                {
+                    selfRankAttempted = true;
+                    log.info("[Overlay] fetch self first name={} bucket={}", selfName, bucketKey(config.rankBucket()));
+                    java.util.concurrent.CompletableFuture.supplyAsync(() -> {
+                        try {
+                            return plugin != null ? plugin.resolvePlayerRank(selfName, bucketKey(config.rankBucket())) : null;
+                        } catch (Exception e) { return null; }
+                    }).thenAccept(rank -> {
+                        try
+                        {
+                            if (rank != null)
+                            {
+                                displayedRanks.put(selfName, rank);
+                                try { nameRankCache.put(cacheKeyFor(selfName), new CacheEntry(rank, System.currentTimeMillis())); } catch (Exception ignore) {}
+                                if (loggedFetch.putIfAbsent(selfName, Boolean.TRUE) == null)
+                                {
+                                    log.info("Fetched rank for {}: {}", selfName, rank);
+                                }
+                            }
+                            else if (loggedFetch.putIfAbsent(selfName, Boolean.TRUE) == null)
+                            {
+                                log.info("No rank found for {} (no retry)", selfName);
+                            }
+                        }
+                        finally
+                        {
+                            fetchInFlight.remove(selfName);
+                        }
+                    });
+                }
+            }
+        }
+
+        java.util.HashSet<String> present = new java.util.HashSet<>();
         for (Player player : client.getPlayers())
         {
             if ((!config.showOwnRank() && player == client.getLocalPlayer()) || player.getName() == null)
@@ -101,33 +258,82 @@ public class RankOverlay extends Overlay
             }
 
             String playerName = player.getName();
+            present.add(playerName);
             String cachedRank = displayedRanks.get(playerName);
+            // Serve from 1-hour cache if available
+            try
+            {
+                String ck = cacheKeyFor(playerName);
+                CacheEntry ce = nameRankCache.get(ck);
+                if (ce != null && (System.currentTimeMillis() - ce.ts) < RANK_CACHE_TTL_MS)
+                {
+                    displayedRanks.put(playerName, ce.rank);
+                    cachedRank = ce.rank;
+                }
+            }
+            catch (Exception ignore) {}
 
             if (cachedRank == null)
             {
-                if (attemptedLookup.putIfAbsent(playerName, Boolean.TRUE) == null)
+                Long firstAttempt = attemptedAtMs.get(playerName);
+                long now = System.currentTimeMillis();
+                if (firstAttempt != null && now - firstAttempt < 60_000L) {
+                    continue; // skip re-attempts for 60s
+                }
+                if (attemptedLookup.putIfAbsent(playerName, Boolean.TRUE) != null) {
+                    attemptedAtMs.putIfAbsent(playerName, firstAttempt != null ? firstAttempt : now);
+                    continue;
+                }
+                attemptedAtMs.put(playerName, now);
+                // Limit concurrent lookups based on throttle level
+                int level = config != null ? Math.max(0, Math.min(10, config.lookupThrottleLevel())) : 0;
+                int maxConcurrent;
+                if (level <= 0) maxConcurrent = 10;
+                else if (level >= 10) maxConcurrent = 1;
+                else if (level <= 5) maxConcurrent = 10 - (level - 1); // 1->10, 5->6
+                else maxConcurrent = Math.max(1, 11 - level); // 6->5, 9->2
+                if (fetchInFlight.size() >= maxConcurrent)
                 {
-                    if (fetchInFlight.putIfAbsent(playerName, Boolean.TRUE) == null)
-                    {
-                        rankCache.getPlayerRank(playerName, config.rankBucket()).thenAccept(rank -> {
+                    continue;
+                }
+                // Also space out scheduling to avoid bursts
+                long perScheduleDelayMs = computeThrottleDelayMs(level);
+                long nowMsFetch = System.currentTimeMillis();
+                if (perScheduleDelayMs > 0 && nowMsFetch - lastScheduleMs < perScheduleDelayMs)
+                {
+                    continue;
+                }
+                lastScheduleMs = nowMsFetch;
+
+                if (fetchInFlight.putIfAbsent(playerName, Boolean.TRUE) == null)
+                {
+                    log.info("[Overlay] fetch once for player={} bucket={}", playerName, bucketKey(config.rankBucket()));
+                    java.util.concurrent.CompletableFuture.supplyAsync(() -> {
+                        try {
+                            return plugin != null ? plugin.resolvePlayerRank(playerName, bucketKey(config.rankBucket())) : null;
+                        } catch (Exception e) { return null; }
+                    }).thenAccept(rank -> {
+                        try
+                        {
                             if (rank != null)
                             {
                                 displayedRanks.put(playerName, rank);
+                                try { nameRankCache.put(cacheKeyFor(playerName), new CacheEntry(rank, System.currentTimeMillis())); } catch (Exception ignore) {}
                                 if (loggedFetch.putIfAbsent(playerName, Boolean.TRUE) == null)
                                 {
                                     log.info("Fetched rank for {}: {}", playerName, rank);
                                 }
                             }
-                            else
+                            else if (loggedFetch.putIfAbsent(playerName, Boolean.TRUE) == null)
                             {
-                                if (loggedFetch.putIfAbsent(playerName, Boolean.TRUE) == null)
-                                {
-                                    log.info("No rank found for {} (missing in JSON)", playerName);
-                                }
+                                log.info("No rank found for {} (no retry)", playerName);
                             }
+                        }
+                        finally
+                        {
                             fetchInFlight.remove(playerName);
-                        });
-                    }
+                        }
+                    });
                 }
                 continue;
             }
@@ -145,12 +351,12 @@ public class RankOverlay extends Overlay
                     if (headLoc != null)
                     {
                         x = headLoc.getX() - iconSize / 2 + offsetX + config.rankIconOffsetXSelf();
-                        y = headLoc.getY() - iconSize - 2 + offsetY + config.rankIconOffsetY();
+                        y = headLoc.getY() - iconSize - 2 + offsetY + config.rankIconOffsetYSelf();
                     }
                     else
                     {
                         x = nameLocation.getX() - iconSize / 2 + offsetX + config.rankIconOffsetXSelf();
-                        y = nameLocation.getY() - fm.getAscent() - iconSize - 2 + offsetY + config.rankIconOffsetY();
+                        y = nameLocation.getY() - fm.getAscent() - iconSize - 2 + offsetY + config.rankIconOffsetYSelf();
                     }
                 }
                 else
@@ -161,7 +367,7 @@ public class RankOverlay extends Overlay
                         int nameWidth = fm.stringWidth(playerName);
                         centerX = nameLocation.getX() + Math.max(0, nameWidth) / 2 + offsetX + config.rankIconOffsetXOthers();
                         x = centerX - iconSize / 2;
-                        y = nameLocation.getY() - fm.getAscent() - iconSize - 2 + offsetY + config.rankIconOffsetY();
+                        y = nameLocation.getY() - fm.getAscent() - iconSize - 2 + offsetY + config.rankIconOffsetYOthers();
                     }
                     else
                     {
@@ -169,26 +375,56 @@ public class RankOverlay extends Overlay
                         if (headLoc != null)
                         {
                             x = headLoc.getX() - iconSize / 2 + offsetX + config.rankIconOffsetXOthers();
-                            y = headLoc.getY() - iconSize - 2 + offsetY + config.rankIconOffsetY();
+                            y = headLoc.getY() - iconSize - 2 + offsetY + config.rankIconOffsetYOthers();
                         }
                         else
                         {
                             x = nameLocation.getX() - iconSize / 2 + offsetX + config.rankIconOffsetXOthers();
-                            y = nameLocation.getY() - fm.getAscent() - iconSize - 2 + offsetY + config.rankIconOffsetY();
+                            y = nameLocation.getY() - fm.getAscent() - iconSize - 2 + offsetY + config.rankIconOffsetYOthers();
                         }
                     }
                 }
-                if (config.showRankAsText())
+                PvPLeaderboardConfig.RankDisplayMode mode = config.rankDisplayMode();
+                if (mode == PvPLeaderboardConfig.RankDisplayMode.RANK_NUMBER)
+                {
+                    int centerX = x + iconSize / 2;
+                    // Force display as Rank N
+                    String text = cachedRank;
+                    try
+                    {
+                        if (text != null && !text.startsWith("Rank"))
+                        {
+                            // Attempt to derive world rank index from plugin using name+bucket
+                            int idx = plugin != null ? plugin.getWorldRankIndex(playerName, bucketKey(config.rankBucket())) : -1;
+                            if (idx > 0) text = "Rank " + idx;
+                        }
+                    }
+                    catch (Exception ignore) {}
+                    renderRankText(graphics, text, centerX, y, Math.max(10, config.rankTextSize()));
+                }
+                else if (mode == PvPLeaderboardConfig.RankDisplayMode.ICON)
+                {
+                    renderRankSpriteOrFallback(graphics, cachedRank, x, y, iconSize);
+                }
+                else // TEXT
                 {
                     int centerX = x + iconSize / 2;
                     renderRankText(graphics, cachedRank, centerX, y, Math.max(10, config.rankTextSize()));
                 }
-                else
-                {
-                    renderRankSpriteOrFallback(graphics, cachedRank, x, y, iconSize);
-                }
             }
         }
+
+        // prune attempt state for players that left
+        try {
+            for (String name : attemptedLookup.keySet())
+            {
+                if (!present.contains(name))
+                {
+                    attemptedLookup.remove(name);
+                    attemptedAtMs.remove(name);
+                }
+            }
+        } catch (Exception ignore) {}
 
         return null;
     }
@@ -274,7 +510,14 @@ public class RankOverlay extends Overlay
             }
         }
 
-        g.setColor(getRankColor(rankName));
+        if (fullRank.startsWith("Rank "))
+        {
+            g.setColor(Color.WHITE);
+        }
+        else
+        {
+            g.setColor(getRankColor(rankName));
+        }
         g.drawString(text, x - textW / 2, y + textH);
     }
 

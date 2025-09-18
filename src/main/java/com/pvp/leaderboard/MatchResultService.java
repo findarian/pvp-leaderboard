@@ -91,8 +91,11 @@ public class MatchResultService
         }
         
         int responseCode = conn.getResponseCode();
+        String resp = HttpUtil.readResponseBody(conn);
         log.info("Response Code: {}", responseCode);
-        return responseCode >= 200 && responseCode < 300;
+        if (responseCode >= 200 && responseCode < 300) return true;
+        log.warn("Authenticated submit failed: {} - {}", responseCode, resp);
+        return false;
     }
     
     private boolean submitUnauthenticatedFight(String body, long accountHash) throws Exception
@@ -128,8 +131,11 @@ public class MatchResultService
         }
         
         int responseCode = conn.getResponseCode();
+        String respBody = HttpUtil.readResponseBody(conn);
         log.info("Response Code: {}", responseCode);
-        return responseCode >= 200 && responseCode < 300;
+        if (responseCode >= 200 && responseCode < 300) return true;
+        log.warn("Unauthenticated submit failed: {} - {}", responseCode, respBody);
+        return false;
     }
     
     private String generateSignature(String body, long timestamp) throws Exception
