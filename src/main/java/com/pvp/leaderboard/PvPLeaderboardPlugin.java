@@ -27,6 +27,7 @@ import net.runelite.client.game.SpriteManager;
 import java.awt.image.BufferedImage;
 import javax.swing.SwingUtilities;
 import net.runelite.client.menus.MenuManager;
+import net.runelite.client.callback.ClientThread;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 
@@ -67,6 +68,9 @@ public class PvPLeaderboardPlugin extends Plugin
 
     @Inject
     private SpriteManager spriteManager;
+
+    @Inject
+    private ClientThread clientThread;
 
 	// ScoreboardOverlay and NearbyLeaderboardOverlay removed per request
 
@@ -367,58 +371,37 @@ private volatile boolean shardReady = false;
 			Player player = (Player) actorDeath.getActor();
 			Player localPlayer = client.getLocalPlayer();
 			
+            try { log.info("[Fight] onActorDeath actor={}, inFight={}, opponent={} ", player != null ? player.getName() : "null", inFight, opponent); } catch (Exception ignore) {}
+
             if (player == localPlayer)
             {
-                // Local player died
+                // Local player died → record, infer killer, and schedule result with double-KO check
                 selfDeathMs = System.currentTimeMillis();
-                // Find who actually killed the local player
-                String actualKiller = findActualKiller();
-                if (actualKiller != null)
-                {
-                    opponent = actualKiller;
-                }
-                // Immediate result unless double-KO window applies
-                if (!fightFinalized)
-                {
-                    if (opponentDeathMs > 0L && Math.abs(selfDeathMs - opponentDeathMs) <= 1500L)
-                    {
-                        fightFinalized = true;
-                        endFight("tie");
+                try {
+                    String actualKiller = findActualKiller();
+                    if (actualKiller != null) {
+                        opponent = actualKiller;
                     }
-                    else
-                    {
-                        fightFinalized = true;
-                        endFight("loss");
-                    }
-                }
+                } catch (Exception ignore) {}
+                try { log.info("[Fight] self death at {} ms; opponent={}", selfDeathMs, opponent); } catch (Exception ignore) {}
+                scheduleDoubleKoCheck("loss");
             }
             else
             {
-                String name = player.getName();
+                String name = null;
+                try { name = player != null ? player.getName() : null; } catch (Exception ignore) {}
                 if (name != null)
                 {
-                    // If we didn't have the opponent set, assume this is the opponent we fought
                     if (opponent == null)
                     {
                         opponent = name;
                     }
                     if (name.equals(opponent))
                     {
-                        // Opponent died
+                        // Opponent died → record and schedule result with double-KO check
                         opponentDeathMs = System.currentTimeMillis();
-                        if (!fightFinalized)
-                        {
-                            if (selfDeathMs > 0L && Math.abs(selfDeathMs - opponentDeathMs) <= 1500L)
-                            {
-                                fightFinalized = true;
-                                endFight("tie");
-                            }
-                            else
-                            {
-                                fightFinalized = true;
-                                endFight("win");
-                            }
-                        }
+                        try { log.info("[Fight] opponent death at {} ms; opponent={}", opponentDeathMs, opponent); } catch (Exception ignore) {}
+                        scheduleDoubleKoCheck("win");
                     }
                 }
             }
@@ -810,13 +793,15 @@ private volatile boolean shardReady = false;
 		return 1000.0; // Placeholder
 	}
 	
-	private void submitMatchResult(String result, long fightEndTime)
+    private void submitMatchResult(String result, long fightEndTime)
 	{
-		String playerId = client.getLocalPlayer() != null ? client.getLocalPlayer().getName() : "Unknown";
-		int world = client.getWorld();
+        String playerId;
+        try { playerId = client.getLocalPlayer() != null ? client.getLocalPlayer().getName() : "Unknown"; } catch (Exception e) { playerId = "Unknown"; }
+        int world; try { world = client.getWorld(); } catch (Exception e) { world = -1; }
 		String startSpellbook = getSpellbookName(fightStartSpellbook);
 		String endSpellbook = getSpellbookName(fightEndSpellbook);
-		String idToken = dashboardPanel != null ? dashboardPanel.getIdToken() : null;
+        String idToken = null;
+        try { idToken = dashboardPanel != null ? dashboardPanel.getIdToken() : null; } catch (Exception ignore) {}
 		
 		matchResultService.submitMatchResult(
 			playerId,
@@ -836,10 +821,10 @@ private volatile boolean shardReady = false;
 			} else {
 				log.warn("Failed to submit match result");
 			}
-		}).exceptionally(ex -> {
-			log.error("Error submitting match result", ex);
-			return null;
-		});
+        }).exceptionally(ex -> {
+            try { log.error("Error submitting match result", ex); } catch (Exception ignore) {}
+            return null;
+        });
 	}
 	
 	private boolean isPlayerOpponent(String name)
