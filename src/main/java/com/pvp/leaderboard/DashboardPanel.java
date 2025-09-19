@@ -42,6 +42,11 @@ public class DashboardPanel extends PluginPanel
     private JLabel playerNameLabel;
     private final JProgressBar[] progressBars;
     private final JLabel[] progressLabels;
+    // Reserve space on the right for the sidebar scrollbar to avoid clipping bars
+    private static final int SIDEBAR_SCROLLBAR_RESERVE_PX = 16;
+    // Fixed progress bar dimensions suitable for narrow sidebar
+    private static final int PROGRESS_BAR_WIDTH = 200;
+    private static final int PROGRESS_BAR_HEIGHT = 16;
     
     private JLabel winPercentLabel;
     private JLabel tiesLabel;
@@ -296,6 +301,10 @@ public class DashboardPanel extends PluginPanel
         for (int i = 0; i < buckets.length; i++)
         {
             JPanel bucketPanel = new JPanel(new BorderLayout());
+            // Add horizontal padding; keep extra space on the right so bars never sit under the scrollbar
+            bucketPanel.setBorder(BorderFactory.createEmptyBorder(0, 6, 0, SIDEBAR_SCROLLBAR_RESERVE_PX));
+            // Allow the row to stretch to the full narrow sidebar width (height only)
+            bucketPanel.setMaximumSize(new Dimension(Integer.MAX_VALUE, 40));
             
             progressLabels[i] = new JLabel(buckets[i] + " - — (0.0%) ");
             progressLabels[i].setFont(progressLabels[i].getFont().deriveFont(Font.BOLD));
@@ -305,8 +314,17 @@ public class DashboardPanel extends PluginPanel
             progressBars[i].setValue(0);
             progressBars[i].setStringPainted(true);
             progressBars[i].setString("0%");
-            progressBars[i].setPreferredSize(new Dimension(0, 16));
-            bucketPanel.add(progressBars[i], BorderLayout.CENTER);
+            // Fixed width/height so it never stretches under the scrollbar
+            progressBars[i].setPreferredSize(new Dimension(PROGRESS_BAR_WIDTH, PROGRESS_BAR_HEIGHT));
+            progressBars[i].setMinimumSize(new Dimension(PROGRESS_BAR_WIDTH, PROGRESS_BAR_HEIGHT));
+            progressBars[i].setMaximumSize(new Dimension(PROGRESS_BAR_WIDTH, PROGRESS_BAR_HEIGHT));
+            // Remove extra insets so the fill amount maps 1:1 to percentage on tiny widths
+            progressBars[i].setBorder(BorderFactory.createEmptyBorder(0, 0, 0, 0));
+            // Wrap in a left-aligned FlowLayout row so BorderLayout doesn't stretch the bar
+            JPanel barRow = new JPanel(new FlowLayout(FlowLayout.LEFT, 0, 0));
+            barRow.setOpaque(false);
+            barRow.add(progressBars[i]);
+            bucketPanel.add(barRow, BorderLayout.CENTER);
             
             section.add(bucketPanel);
             if (i < buckets.length - 1) section.add(Box.createVerticalStrut(8));
@@ -1535,6 +1553,10 @@ public class DashboardPanel extends PluginPanel
         progressBars[index].setMaximum(100);
         progressBars[index].setValue(pctValue);
         progressBars[index].setString(String.format("%.1f%%", pct));
+        // Enforce fixed width/height every update to avoid layout managers stretching the bar
+        progressBars[index].setPreferredSize(new Dimension(PROGRESS_BAR_WIDTH, PROGRESS_BAR_HEIGHT));
+        progressBars[index].setMinimumSize(new Dimension(PROGRESS_BAR_WIDTH, PROGRESS_BAR_HEIGHT));
+        progressBars[index].setMaximumSize(new Dimension(PROGRESS_BAR_WIDTH, PROGRESS_BAR_HEIGHT));
         progressBars[index].setForeground(getRankColor(rank));
         progressBars[index].revalidate();
         progressBars[index].repaint();
