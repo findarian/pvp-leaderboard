@@ -66,12 +66,13 @@ public class RankOverlay extends Overlay
         long now = System.currentTimeMillis();
         nextSelfRankAllowedAtMs = now + Math.max(0L, delayMs);
         selfRankAttempted = false;
+        // Do not clear the currently displayed self rank; keep it while the refresh happens
+        // to avoid visual flicker during combat or after submissions.
         try
         {
             if (client != null && client.getLocalPlayer() != null && client.getLocalPlayer().getName() != null)
             {
                 String self = client.getLocalPlayer().getName();
-                displayedRanks.remove(self);
                 try { nameRankCache.remove(cacheKeyFor(self)); } catch (Exception ignore) {}
             }
         }
@@ -212,7 +213,19 @@ public class RankOverlay extends Overlay
         if (lastBucketKey == null || !lastBucketKey.equals(currentBucket))
         {
             // Do not clear nameRankCache (1h persistence across buckets); just reset transient state
-            displayedRanks.clear();
+            // Keep displayedRanks for self to avoid flicker on bucket switch
+            String selfName = null;
+            try { selfName = client != null && client.getLocalPlayer() != null ? client.getLocalPlayer().getName() : null; } catch (Exception ignore) {}
+            if (selfName == null)
+            {
+                displayedRanks.clear();
+            }
+            else
+            {
+                String selfRank = displayedRanks.get(selfName);
+                displayedRanks.clear();
+                if (selfRank != null) displayedRanks.put(selfName, selfRank);
+            }
             fetchInFlight.clear();
             loggedFetch.clear();
             attemptedLookup.clear();

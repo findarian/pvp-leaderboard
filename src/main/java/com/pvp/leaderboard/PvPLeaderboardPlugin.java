@@ -335,12 +335,20 @@ private volatile long suppressFightStartUntilMs = 0L;
 				String opponentName = null;
                 if (player == localPlayer)
 				{
-					// Local player took damage, find who dealt it (allow any hitsplat source)
+					// Local player took damage; try to identify attacker
 					opponentName = getPlayerAttacker();
 					if (opponentName == null)
 					{
-						// If client interactor isn’t set, accept the actor that applied the hitsplat
-						opponentName = player.getName();
+						// Use who we are currently interacting with (often the attacker in 1v1)
+						try {
+							if (localPlayer.getInteracting() instanceof Player) {
+								opponentName = ((Player) localPlayer.getInteracting()).getName();
+							}
+						} catch (Exception ignore) {}
+					}
+					if (opponentName == null && lastEngagedOpponentName != null)
+					{
+						opponentName = lastEngagedOpponentName;
 					}
 					if (opponentName != null) lastEngagedOpponentName = opponentName;
 				}
@@ -354,6 +362,13 @@ private volatile long suppressFightStartUntilMs = 0L;
 				// Only proceed if we have a valid player opponent
 				if (opponentName != null && isPlayerOpponent(opponentName))
 				{
+                    // Avoid starting fights with our own name due to fallback errors
+                    try {
+                        if (client.getLocalPlayer() != null && opponentName.equals(client.getLocalPlayer().getName())) {
+                            try { log.warn("[Fight] suppress start: opponent resolved as self ({}); waiting for better signal", opponentName); } catch (Exception ignore) {}
+                            return;
+                        }
+                    } catch (Exception ignore) {}
                     // Combat activity marker (no-op)
                     // Suppress starts during the guard window right after a fight ends
                     long nowMs = System.currentTimeMillis();
@@ -422,12 +437,19 @@ private volatile long suppressFightStartUntilMs = 0L;
                 try { name = player != null ? player.getName() : null; } catch (Exception ignore) {}
                 if (name != null)
                 {
+                    boolean isEngagedWithLocal = false;
+                    try {
+                        Player pi = player; Player lp = localPlayer;
+                        if (pi != null && lp != null) {
+                            isEngagedWithLocal = (pi.getInteracting() == lp) || (lp.getInteracting() == pi);
+                        }
+                    } catch (Exception ignore) {}
                     if (opponent == null)
                     {
                         opponent = name;
                         lastEngagedOpponentName = name;
                     }
-                    if (name.equals(opponent))
+                    if (name.equals(opponent) || isEngagedWithLocal)
                     {
                         opponentDeathMs = System.currentTimeMillis();
                         try { log.info("[Fight] opponent death at {} ms; opponent={}", opponentDeathMs, opponent); } catch (Exception ignore) {}
@@ -520,7 +542,8 @@ private volatile long suppressFightStartUntilMs = 0L;
         java.util.concurrent.CompletableFuture.runAsync(() -> {
             try
             {
-                try { log.info("[Fight] submitting outcome={} vs={} world={} startTs={} endTs={}", result, opponentSafe, worldSafe, startTimeSafe, endTimeSafe); } catch (Exception ignore) {}
+                try { log.info("[Fight] submitting outcome={} vs={} world={} startTs={} endTs={} startSpell={} endSpell={} multi={} acctHash={} idTokenPresent={}",
+                        result, opponentSafe, worldSafe, startTimeSafe, endTimeSafe, startSpellbookSafe, endSpellbookSafe, wasInMultiSafe, accountHashSafe, (idTokenSafe != null && !idTokenSafe.isEmpty())); } catch (Exception ignore) {}
                 String bucket = wasInMultiSafe ? "multi" : (startSpellbookSafe == 1 ? "veng" : "nh");
 
                 try {
@@ -532,9 +555,10 @@ private volatile long suppressFightStartUntilMs = 0L;
                 submitMatchResultSnapshot(result, endTimeSafe, selfNameSafe, opponentSafe, worldSafe,
                     startTimeSafe, startSpellbookSafe, endSpellbookSafe, wasInMultiSafe, accountHashSafe, idTokenSafe);
 
+                // Do not clear self rank immediately; request a refresh shortly after to avoid flicker
                 try {
                     if (rankOverlay != null) {
-                        rankOverlay.scheduleSelfRankRefresh(0L);
+                        rankOverlay.scheduleSelfRankRefresh(750L);
                     }
                 } catch (Exception ignore) {}
                 if (dashboardPanel != null)
