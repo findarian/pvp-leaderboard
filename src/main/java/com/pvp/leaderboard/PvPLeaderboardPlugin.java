@@ -7,8 +7,6 @@ import net.runelite.api.Client;
 import net.runelite.api.GameState;
 import net.runelite.api.events.GameStateChanged;
 import net.runelite.api.events.HitsplatApplied;
-import net.runelite.api.events.InteractingChanged;
-import net.runelite.api.Actor;
 import net.runelite.api.events.ActorDeath;
 import net.runelite.api.events.MenuEntryAdded;
 import net.runelite.api.events.MenuOptionClicked;
@@ -32,6 +30,7 @@ import net.runelite.client.menus.MenuManager;
 import net.runelite.client.callback.ClientThread;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ConcurrentHashMap;
 
 @Slf4j
 @PluginDescriptor(
@@ -95,6 +94,10 @@ public class PvPLeaderboardPlugin extends Plugin
     private volatile long opponentDeathMs = 0L;
     private volatile boolean fightFinalized = false;
 private volatile boolean shardReady = false;
+    // Guard to prevent immediate false restarts caused by post-death hitsplats
+private volatile long suppressFightStartUntilMs = 0L;
+    // Per-opponent suppression after ending a fight with them; allows multi-combat with others
+    private final ConcurrentHashMap<String, Long> perOpponentSuppressUntilMs = new ConcurrentHashMap<>();
 
 	@Override
 	protected void startUp() throws Exception
@@ -332,14 +335,19 @@ private volatile boolean shardReady = false;
 				String opponentName = null;
                 if (player == localPlayer)
 				{
-					// Local player took damage, find who dealt it
-                    opponentName = getPlayerAttacker();
-                    if (opponentName != null) lastEngagedOpponentName = opponentName;
+					// Local player took damage, find who dealt it (allow any hitsplat source)
+					opponentName = getPlayerAttacker();
+					if (opponentName == null)
+					{
+						// If client interactor isn’t set, accept the actor that applied the hitsplat
+						opponentName = player.getName();
+					}
+					if (opponentName != null) lastEngagedOpponentName = opponentName;
 				}
 				else
 				{
-					// Local player dealt damage to another player
-                    opponentName = player.getName();
+					// Local player dealt damage to another player (any damage counts)
+					opponentName = player.getName();
                     if (opponentName != null) lastEngagedOpponentName = opponentName;
 				}
 				
@@ -347,7 +355,22 @@ private volatile boolean shardReady = false;
 				if (opponentName != null && isPlayerOpponent(opponentName))
 				{
                     // Combat activity marker (no-op)
-					
+                    // Suppress starts during the guard window right after a fight ends
+                    long nowMs = System.currentTimeMillis();
+                    if (nowMs < suppressFightStartUntilMs)
+                    {
+                        try { log.info("[Fight] start suppressed at {}ms (until {}ms)", nowMs, suppressFightStartUntilMs); } catch (Exception ignore) {}
+                        return;
+                    }
+
+					// Per-opponent suppression: after ending with X, ignore X for 3s but allow others
+					Long untilMs = perOpponentSuppressUntilMs.get(opponentName);
+					if (untilMs != null && System.currentTimeMillis() < untilMs)
+					{
+						try { log.info("[Fight] start suppressed for opponent={} until {}ms", opponentName, untilMs); } catch (Exception ignore) {}
+						return;
+					}
+
 					if (!inFight)
 					{
 						startFight(opponentName);
@@ -364,41 +387,7 @@ private volatile boolean shardReady = false;
 		// Fight timeout is handled by scheduled checker
 	}
 
-    // Track exact opponent from interaction changes (stable across instances/NBSP)
-    @Subscribe
-    public void onInteractingChanged(InteractingChanged event)
-    {
-        try
-        {
-            Actor src = event.getSource();
-            Actor tgt = event.getTarget();
-            if (src == null || tgt == null) return;
-            Player local = client.getLocalPlayer();
-            if (local == null) return;
-            if (src == local && tgt instanceof Player)
-            {
-                String name = ((Player) tgt).getName();
-                if (name != null)
-                {
-                    lastExactOpponentName = name; // exact formatting
-                    opponent = name;
-                    if (!inFight) startFight(name);
-                }
-                return;
-            }
-            if (tgt == local && src instanceof Player)
-            {
-                String name = ((Player) src).getName();
-                if (name != null)
-                {
-                    lastExactOpponentName = name;
-                    opponent = name;
-                    if (!inFight) startFight(name);
-                }
-            }
-        }
-        catch (Exception ignore) {}
-    }
+    // Removed: InteractingChanged-driven opponent assignment; we rely on hitsplats only for fight start
 
 	@Subscribe
 	public void onActorDeath(ActorDeath actorDeath)
@@ -412,7 +401,7 @@ private volatile boolean shardReady = false;
 
             if (player == localPlayer)
             {
-                // Local player died → record, infer killer, and determine outcome with 1.5s double-KO guard
+                // Local player died → record, infer killer, and submit immediate loss
                 selfDeathMs = System.currentTimeMillis();
                 try {
                     String actualKiller = findActualKiller();
@@ -421,19 +410,10 @@ private volatile boolean shardReady = false;
                     }
                 } catch (Exception ignore) {}
                 try { log.info("[Fight] self death at {} ms; opponent={}", selfDeathMs, opponent); } catch (Exception ignore) {}
-                long a = selfDeathMs;
-                long b = opponentDeathMs;
-                if (b > 0L && Math.abs(a - b) <= 1500L)
-                {
-                    if (!fightFinalized) {
-                        fightFinalized = true;
-                        Runnable fin = () -> { try { endFight("tie"); } catch (Exception e) { try { log.error("[Fight] endFight(tie) error", e); } catch (Exception ignore) {} } };
-                        try { if (clientThread != null) clientThread.invokeLater(fin); else fin.run(); } catch (Exception e) { fin.run(); }
-                    }
-                }
-                else
-                {
-                    scheduleDoubleKoCheck("loss"); // will finalize in 1.5s
+                if (!fightFinalized) {
+                    fightFinalized = true;
+                    Runnable fin = () -> { try { endFight("loss"); } catch (Exception e) { try { log.error("[Fight] endFight(loss) error", e); } catch (Exception ignore) {} } };
+                    try { if (clientThread != null) clientThread.invokeLater(fin); else fin.run(); } catch (Exception e) { fin.run(); }
                 }
             }
             else
@@ -451,19 +431,10 @@ private volatile boolean shardReady = false;
                     {
                         opponentDeathMs = System.currentTimeMillis();
                         try { log.info("[Fight] opponent death at {} ms; opponent={}", opponentDeathMs, opponent); } catch (Exception ignore) {}
-                        long a = selfDeathMs;
-                        long b = opponentDeathMs;
-                        if (a > 0L && Math.abs(a - b) <= 1500L)
-                        {
-                            if (!fightFinalized) {
-                                fightFinalized = true;
-                                Runnable fin = () -> { try { endFight("tie"); } catch (Exception e) { try { log.error("[Fight] endFight(tie) error", e); } catch (Exception ignore) {} } };
-                                try { if (clientThread != null) clientThread.invokeLater(fin); else fin.run(); } catch (Exception e) { fin.run(); }
-                            }
-                        }
-                        else
-                        {
-                            scheduleDoubleKoCheck("win"); // will finalize in 1.5s
+                        if (!fightFinalized) {
+                            fightFinalized = true;
+                            Runnable fin = () -> { try { endFight("win"); } catch (Exception e) { try { log.error("[Fight] endFight(win) error", e); } catch (Exception ignore) {} } };
+                            try { if (clientThread != null) clientThread.invokeLater(fin); else fin.run(); } catch (Exception e) { fin.run(); }
                         }
                     }
                 }
@@ -473,6 +444,13 @@ private volatile boolean shardReady = false;
 
 	private void startFight(String opponentName)
 	{
+        // Honor suppression window to avoid mis-starts immediately after a fight ends
+        long nowMsCheck = System.currentTimeMillis();
+        if (nowMsCheck < suppressFightStartUntilMs)
+        {
+            try { log.info("[Fight] startFight suppressed at {}ms (until {}ms) for opponent={}", nowMsCheck, suppressFightStartUntilMs, opponentName); } catch (Exception ignore) {}
+            return;
+        }
 		inFight = true;
 		opponent = opponentName;
 		wasInMulti = client.getVarbitValue(Varbits.MULTICOMBAT_AREA) == 1;
@@ -544,36 +522,13 @@ private volatile boolean shardReady = false;
             {
                 try { log.info("[Fight] submitting outcome={} vs={} world={} startTs={} endTs={}", result, opponentSafe, worldSafe, startTimeSafe, endTimeSafe); } catch (Exception ignore) {}
                 String bucket = wasInMultiSafe ? "multi" : (startSpellbookSafe == 1 ? "veng" : "nh");
-                double currentMMR = estimateCurrentMMR();
-
-                String opponentRank = null;
-                try {
-                    if (dashboardPanel != null && opponentSafe != null)
-                    {
-                        opponentRank = dashboardPanel.getTierLabelByName(opponentSafe, bucket);
-                    }
-                } catch (Exception ignore) {}
-
-                final String oppRankFinal = opponentRank;
-                if ("win".equals(result) && oppRankFinal != null)
-                {
-                    updateHighestRankDefeated(oppRankFinal);
-                }
-                else if ("loss".equals(result) && oppRankFinal != null)
-                {
-                    updateLowestRankLostTo(oppRankFinal);
-                }
-
-                if (dashboardPanel != null)
-                {
-                    try { dashboardPanel.updateTierGraphRealTime(bucket, currentMMR); } catch (Exception ignore) {}
-                }
 
                 try {
                     boolean authLoggedIn = dashboardPanel != null && dashboardPanel.isAuthLoggedIn();
                     boolean tokenPresent = idTokenSafe != null && !idTokenSafe.isEmpty();
                     log.info("[Fight] submit snapshot authLoggedIn={} tokenPresent={} opponent={} world={} startTs={} endTs={}", authLoggedIn, tokenPresent, opponentSafe, worldSafe, startTimeSafe, endTimeSafe);
                 } catch (Exception ignore) {}
+                // Fire submission first for immediacy; do other UI work afterwards
                 submitMatchResultSnapshot(result, endTimeSafe, selfNameSafe, opponentSafe, worldSafe,
                     startTimeSafe, startSpellbookSafe, endSpellbookSafe, wasInMultiSafe, accountHashSafe, idTokenSafe);
 
@@ -584,6 +539,24 @@ private volatile boolean shardReady = false;
                 } catch (Exception ignore) {}
                 if (dashboardPanel != null)
                 {
+                    double currentMMR = estimateCurrentMMR();
+                    String opponentRank = null;
+                    try {
+                        if (opponentSafe != null)
+                        {
+                            opponentRank = dashboardPanel.getTierLabelByName(opponentSafe, bucket);
+                        }
+                    } catch (Exception ignore) {}
+                    final String oppRankFinal = opponentRank;
+                    if ("win".equals(result) && oppRankFinal != null)
+                    {
+                        updateHighestRankDefeated(oppRankFinal);
+                    }
+                    else if ("loss".equals(result) && oppRankFinal != null)
+                    {
+                        updateLowestRankLostTo(oppRankFinal);
+                    }
+                    try { dashboardPanel.updateTierGraphRealTime(bucket, currentMMR); } catch (Exception ignore) {}
                     try {
                         final String currentBucket = bucketKey(config.rankBucket());
                         java.util.concurrent.CompletableFuture.supplyAsync(() -> {
@@ -595,8 +568,8 @@ private volatile boolean shardReady = false;
                         });
                         try { dashboardPanel.preloadSelfRankNumbers(selfNameSafe); } catch (Exception ignore) {}
                     } catch (Exception ignore) {}
-                    try { dashboardPanel.updateAdditionalStatsFromPlugin("win".equals(result) ? oppRankFinal : null,
-                            "loss".equals(result) ? oppRankFinal : null); } catch (Exception ignore) {}
+                    try { dashboardPanel.updateAdditionalStatsFromPlugin("win".equals(result) ? opponentRank : null,
+                            "loss".equals(result) ? opponentRank : null); } catch (Exception ignore) {}
                 }
             }
             catch (Exception e)
@@ -606,6 +579,13 @@ private volatile boolean shardReady = false;
         });
 
         log.info("Fight ended with result: " + result + ", Multi during fight: " + wasInMulti + ", Start spellbook: " + startSpellbookSafe + ", End spellbook: " + endSpellbookSafe);
+        // Add per-opponent suppression for 3 seconds so trailing hitsplats from that opponent don't re-start a fight,
+        // but allow combat with other players to start immediately.
+        try {
+            if (opponentSafe != null && !opponentSafe.isEmpty()) {
+                perOpponentSuppressUntilMs.put(opponentSafe, System.currentTimeMillis() + 3000L);
+            }
+        } catch (Exception ignore) {}
         resetFightState();
     }
 
@@ -646,6 +626,7 @@ private volatile boolean shardReady = false;
         }
     }
 	
+    @SuppressWarnings("unused")
     private void endFightTimeout()
     {
         if (!inFight) return;
@@ -654,6 +635,7 @@ private volatile boolean shardReady = false;
         resetFightState();
     }
 
+    @SuppressWarnings("unused")
     private void scheduleDoubleKoCheck(String fallbackResult)
 	{
 		try
@@ -734,6 +716,8 @@ private volatile boolean shardReady = false;
 		fightEndSpellbook = -1;
 		opponent = null;
         fightStartTime = 0;
+        // After finishing a fight, briefly suppress new starts to ignore trailing hitsplats
+        try { suppressFightStartUntilMs = System.currentTimeMillis() + 800L; } catch (Exception ignore) { suppressFightStartUntilMs = 0L; }
 	}
 
 	private String getPlayerAttacker()
@@ -815,6 +799,7 @@ private volatile boolean shardReady = false;
         return null;
     }
 
+    @SuppressWarnings("unused")
     public int getWorldRankIndex(String playerName, String bucket)
     {
         try
@@ -830,6 +815,7 @@ private volatile boolean shardReady = false;
         catch (Exception ignore) { return -1; }
     }
 
+    @SuppressWarnings("unused")
     private static String bucketKey(PvPLeaderboardConfig.RankBucket bucket)
     {
         if (bucket == null) return "overall";
@@ -938,7 +924,8 @@ private volatile boolean shardReady = false;
 		return lowestRankLostTo;
 	}
 	
-	private String determineBucket()
+@SuppressWarnings("unused")
+private String determineBucket()
 	{
         // Determine bucket based on spellbook and multi area
         if (wasInMulti) return "multi";
@@ -952,7 +939,8 @@ private volatile boolean shardReady = false;
 		return 1000.0; // Placeholder
 	}
 	
-    private void submitMatchResult(String result, long fightEndTime)
+@SuppressWarnings("unused")
+private void submitMatchResult(String result, long fightEndTime)
 	{
         String playerId;
         try { playerId = client.getLocalPlayer() != null ? client.getLocalPlayer().getName() : "Unknown"; } catch (Exception e) { playerId = "Unknown"; }
@@ -1004,7 +992,7 @@ private volatile boolean shardReady = false;
 		return false;
 	}
 	
-	private String getSpellbookName(int spellbook)
+    private String getSpellbookName(int spellbook)
 	{
 		switch (spellbook) {
 			case 0:
