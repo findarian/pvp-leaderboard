@@ -544,6 +544,11 @@ private volatile boolean shardReady = false;
                     try { dashboardPanel.updateTierGraphRealTime(bucket, currentMMR); } catch (Exception ignore) {}
                 }
 
+                try {
+                    boolean authLoggedIn = dashboardPanel != null && dashboardPanel.isAuthLoggedIn();
+                    boolean tokenPresent = idTokenSafe != null && !idTokenSafe.isEmpty();
+                    log.info("[Fight] submit snapshot authLoggedIn={} tokenPresent={} opponent={} world={} startTs={} endTs={}", authLoggedIn, tokenPresent, opponentSafe, worldSafe, startTimeSafe, endTimeSafe);
+                } catch (Exception ignore) {}
                 submitMatchResultSnapshot(result, endTimeSafe, selfNameSafe, opponentSafe, worldSafe,
                     startTimeSafe, startSpellbookSafe, endSpellbookSafe, wasInMultiSafe, accountHashSafe, idTokenSafe);
 

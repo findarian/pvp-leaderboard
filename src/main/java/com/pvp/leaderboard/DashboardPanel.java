@@ -2433,6 +2433,11 @@ public class DashboardPanel extends PluginPanel
     {
         return idToken;
     }
+
+    public boolean isAuthLoggedIn()
+    {
+        try { return authService != null && authService.isLoggedIn(); } catch (Exception ignore) { return false; }
+    }
     
     private void updateBucketButtonStates(String activeBucket)
     {
