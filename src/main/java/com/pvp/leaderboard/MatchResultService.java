@@ -51,12 +51,15 @@ public class MatchResultService
                 
                 if (idToken != null && !idToken.isEmpty())
                 {
-                    return submitAuthenticatedFight(bodyJson, accountHash, idToken);
+                    boolean ok = submitAuthenticatedFight(bodyJson, accountHash, idToken);
+                    if (!ok)
+                    {
+                        log.warn("Authenticated submit failed; retrying unauthenticated path");
+                        return submitUnauthenticatedFight(bodyJson, accountHash);
+                    }
+                    return true;
                 }
-                else
-                {
-                    return submitUnauthenticatedFight(bodyJson, accountHash);
-                }
+                return submitUnauthenticatedFight(bodyJson, accountHash);
             }
             catch (Exception e)
             {
@@ -75,6 +78,8 @@ public class MatchResultService
         conn.setRequestProperty("Authorization", "Bearer " + idToken);
         conn.setRequestProperty("x-account-hash", String.valueOf(accountHash));
         conn.setDoOutput(true);
+        conn.setConnectTimeout(5000);
+        conn.setReadTimeout(10000);
         
         log.info("=== AUTHENTICATED REQUEST ===");
         log.info("URL: {}", API_URL);
@@ -112,6 +117,8 @@ public class MatchResultService
         conn.setRequestProperty("x-timestamp", String.valueOf(timestamp));
         conn.setRequestProperty("x-signature", signature);
         conn.setDoOutput(true);
+        conn.setConnectTimeout(5000);
+        conn.setReadTimeout(10000);
         
         log.info("=== UNAUTHENTICATED REQUEST ===");
         log.info("URL: {}", API_URL);

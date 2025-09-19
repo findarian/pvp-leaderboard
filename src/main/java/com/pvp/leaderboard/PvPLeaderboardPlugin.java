@@ -7,6 +7,8 @@ import net.runelite.api.Client;
 import net.runelite.api.GameState;
 import net.runelite.api.events.GameStateChanged;
 import net.runelite.api.events.HitsplatApplied;
+import net.runelite.api.events.InteractingChanged;
+import net.runelite.api.Actor;
 import net.runelite.api.events.ActorDeath;
 import net.runelite.api.events.MenuEntryAdded;
 import net.runelite.api.events.MenuOptionClicked;
@@ -81,7 +83,9 @@ public class PvPLeaderboardPlugin extends Plugin
 	private boolean wasInMulti = false;
 	private int fightStartSpellbook = -1;
 	private int fightEndSpellbook = -1;
-	private String opponent = null;
+    private String opponent = null;
+    private volatile String lastEngagedOpponentName = null; // legacy fallback (may be normalized)
+    private volatile String lastExactOpponentName = null;   // exact name as reported by client
 	private String highestRankDefeated = null;
 	private String lowestRankLostTo = null;
 	private long fightStartTime = 0;
@@ -326,15 +330,17 @@ private volatile boolean shardReady = false;
 			{
 				// For player vs player combat, ensure both source and target are players
 				String opponentName = null;
-				if (player == localPlayer)
+                if (player == localPlayer)
 				{
 					// Local player took damage, find who dealt it
-					opponentName = getPlayerAttacker();
+                    opponentName = getPlayerAttacker();
+                    if (opponentName != null) lastEngagedOpponentName = opponentName;
 				}
 				else
 				{
 					// Local player dealt damage to another player
-					opponentName = player.getName();
+                    opponentName = player.getName();
+                    if (opponentName != null) lastEngagedOpponentName = opponentName;
 				}
 				
 				// Only proceed if we have a valid player opponent
@@ -357,6 +363,42 @@ private volatile boolean shardReady = false;
 		
 		// Fight timeout is handled by scheduled checker
 	}
+
+    // Track exact opponent from interaction changes (stable across instances/NBSP)
+    @Subscribe
+    public void onInteractingChanged(InteractingChanged event)
+    {
+        try
+        {
+            Actor src = event.getSource();
+            Actor tgt = event.getTarget();
+            if (src == null || tgt == null) return;
+            Player local = client.getLocalPlayer();
+            if (local == null) return;
+            if (src == local && tgt instanceof Player)
+            {
+                String name = ((Player) tgt).getName();
+                if (name != null)
+                {
+                    lastExactOpponentName = name; // exact formatting
+                    opponent = name;
+                    if (!inFight) startFight(name);
+                }
+                return;
+            }
+            if (tgt == local && src instanceof Player)
+            {
+                String name = ((Player) src).getName();
+                if (name != null)
+                {
+                    lastExactOpponentName = name;
+                    opponent = name;
+                    if (!inFight) startFight(name);
+                }
+            }
+        }
+        catch (Exception ignore) {}
+    }
 
 	@Subscribe
 	public void onActorDeath(ActorDeath actorDeath)
@@ -390,6 +432,7 @@ private volatile boolean shardReady = false;
                     if (opponent == null)
                     {
                         opponent = name;
+                        lastEngagedOpponentName = name;
                     }
                     if (name.equals(opponent))
                     {
@@ -455,71 +498,124 @@ private volatile boolean shardReady = false;
         catch (Exception ignore) {}
     }
 
-	private void endFight(String result)
-	{
-		fightEndSpellbook = client.getVarbitValue(Varbits.SPELLBOOK);
-		long fightEndTime = System.currentTimeMillis() / 1000;
-		
-		if (opponent != null)
-		{
-            String bucket = determineBucket();
-            String opponentRank = resolvePlayerRank(opponent, bucket);
-			double currentMMR = estimateCurrentMMR();
-			
-            if ("win".equals(result) && opponentRank != null)
-			{
-				updateHighestRankDefeated(opponentRank);
-			}
-            else if ("loss".equals(result) && opponentRank != null)
-			{
-				updateLowestRankLostTo(opponentRank);
-			}
-			
-			// Update tier graph with real-time data
-			if (dashboardPanel != null)
-			{
-				dashboardPanel.updateTierGraphRealTime(bucket, currentMMR);
-			}
+    private void endFight(String result)
+    {
+        // RUN ON CLIENT THREAD: capture only client-bound values, then offload heavy work
+        final int endSpellbookSafe = client.getVarbitValue(Varbits.SPELLBOOK);
+        final long endTimeSafe = System.currentTimeMillis() / 1000;
+        final String opponentSafe = (opponent != null ? opponent : (lastExactOpponentName != null ? lastExactOpponentName : lastEngagedOpponentName));
+        final boolean wasInMultiSafe = wasInMulti;
+        final int startSpellbookSafe = fightStartSpellbook;
+        final long startTimeSafe = fightStartTime;
+        final long accountHashSafe = accountHash;
+        final String selfNameSafe = client.getLocalPlayer() != null ? client.getLocalPlayer().getName() : "Unknown";
+        final int worldSafe; try { worldSafe = client.getWorld(); } catch (Exception e) { throw e; }
 
-			// Optionally show fight rank box overlay via existing rankOverlay drawing (toggle from config)
-			// The rankOverlay renders icons and can be extended later; for now, rely on icon above name.
-			
-            // Submit match result to API and optimistically update UI on success
-            submitMatchResult(result, fightEndTime);
-            // After submission, immediately refresh self rank and push API tier as a fast-follow
-            try {
-                if (rankOverlay != null) {
-                    rankOverlay.scheduleSelfRankRefresh(0L);
-                }
-            } catch (Exception ignore) {}
-            try {
-                if (dashboardPanel != null && client != null && client.getLocalPlayer() != null)
+        // Offload network and UI updates to background where appropriate
+        java.util.concurrent.CompletableFuture.runAsync(() -> {
+            try
+            {
+                try { log.info("[Fight] submitting outcome={} vs={} world={} startTs={} endTs={}", result, opponentSafe, worldSafe, startTimeSafe, endTimeSafe); } catch (Exception ignore) {}
+                String bucket = wasInMultiSafe ? "multi" : (startSpellbookSafe == 1 ? "veng" : "nh");
+                double currentMMR = estimateCurrentMMR();
+
+                String opponentRank = null;
+                try {
+                    if (dashboardPanel != null && opponentSafe != null)
+                    {
+                        opponentRank = dashboardPanel.getTierLabelByName(opponentSafe, bucket);
+                    }
+                } catch (Exception ignore) {}
+
+                final String oppRankFinal = opponentRank;
+                if ("win".equals(result) && oppRankFinal != null)
                 {
-                    final String selfName = client.getLocalPlayer().getName();
-                    final String currentBucket = bucketKey(config.rankBucket());
-                    java.util.concurrent.CompletableFuture.supplyAsync(() -> {
-                        try { return dashboardPanel.fetchSelfTierFromApi(selfName, currentBucket); } catch (Exception e) { return null; }
-                    }).thenAccept(tier -> {
-                        if (tier != null && !tier.isEmpty() && rankOverlay != null) {
-                            rankOverlay.setRankFromApi(selfName, tier);
-                        }
-                    });
-                    // Also refresh side panel rank numbers/account linkage
-                    try { dashboardPanel.preloadSelfRankNumbers(selfName); } catch (Exception ignore) {}
+                    updateHighestRankDefeated(oppRankFinal);
                 }
-            } catch (Exception ignore) {}
-            try {
-                if (dashboardPanel != null) {
-                    dashboardPanel.updateAdditionalStatsFromPlugin("win".equals(result) ? opponentRank : null,
-                        "loss".equals(result) ? opponentRank : null);
+                else if ("loss".equals(result) && oppRankFinal != null)
+                {
+                    updateLowestRankLostTo(oppRankFinal);
                 }
-            } catch (Exception ignore) {}
-		}
-		
-		log.info("Fight ended with result: " + result + ", Multi during fight: " + wasInMulti + ", Start spellbook: " + fightStartSpellbook + ", End spellbook: " + fightEndSpellbook);
-		
-		resetFightState();
-	}
+
+                if (dashboardPanel != null)
+                {
+                    try { dashboardPanel.updateTierGraphRealTime(bucket, currentMMR); } catch (Exception ignore) {}
+                }
+
+                String idTokenSafe = null;
+                try { idTokenSafe = dashboardPanel != null ? dashboardPanel.getIdToken() : null; } catch (Exception ignore) {}
+
+                submitMatchResultSnapshot(result, endTimeSafe, selfNameSafe, opponentSafe, worldSafe,
+                    startTimeSafe, startSpellbookSafe, endSpellbookSafe, wasInMultiSafe, accountHashSafe, idTokenSafe);
+
+                try {
+                    if (rankOverlay != null) {
+                        rankOverlay.scheduleSelfRankRefresh(0L);
+                    }
+                } catch (Exception ignore) {}
+                if (dashboardPanel != null)
+                {
+                    try {
+                        final String currentBucket = bucketKey(config.rankBucket());
+                        java.util.concurrent.CompletableFuture.supplyAsync(() -> {
+                            try { return dashboardPanel.fetchSelfTierFromApi(selfNameSafe, currentBucket); } catch (Exception e) { return null; }
+                        }).thenAccept(tier -> {
+                            if (tier != null && !tier.isEmpty() && rankOverlay != null) {
+                                rankOverlay.setRankFromApi(selfNameSafe, tier);
+                            }
+                        });
+                        try { dashboardPanel.preloadSelfRankNumbers(selfNameSafe); } catch (Exception ignore) {}
+                    } catch (Exception ignore) {}
+                    try { dashboardPanel.updateAdditionalStatsFromPlugin("win".equals(result) ? oppRankFinal : null,
+                            "loss".equals(result) ? oppRankFinal : null); } catch (Exception ignore) {}
+                }
+            }
+            catch (Exception e)
+            {
+                try { log.error("[Fight] async finalize error", e); } catch (Exception ignore) {}
+            }
+        });
+
+        log.info("Fight ended with result: " + result + ", Multi during fight: " + wasInMulti + ", Start spellbook: " + startSpellbookSafe + ", End spellbook: " + endSpellbookSafe);
+        resetFightState();
+    }
+
+    // Submit using captured snapshot; no client access in this method
+    private void submitMatchResultSnapshot(String result, long fightEndTime,
+                                           String playerId, String opponentId, int world,
+                                           long fightStartTs, int fightStartSpellbookLocal, int fightEndSpellbookLocal,
+                                           boolean wasInMultiLocal, long accountHashLocal, String idTokenLocal)
+    {
+        try
+        {
+            matchResultService.submitMatchResult(
+                playerId,
+                opponentId,
+                result,
+                world,
+                fightStartTs,
+                fightEndTime,
+                getSpellbookName(fightStartSpellbookLocal),
+                getSpellbookName(fightEndSpellbookLocal),
+                wasInMultiLocal,
+                accountHashLocal,
+                idTokenLocal
+            ).thenAccept(success -> {
+                if (success) {
+                    log.info("Match result submitted successfully");
+                } else {
+                    log.warn("Failed to submit match result");
+                }
+            }).exceptionally(ex -> {
+                try { log.error("Error submitting match result", ex); } catch (Exception ignore) {}
+                return null;
+            });
+        }
+        catch (Exception e)
+        {
+            try { log.error("[Fight] submitMatchResultSnapshot error", e); } catch (Exception ignore) {}
+        }
+    }
 	
     private void endFightTimeout()
     {
@@ -570,6 +666,8 @@ private volatile boolean shardReady = false;
                                 if (opponent == null || opponent.isEmpty()) {
                                     try { log.warn("[Fight] opponent missing at finalize; outcome={}, a={}, b={}", outcome, a, b); } catch (Exception ignore) {}
                                 }
+                                // LMS safeguard: small delay before endFight to avoid instance teardown race
+                                try { if (client != null && client.getWorld() == 390) { Thread.sleep(250); } } catch (Exception ignored) {}
                                 endFight(outcome);
                             } catch (Exception e) {
                                 try { log.error("[Fight] endFight({}) error", outcome, e); } catch (Exception ignore) {}
@@ -606,9 +704,6 @@ private volatile boolean shardReady = false;
 		fightEndSpellbook = -1;
 		opponent = null;
         fightStartTime = 0;
-        fightFinalized = false;
-        selfDeathMs = 0L;
-        opponentDeathMs = 0L;
 	}
 
 	private String getPlayerAttacker()
@@ -815,18 +910,10 @@ private volatile boolean shardReady = false;
 	
 	private String determineBucket()
 	{
-		// Determine bucket based on spellbook and multi area
-		if (wasInMulti)
-		{
-			return "multi";
-		}
-		
-		if (fightStartSpellbook == 1) // Lunar spellbook
-		{
-			return "veng";
-		}
-		
-		return "nh"; // Default to NH
+        // Determine bucket based on spellbook and multi area
+        if (wasInMulti) return "multi";
+        if (fightStartSpellbook == 1) return "veng"; // Lunar
+        return "nh"; // Default to NH
 	}
 	
 	private double estimateCurrentMMR()
