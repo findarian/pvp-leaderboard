@@ -74,8 +74,16 @@ public class CognitoAuthService {
                 );
                 Desktop.getDesktop().browse(URI.create(loginUrl));
 
-                // Wait for code up to 180s
-                String code = codeFuture.get(180, java.util.concurrent.TimeUnit.SECONDS);
+                // Wait for code up to 10s; on timeout, fail silently and allow re-login
+                String code = null;
+                try {
+                    code = codeFuture.get(10, java.util.concurrent.TimeUnit.SECONDS);
+                } catch (java.util.concurrent.TimeoutException te) {
+                    // Timeout: stop server and return false without UI popups
+                    stopCallbackServer();
+                    clearTokens();
+                    return false;
+                }
                 stopCallbackServer();
                 if (code == null || code.isEmpty()) {
                     // Ensure auth artifacts are cleared on failure

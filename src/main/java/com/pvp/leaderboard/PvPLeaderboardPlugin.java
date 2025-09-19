@@ -297,14 +297,9 @@ private volatile boolean shardReady = false;
 			catch (Exception ignore) {}
 		}
         else if (gameStateChanged.getGameState() == GameState.LOGIN_SCREEN)
-		{
-			// If combat was in progress, immediately treat as tie on logout
-			try {
-				if (inFight) {
-					endFightTimeout();
-				}
-			} catch (Exception ignore) {}
-		}
+        {
+            // Do not clear fight immediately; allow scheduled finalizer to run
+        }
 		else if (gameStateChanged.getGameState() == GameState.HOPPING || gameStateChanged.getGameState() == GameState.LOADING)
 		{
 			try {
@@ -415,6 +410,10 @@ private volatile boolean shardReady = false;
 		wasInMulti = client.getVarbitValue(Varbits.MULTICOMBAT_AREA) == 1;
 		fightStartSpellbook = client.getVarbitValue(Varbits.SPELLBOOK);
 		fightStartTime = System.currentTimeMillis() / 1000;
+        // Reset per-fight state to ensure finalizer runs
+        fightFinalized = false;
+        selfDeathMs = 0L;
+        opponentDeathMs = 0L;
         
         log.info("Fight started against: " + opponent + ", Multi: " + wasInMulti + ", Spellbook: " + fightStartSpellbook);
 	}
@@ -530,31 +529,71 @@ private volatile boolean shardReady = false;
         resetFightState();
     }
 
-	private void scheduleDoubleKoCheck(String fallbackResult)
+    private void scheduleDoubleKoCheck(String fallbackResult)
 	{
 		try
 		{
-			if (fightScheduler == null) return;
-			fightScheduler.schedule(() -> {
+            if (fightScheduler == null || fightScheduler.isShutdown())
+            {
+                try {
+                    fightScheduler = Executors.newSingleThreadScheduledExecutor(r -> {
+                        Thread t = new Thread(r, "pvp-fight-events");
+                        t.setDaemon(true);
+                        return t;
+                    });
+                } catch (Exception ignore) {}
+            }
+            final long scheduledAt = System.currentTimeMillis();
+            try { log.info("[Fight] scheduling finalize in 3000ms (fallback={}), a={}, b={}", fallbackResult, selfDeathMs, opponentDeathMs); } catch (Exception ignore) {}
+            fightScheduler.schedule(() -> {
 				try
 				{
-					if (!inFight || fightFinalized) return;
+                    if (fightFinalized) return;
 					long a = selfDeathMs;
 					long b = opponentDeathMs;
-					if (a > 0L && b > 0L && Math.abs(a - b) <= 1500L)
+                    if (a > 0L && b > 0L && Math.abs(a - b) <= 1500L)
 					{
 						fightFinalized = true;
-						endFight("tie");
+                        try { log.info("[Fight] finalize tie (Δ={} ms)", Math.abs(a - b)); } catch (Exception ignore) {}
+                        Runnable fin = () -> { try { endFight("tie"); } catch (Exception e) { try { log.error("[Fight] endFight(tie) error", e); } catch (Exception ignore) {} } };
+                        try { if (clientThread != null) clientThread.invokeLater(fin); else fin.run(); } catch (Exception e) { fin.run(); }
 						return;
 					}
 					if (fallbackResult != null && !fightFinalized)
 					{
 						fightFinalized = true;
-						endFight(fallbackResult);
+                        try { log.info("[Fight] finalize {} after wait; a={}, b={}, scheduledAt={}", fallbackResult, a, b, scheduledAt); } catch (Exception ignore) {}
+                        final String outcome = fallbackResult;
+                        Runnable fin = () -> {
+                            try {
+                                // Guard opponent presence; if lost due to relog, keep last known
+                                if (opponent == null || opponent.isEmpty()) {
+                                    try { log.warn("[Fight] opponent missing at finalize; outcome={}, a={}, b={}", outcome, a, b); } catch (Exception ignore) {}
+                                }
+                                endFight(outcome);
+                            } catch (Exception e) {
+                                try { log.error("[Fight] endFight({}) error", outcome, e); } catch (Exception ignore) {}
+                            }
+                        };
+                        try { if (clientThread != null) clientThread.invokeLater(fin); else fin.run(); } catch (Exception e) { fin.run(); }
 					}
 				}
 				catch (Exception ignore) {}
-			}, 600L, java.util.concurrent.TimeUnit.MILLISECONDS);
+            }, 3000L, java.util.concurrent.TimeUnit.MILLISECONDS);
+
+            // Watchdog: force finalize at 3500ms if still not finalized
+            fightScheduler.schedule(() -> {
+                try
+                {
+                    if (fightFinalized) return;
+                    fightFinalized = true;
+                    final String outcome = (fallbackResult != null ? fallbackResult : "loss");
+                    try { log.warn("[Fight] watchdog finalize {} at 3500ms; a={}, b={}, scheduledAt={}", outcome, selfDeathMs, opponentDeathMs, scheduledAt); } catch (Exception ignore) {}
+                    Runnable fin = () -> { try { endFight(outcome); } catch (Exception e) { try { log.error("[Fight] watchdog endFight({}) error", outcome, e); } catch (Exception ignore) {} } };
+                    try { if (clientThread != null) clientThread.invokeLater(fin); else fin.run(); } catch (Exception e) { fin.run(); }
+                }
+                catch (Exception ignore) {}
+            }, 3500L, java.util.concurrent.TimeUnit.MILLISECONDS);
 		}
 		catch (Exception ignore) {}
 	}
@@ -567,6 +606,9 @@ private volatile boolean shardReady = false;
 		fightEndSpellbook = -1;
 		opponent = null;
         fightStartTime = 0;
+        fightFinalized = false;
+        selfDeathMs = 0L;
+        opponentDeathMs = 0L;
 	}
 
 	private String getPlayerAttacker()

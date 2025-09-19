@@ -134,6 +134,11 @@ public class MatchResultService
         String respBody = HttpUtil.readResponseBody(conn);
         log.info("Response Code: {}", responseCode);
         if (responseCode >= 200 && responseCode < 300) return true;
+        if (responseCode == 202)
+        {
+            // 202 Accepted is considered success; backend processes asynchronously
+            return true;
+        }
         log.warn("Unauthenticated submit failed: {} - {}", responseCode, respBody);
         return false;
     }
