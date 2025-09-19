@@ -509,6 +509,8 @@ private volatile boolean shardReady = false;
         final long startTimeSafe = fightStartTime;
         final long accountHashSafe = accountHash;
         final String selfNameSafe = client.getLocalPlayer() != null ? client.getLocalPlayer().getName() : "Unknown";
+        final String idTokenSafe;
+        try { idTokenSafe = dashboardPanel != null ? dashboardPanel.getIdToken() : null; } catch (Exception e) { throw e; }
         final int worldSafe; try { worldSafe = client.getWorld(); } catch (Exception e) { throw e; }
 
         // Offload network and UI updates to background where appropriate
@@ -541,9 +543,6 @@ private volatile boolean shardReady = false;
                 {
                     try { dashboardPanel.updateTierGraphRealTime(bucket, currentMMR); } catch (Exception ignore) {}
                 }
-
-                String idTokenSafe = null;
-                try { idTokenSafe = dashboardPanel != null ? dashboardPanel.getIdToken() : null; } catch (Exception ignore) {}
 
                 submitMatchResultSnapshot(result, endTimeSafe, selfNameSafe, opponentSafe, worldSafe,
                     startTimeSafe, startSpellbookSafe, endSpellbookSafe, wasInMultiSafe, accountHashSafe, idTokenSafe);
