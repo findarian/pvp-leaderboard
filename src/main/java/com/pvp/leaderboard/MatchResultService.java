@@ -9,6 +9,8 @@ import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 @Slf4j
 public class MatchResultService
@@ -17,6 +19,11 @@ public class MatchResultService
     private static final String CLIENT_ID = "runelite";
     private static final String PLUGIN_VERSION = "1.0.0";
     private static final String RUNELITE_CLIENT_SECRET = "7f2f6a0e-2c6b-4b1d-9a39-6f2b2a8a1f3c"; // Replace with actual secret
+    private final ExecutorService httpExecutor = Executors.newFixedThreadPool(2, r -> {
+        Thread t = new Thread(r, "pvp-http");
+        t.setDaemon(true);
+        return t;
+    });
     
     public CompletableFuture<Boolean> submitMatchResult(
         String playerId, 
@@ -66,7 +73,7 @@ public class MatchResultService
                 log.error("Failed to submit match result", e);
                 return false;
             }
-        });
+        }, httpExecutor);
     }
     
     private boolean submitAuthenticatedFight(String body, long accountHash, String idToken) throws Exception
