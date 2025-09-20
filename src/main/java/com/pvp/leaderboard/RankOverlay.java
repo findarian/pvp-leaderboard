@@ -62,9 +62,15 @@ public class RankOverlay extends Overlay
     private String cacheKeyFor(String name){ return bucketKey(config.rankBucket()) + "|" + (name == null ? "" : name.trim().replaceAll("\\s+"," ")); }
     private static long computeThrottleDelayMs(int level)
     {
-        if (level <= 0) return 0L;
-        if (level >= 10) return 2000L;
-        return level * 20L;
+        if (level <= 0) return 10L;          // level 0 → 10ms
+        if (level >= 10) return 2000L;       // level 10 → 2000ms
+        if (level <= 5)
+        {
+            // Linear from 0:10ms to 5:200ms → +38ms per level
+            return 10L + (long) (38L * level);
+        }
+        // Linear from 5:200ms to 10:2000ms → +360ms per level
+        return 200L + (long) ((level - 5L) * 360L);
     }
     public void scheduleSelfRankRefresh(long delayMs)
     {

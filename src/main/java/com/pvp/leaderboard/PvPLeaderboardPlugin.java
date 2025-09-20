@@ -7,6 +7,7 @@ import net.runelite.api.Client;
 import net.runelite.api.GameState;
 import net.runelite.api.events.GameStateChanged;
 import net.runelite.api.events.HitsplatApplied;
+import net.runelite.api.events.GameTick;
 import net.runelite.api.events.ActorDeath;
 import net.runelite.api.events.MenuEntryAdded;
 import net.runelite.api.events.MenuOptionClicked;
@@ -90,6 +91,9 @@ public class PvPLeaderboardPlugin extends Plugin
 	private long fightStartTime = 0;
     private MatchResultService matchResultService = new MatchResultService();
     private ScheduledExecutorService fightScheduler;
+    // Tracks multiple simultaneous fights (per-opponent) with 10s inactivity expiry
+    private final java.util.concurrent.ConcurrentHashMap<String, FightEntry> activeFights = new java.util.concurrent.ConcurrentHashMap<>();
+    private ScheduledExecutorService fightGcScheduler;
     private volatile long selfDeathMs = 0L;
     private volatile long opponentDeathMs = 0L;
     private volatile boolean fightFinalized = false;
@@ -98,6 +102,10 @@ private volatile boolean shardReady = false;
 private volatile long suppressFightStartUntilMs = 0L;
     // Per-opponent suppression after ending a fight with them; allows multi-combat with others
     private final ConcurrentHashMap<String, Long> perOpponentSuppressUntilMs = new ConcurrentHashMap<>();
+    // Damage accounting since last out-of-combat window
+    private final java.util.concurrent.ConcurrentHashMap<String, Long> damageFromOpponent = new java.util.concurrent.ConcurrentHashMap<>();
+    private static final int OUT_OF_COMBAT_TICKS = 16; // 16 ticks ≈ 9.6s
+    private volatile int lastCombatActivityTick = 0;
 
 	@Override
 	protected void startUp() throws Exception
@@ -112,6 +120,31 @@ private volatile long suppressFightStartUntilMs = 0L;
                 t.setDaemon(true);
                 return t;
             });
+        } catch (Exception ignore) {}
+        try {
+            fightGcScheduler = Executors.newSingleThreadScheduledExecutor(r -> {
+                Thread t = new Thread(r, "pvp-fight-gc");
+                t.setDaemon(true);
+                return t;
+            });
+            fightGcScheduler.scheduleAtFixedRate(() -> {
+                try {
+                    long now = System.currentTimeMillis();
+                    for (java.util.Map.Entry<String, FightEntry> e : activeFights.entrySet())
+                    {
+                        FightEntry fe = e.getValue();
+                        if (fe == null) continue;
+                        if (!fe.finalized && now - fe.lastActivityMs > 10_000L)
+                        {
+                            // Expire inactive fights without submission (combat lock ends after 10s)
+                            activeFights.remove(e.getKey());
+                            try { log.info("[Fight] expire inactive vs={} lastActivity={}msAgo", e.getKey(), now - fe.lastActivityMs); } catch (Exception ignore) {}
+                        }
+                    }
+                    // Update global flag for compatibility
+                    inFight = !activeFights.isEmpty();
+                } catch (Exception ignore) {}
+            }, 1L, 1L, java.util.concurrent.TimeUnit.SECONDS);
         } catch (Exception ignore) {}
 
         // Add right-click player menu item based on config (default ON)
@@ -168,6 +201,7 @@ private volatile long suppressFightStartUntilMs = 0L;
         overlayManager.remove(topNearbyOverlay);
         overlayManager.remove(bottomNearbyOverlay);
         try { if (fightScheduler != null) { fightScheduler.shutdownNow(); } } catch (Exception ignore) {}
+        try { if (fightGcScheduler != null) { fightGcScheduler.shutdownNow(); } } catch (Exception ignore) {}
 		log.info("PvP Leaderboard stopped!");
 	}
     @Subscribe
@@ -303,9 +337,11 @@ private volatile long suppressFightStartUntilMs = 0L;
 			}
 			catch (Exception ignore) {}
 		}
-        else if (gameStateChanged.getGameState() == GameState.LOGIN_SCREEN)
+		else if (gameStateChanged.getGameState() == GameState.LOGIN_SCREEN)
         {
-            // Do not clear fight immediately; allow scheduled finalizer to run
+			// Fully clear fight state on logout
+			try { log.info("[Fight] state reset on LOGIN_SCREEN"); } catch (Exception ignore) {}
+			resetFightState();
         }
 		else if (gameStateChanged.getGameState() == GameState.HOPPING || gameStateChanged.getGameState() == GameState.LOADING)
 		{
@@ -313,11 +349,25 @@ private volatile long suppressFightStartUntilMs = 0L;
 				if (rankOverlay != null) {
 					rankOverlay.resetLookupStateOnWorldHop();
 				}
+				// Do NOT reset active fights on LOADING/HOPPING. Teleports and instancing trigger these states during fights.
+				try { log.info("[Fight] scene change: {} (fight preserved)", gameStateChanged.getGameState()); } catch (Exception ignore) {}
 			} catch (Exception ignore) {}
 		}
 	}
 
     // Prewarm helpers removed
+
+    @Subscribe
+    public void onGameTick(GameTick tick)
+    {
+        // If idle beyond the combat window, clear damage and active fights window cleanly
+        int tickNow = 0; try { tickNow = client.getTickCount(); } catch (Exception ignore) {}
+        if (tickNow - lastCombatActivityTick > OUT_OF_COMBAT_TICKS && !damageFromOpponent.isEmpty())
+        {
+            damageFromOpponent.clear();
+            try { log.info("[Fight] window cleared on tick={} (idle>{} ticks)", tickNow, OUT_OF_COMBAT_TICKS); } catch (Exception ignore) {}
+        }
+    }
 
 	@Subscribe
 	public void onHitsplatApplied(HitsplatApplied hitsplatApplied)
@@ -350,7 +400,14 @@ private volatile long suppressFightStartUntilMs = 0L;
 					{
 						opponentName = lastEngagedOpponentName;
 					}
-					if (opponentName != null) lastEngagedOpponentName = opponentName;
+                    if (opponentName != null) lastEngagedOpponentName = opponentName;
+                    // Damage accounting for killer attribution window
+                    try {
+                        int amt = hitsplatApplied.getHitsplat() != null ? hitsplatApplied.getHitsplat().getAmount() : 0;
+                        if (amt > 0 && opponentName != null) {
+                            damageFromOpponent.merge(opponentName, (long) amt, Long::sum);
+                        }
+                    } catch (Exception ignore) {}
 				}
 				else
 				{
@@ -362,6 +419,15 @@ private volatile long suppressFightStartUntilMs = 0L;
 				// Only proceed if we have a valid player opponent
 				if (opponentName != null && isPlayerOpponent(opponentName))
 				{
+                    // Global combat window check: clear if idle > OUT_OF_COMBAT_TICKS
+                    int tickNow = 0; try { tickNow = client.getTickCount(); } catch (Exception ignore) {}
+                    if (tickNow - lastCombatActivityTick > OUT_OF_COMBAT_TICKS)
+                    {
+                        activeFights.clear();
+                        damageFromOpponent.clear();
+                        try { log.info("[Fight] combat window reset after {} ticks idle", tickNow - lastCombatActivityTick); } catch (Exception ignore) {}
+                    }
+                    lastCombatActivityTick = tickNow;
                     // Avoid starting fights with our own name due to fallback errors
                     try {
                         if (client.getLocalPlayer() != null && opponentName.equals(client.getLocalPlayer().getName())) {
@@ -370,11 +436,11 @@ private volatile long suppressFightStartUntilMs = 0L;
                         }
                     } catch (Exception ignore) {}
                     // Combat activity marker (no-op)
-                    // Suppress starts during the guard window right after a fight ends
-                    long nowMs = System.currentTimeMillis();
-                    if (nowMs < suppressFightStartUntilMs)
+                    // Suppress starts during the guard window right after a fight ends (use ms)
+                    long nowMsCheck = System.currentTimeMillis();
+                    if (nowMsCheck < suppressFightStartUntilMs)
                     {
-                        try { log.info("[Fight] start suppressed at {}ms (until {}ms)", nowMs, suppressFightStartUntilMs); } catch (Exception ignore) {}
+                        try { log.info("[Fight] start suppressed at {}ms (until {}ms)", nowMsCheck, suppressFightStartUntilMs); } catch (Exception ignore) {}
                         return;
                     }
 
@@ -386,6 +452,9 @@ private volatile long suppressFightStartUntilMs = 0L;
 						return;
 					}
 
+					// Start or update per-opponent fight state (multi-fight support)
+					touchFight(opponentName);
+					inFight = true;
 					if (!inFight)
 					{
 						startFight(opponentName);
@@ -407,7 +476,7 @@ private volatile long suppressFightStartUntilMs = 0L;
 	@Subscribe
 	public void onActorDeath(ActorDeath actorDeath)
 	{
-		if (actorDeath.getActor() instanceof Player && inFight)
+		if (actorDeath.getActor() instanceof Player)
 		{
 			Player player = (Player) actorDeath.getActor();
 			Player localPlayer = client.getLocalPlayer();
@@ -425,10 +494,20 @@ private volatile long suppressFightStartUntilMs = 0L;
                     }
                 } catch (Exception ignore) {}
                 try { log.info("[Fight] self death at {} ms; opponent={}", selfDeathMs, opponent); } catch (Exception ignore) {}
-                if (!fightFinalized) {
-                    fightFinalized = true;
-                    Runnable fin = () -> { try { endFight("loss"); } catch (Exception e) { try { log.error("[Fight] endFight(loss) error", e); } catch (Exception ignore) {} } };
-                    try { if (clientThread != null) clientThread.invokeLater(fin); else fin.run(); } catch (Exception e) { fin.run(); }
+                // Pick killer as the opponent who did the most damage within the current combat window
+                String killer = null; long bestDmg = -1L;
+                try {
+                    for (java.util.Map.Entry<String, Long> e : damageFromOpponent.entrySet()) {
+                        long v = (e.getValue() != null ? e.getValue() : 0L);
+                        if (v > bestDmg) { bestDmg = v; killer = e.getKey(); }
+                    }
+                } catch (Exception ignore) {}
+                if (killer == null) killer = opponent;
+                if (killer == null) killer = mostRecentActiveOpponent();
+                if (killer != null) endFightFor(killer, "loss");
+                else {
+                    // No known opponent; clear all fights
+                    activeFights.clear(); inFight = false;
                 }
             }
             else
@@ -444,27 +523,21 @@ private volatile long suppressFightStartUntilMs = 0L;
                             isEngagedWithLocal = (pi.getInteracting() == lp) || (lp.getInteracting() == pi);
                         }
                     } catch (Exception ignore) {}
-                    if (opponent == null)
-                    {
-                        opponent = name;
-                        lastEngagedOpponentName = name;
-                    }
-                    if (name.equals(opponent) || isEngagedWithLocal)
+                    if (activeFights.containsKey(name) || isEngagedWithLocal)
                     {
                         opponentDeathMs = System.currentTimeMillis();
                         try { log.info("[Fight] opponent death at {} ms; opponent={}", opponentDeathMs, opponent); } catch (Exception ignore) {}
-                        if (!fightFinalized) {
-                            fightFinalized = true;
-                            Runnable fin = () -> { try { endFight("win"); } catch (Exception e) { try { log.error("[Fight] endFight(win) error", e); } catch (Exception ignore) {} } };
-                            try { if (clientThread != null) clientThread.invokeLater(fin); else fin.run(); } catch (Exception e) { fin.run(); }
-                        }
+                        try {
+                            log.info("[Fight] end snapshot: opponent={} world={} startTs={} spellStart={} spellEnd={} multi={}", opponent, client.getWorld(), fightStartTime, fightStartSpellbook, client.getVarbitValue(Varbits.SPELLBOOK), wasInMulti);
+                        } catch (Exception ignore) {}
+                        endFightFor(name, "win");
                     }
                 }
             }
 		}
 	}
 
-	private void startFight(String opponentName)
+private void startFight(String opponentName)
 	{
         // Honor suppression window to avoid mis-starts immediately after a fight ends
         long nowMsCheck = System.currentTimeMillis();
@@ -482,6 +555,7 @@ private volatile long suppressFightStartUntilMs = 0L;
         fightFinalized = false;
         selfDeathMs = 0L;
         opponentDeathMs = 0L;
+        try { log.info("[Fight] start snapshot: opponent={} world={} spellbook={} multi={}", opponentName, client.getWorld(), fightStartSpellbook, wasInMulti); } catch (Exception ignore) {}
         
         log.info("Fight started against: " + opponent + ", Multi: " + wasInMulti + ", Spellbook: " + fightStartSpellbook);
 	}
@@ -742,6 +816,9 @@ private volatile long suppressFightStartUntilMs = 0L;
         fightStartTime = 0;
         // After finishing a fight, briefly suppress new starts to ignore trailing hitsplats
         try { suppressFightStartUntilMs = System.currentTimeMillis() + 800L; } catch (Exception ignore) { suppressFightStartUntilMs = 0L; }
+        activeFights.clear();
+        damageFromOpponent.clear();
+        lastCombatActivityTick = 0;
 	}
 
 	private String getPlayerAttacker()
@@ -774,6 +851,79 @@ private volatile long suppressFightStartUntilMs = 0L;
 		}
 		return null;
 	}
+
+    // === Multi-fight helpers ===
+    @SuppressWarnings("unused")
+    private static class FightEntry {
+        final String opponent; // kept for clarity
+        final long startTs;
+        final int startSpellbook;
+        final boolean wasInMulti;
+        final int startWorld; // kept for diagnostics
+        volatile long lastActivityMs;
+        volatile boolean finalized = false;
+        FightEntry(String op, long ts, int sb, boolean multi, int world){ opponent=op; startTs=ts; startSpellbook=sb; wasInMulti=multi; startWorld=world; lastActivityMs=System.currentTimeMillis(); }
+    }
+
+    private void touchFight(String opponentName)
+    {
+        if (opponentName == null || opponentName.isEmpty()) return;
+        long ts = System.currentTimeMillis() / 1000;
+        int sb = client.getVarbitValue(Varbits.SPELLBOOK);
+        boolean multi = client.getVarbitValue(Varbits.MULTICOMBAT_AREA) == 1;
+        int world = client.getWorld();
+        activeFights.compute(opponentName, (k, v) -> {
+            if (v == null) {
+                try { log.info("[Fight] start (multi-track) vs={} world={} spellbook={} multi={}", opponentName, world, sb, multi); } catch (Exception ignore) {}
+                return new FightEntry(opponentName, ts, sb, multi, world);
+            }
+            v.lastActivityMs = System.currentTimeMillis();
+            return v;
+        });
+    }
+
+    private String mostRecentActiveOpponent()
+    {
+        long best = -1L; String bestName = null;
+        for (java.util.Map.Entry<String, FightEntry> e : activeFights.entrySet())
+        {
+            if (e.getValue() == null) continue;
+            long la = e.getValue().lastActivityMs;
+            if (la > best) { best = la; bestName = e.getKey(); }
+        }
+        return bestName;
+    }
+
+    private void endFightFor(String opponentName, String result)
+    {
+        FightEntry fe = activeFights.remove(opponentName);
+        if (fe != null) fe.finalized = true;
+        final int endSpellbookSafe = client.getVarbitValue(Varbits.SPELLBOOK);
+        final long endTimeSafe = System.currentTimeMillis() / 1000;
+        final String opponentSafe = opponentName;
+        final boolean wasInMultiSafe = fe != null ? fe.wasInMulti : wasInMulti;
+        final int startSpellbookSafe = fe != null ? fe.startSpellbook : fightStartSpellbook;
+        final long startTimeSafe = fe != null ? fe.startTs : (endTimeSafe - 10);
+        final long accountHashSafe = accountHash;
+        final String selfNameSafe = client.getLocalPlayer() != null ? client.getLocalPlayer().getName() : "Unknown";
+        final String idTokenSafe = dashboardPanel != null ? dashboardPanel.getIdToken() : null;
+        final int worldSafe = client.getWorld();
+
+        java.util.concurrent.CompletableFuture.runAsync(() -> {
+            try
+            {
+                try { log.info("[Fight] submitting outcome={} vs={} world={} startTs={} endTs={} startSpell={} endSpell={} multi={} acctHash={} idTokenPresent={}",
+                        result, opponentSafe, worldSafe, startTimeSafe, endTimeSafe, startSpellbookSafe, endSpellbookSafe, wasInMultiSafe, accountHashSafe, (idTokenSafe != null && !idTokenSafe.isEmpty())); } catch (Exception ignore) {}
+                submitMatchResultSnapshot(result, endTimeSafe, selfNameSafe, opponentSafe, worldSafe,
+                        startTimeSafe, startSpellbookSafe, endSpellbookSafe, wasInMultiSafe, accountHashSafe, idTokenSafe);
+            } catch (Exception e) {
+                try { log.error("[Fight] async finalize error (multi-track)", e); } catch (Exception ignore) {}
+            }
+        });
+        // Suppress restarts only for this opponent
+        try { if (opponentSafe != null) perOpponentSuppressUntilMs.put(opponentSafe, System.currentTimeMillis() + 3000L); } catch (Exception ignore) {}
+        inFight = !activeFights.isEmpty();
+    }
 
     
 
