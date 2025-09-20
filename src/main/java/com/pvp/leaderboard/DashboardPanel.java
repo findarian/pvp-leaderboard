@@ -131,12 +131,7 @@ public class DashboardPanel extends PluginPanel
 
     private Client getClientSafe()
     {
-        try { return plugin != null ? pluginClientAccessor() : null; } catch (Exception ignore) { return null; }
-    }
-    // Indirection to avoid direct private field access; plugin exposes client via accessor
-    private Client pluginClientAccessor()
-    {
-        try { java.lang.reflect.Field f = PvPLeaderboardPlugin.class.getDeclaredField("client"); f.setAccessible(true); return (Client) f.get(plugin); } catch (Exception e) { return null; }
+        try { return plugin != null ? plugin.getClient() : null; } catch (Exception ignore) { return null; }
     }
 
     private static String normalizeDisplayName(String name) {

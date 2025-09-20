@@ -1211,6 +1211,11 @@ private void submitMatchResult(String result, long fightEndTime)
 		return configManager.getConfig(PvPLeaderboardConfig.class);
 	}
 
+    public Client getClient()
+    {
+        return client;
+    }
+
     public boolean isShardReady()
     {
         return shardReady;
