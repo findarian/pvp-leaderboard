@@ -40,6 +40,8 @@ public class RankOverlay extends Overlay
     private final ConcurrentHashMap<String, Long> attemptedAtMs = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, Boolean> loggedFetch = new ConcurrentHashMap<>();
     private final Map<String, BufferedImage> rankIconCache = new ConcurrentHashMap<>();
+    // When present, prefer API-derived rank and ignore shard results until cleared
+    private final ConcurrentHashMap<String, Long> apiOverrideUntilMs = new ConcurrentHashMap<>();
     private String lastBucketKey = null;
     private long lastShardNotReadyLogMs = 0L;
     
@@ -159,6 +161,8 @@ public class RankOverlay extends Overlay
         {
             displayedRanks.put(playerName, rank);
             try { nameRankCache.put(cacheKeyFor(playerName), new CacheEntry(rank, System.currentTimeMillis())); } catch (Exception ignore) {}
+            // Mark override so shard results won't replace this until we see the player in shards
+            try { apiOverrideUntilMs.put(playerName, Long.MAX_VALUE); } catch (Exception ignore) {}
         }
         catch (Exception ignore) {}
     }
@@ -337,7 +341,10 @@ public class RankOverlay extends Overlay
             }
             catch (Exception ignore) {}
 
-            if (cachedRank == null)
+            // If API override is active, use cached rank and skip fetch
+            Long apiUntil = apiOverrideUntilMs.get(playerName);
+            boolean apiActive = apiUntil != null && System.currentTimeMillis() < apiUntil;
+            if (cachedRank == null && !apiActive)
             {
                 Long firstAttempt = attemptedAtMs.get(playerName);
                 long now = System.currentTimeMillis();
@@ -399,7 +406,19 @@ public class RankOverlay extends Overlay
                         {
                             if (rank != null)
                             {
-                                displayedRanks.put(playerName, rank);
+                                // If API override exists, keep it and clear override only when shard confirms presence
+                                Long until = apiOverrideUntilMs.get(playerName);
+                                boolean overrideActive = until != null && System.currentTimeMillis() < until;
+                                if (!overrideActive)
+                                {
+                                    displayedRanks.put(playerName, rank);
+                                    try { nameRankCache.put(cacheKeyFor(playerName), new CacheEntry(rank, System.currentTimeMillis())); } catch (Exception ignore) {}
+                                }
+                                else
+                                {
+                                    // Shard has a value: consider this as fresh and clear override
+                                    apiOverrideUntilMs.remove(playerName);
+                                }
                                 try { nameRankCache.put(cacheKeyFor(playerName), new CacheEntry(rank, System.currentTimeMillis())); } catch (Exception ignore) {}
                                 if (loggedFetch.putIfAbsent(playerName, Boolean.TRUE) == null)
                                 {

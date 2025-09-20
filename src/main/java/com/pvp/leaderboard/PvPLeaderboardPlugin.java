@@ -106,6 +106,8 @@ private volatile long suppressFightStartUntilMs = 0L;
     private final java.util.concurrent.ConcurrentHashMap<String, Long> damageFromOpponent = new java.util.concurrent.ConcurrentHashMap<>();
     private static final int OUT_OF_COMBAT_TICKS = 16; // 16 ticks ≈ 9.6s
     private volatile int lastCombatActivityTick = 0;
+    private final java.util.concurrent.ConcurrentHashMap<String, Boolean> shardPresence = new java.util.concurrent.ConcurrentHashMap<>();
+    private final java.util.concurrent.ConcurrentHashMap<String, Boolean> apiFallbackActive = new java.util.concurrent.ConcurrentHashMap<>();
 
 	@Override
 	protected void startUp() throws Exception
@@ -293,6 +295,7 @@ private volatile long suppressFightStartUntilMs = 0L;
                     try { return dashboardPanel.fetchTierFromApi(playerName, bucket); } catch (Exception e) { return null; }
                 }).thenAccept(tier -> {
                     if (tier != null && !tier.isEmpty()) {
+                        // Force override from API immediately
                         rankOverlay.setRankFromApi(playerName, tier);
                     }
                 });
@@ -880,6 +883,17 @@ private void startFight(String opponentName)
             v.lastActivityMs = System.currentTimeMillis();
             return v;
         });
+        // Probe shard presence once per opponent during combat
+        try {
+            String bucket = bucketKey(config.rankBucket());
+            String tier = resolvePlayerRank(opponentName, bucket);
+            if (tier != null && !tier.isEmpty()) {
+                shardPresence.put(opponentName, Boolean.TRUE);
+            } else {
+                // No shard hit; mark as absent for now
+                shardPresence.putIfAbsent(opponentName, Boolean.FALSE);
+            }
+        } catch (Exception ignore) {}
     }
 
     private String mostRecentActiveOpponent()
@@ -916,6 +930,23 @@ private void startFight(String opponentName)
                         result, opponentSafe, worldSafe, startTimeSafe, endTimeSafe, startSpellbookSafe, endSpellbookSafe, wasInMultiSafe, accountHashSafe, (idTokenSafe != null && !idTokenSafe.isEmpty())); } catch (Exception ignore) {}
                 submitMatchResultSnapshot(result, endTimeSafe, selfNameSafe, opponentSafe, worldSafe,
                         startTimeSafe, startSpellbookSafe, endSpellbookSafe, wasInMultiSafe, accountHashSafe, idTokenSafe);
+                // If opponent wasn't found in shard, schedule API fallback rank update after 15s
+                try {
+                    boolean inShard = Boolean.TRUE.equals(shardPresence.get(opponentSafe));
+                    if (!inShard && !Boolean.TRUE.equals(apiFallbackActive.get(opponentSafe)) && dashboardPanel != null && rankOverlay != null)
+                    {
+                        apiFallbackActive.put(opponentSafe, Boolean.TRUE);
+                        fightScheduler.schedule(() -> {
+                            try {
+                                String bucket = bucketKey(config.rankBucket());
+                                String tier = dashboardPanel.fetchTierFromApi(opponentSafe, bucket);
+                                if (tier != null && !tier.isEmpty()) {
+                                    rankOverlay.setRankFromApi(opponentSafe, tier);
+                                }
+                            } catch (Exception ignore) {}
+                        }, 15L, java.util.concurrent.TimeUnit.SECONDS);
+                    }
+                } catch (Exception ignore) {}
             } catch (Exception e) {
                 try { log.error("[Fight] async finalize error (multi-track)", e); } catch (Exception ignore) {}
             }
