@@ -1276,7 +1276,7 @@ public class DashboardPanel extends PluginPanel
 
     private ShardRank getRankTupleFromShard(String playerName, String accountHash, String bucket)
     {
-        long t0 = System.nanoTime();
+        // long t0 = System.nanoTime();
         try
         {
             String canon = canonName(playerName);
@@ -1312,7 +1312,7 @@ public class DashboardPanel extends PluginPanel
                 ShardRank sr = extractShardRank(cached.payload, useAccount, accountHash, canon);
                 if (sr != null) return sr;
                 // Fresh shard cached and name not present → do not refetch until TTL expiry
-                try { System.out.println("[ShardCache] fresh no_fetch key=" + cacheKey + " ageMs=" + (now - cached.timestamp) + " name=" + canon); } catch (Exception ignore) {}
+                // try { log.info("[ShardCache] fresh no_fetch key={} ageMs={} name={}", cacheKey, (now - cached.timestamp), canon); } catch (Exception ignore) {}
                 return null;
             }
 
@@ -1335,7 +1335,7 @@ public class DashboardPanel extends PluginPanel
                 {
                     ShardRank sr = extractShardRank(cached.payload, useAccount, accountHash, canon);
                     if (sr != null) return sr;
-                    try { System.out.println("[ShardCache] fresh no_fetch (lock) key=" + cacheKey + " ageMs=" + (now - cached.timestamp) + " name=" + canon); } catch (Exception ignore) {}
+                    // try { log.info("[ShardCache] fresh no_fetch (lock) key={} ageMs={} name={}", cacheKey, (now - cached.timestamp), canon); } catch (Exception ignore) {}
                     return null;
                 }
 
@@ -1377,8 +1377,8 @@ public class DashboardPanel extends PluginPanel
             shardThrottle.put(cacheKey, now);
                 shardFailUntil.remove(cacheKey);
                 ShardRank out = extractShardRank(obj, useAccount, accountHash, canon);
-                long dtMs = (System.nanoTime() - t0) / 1_000_000L;
-                try { System.out.println("[ShardFetch] url=" + urlStr + " status=" + status + " dtMs=" + dtMs + " found=" + (out != null)); } catch (Exception ignore) {}
+                // long dtMs = (System.nanoTime() - t0) / 1_000_000L;
+                // try { log.info("[ShardFetch] url={} status={} dtMs={} found={} ", urlStr, status, dtMs, (out != null)); } catch (Exception ignore) {}
                 if (out == null)
                 {
                     try { missingPlayerUntilMs.put((dir + "|" + canon), System.currentTimeMillis() + MISSING_PLAYER_BACKOFF_MS); } catch (Exception ignore) {}
