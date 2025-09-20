@@ -32,7 +32,11 @@ public class AdditionalStatsPanel extends JPanel {
 
         JPanel content = new JPanel(new GridBagLayout());
         GridBagConstraints root = new GridBagConstraints();
-        root.gridx = 0; root.gridy = 0; root.anchor = GridBagConstraints.WEST; root.fill = GridBagConstraints.HORIZONTAL; root.weightx = 1.0;
+        root.gridx = 0;
+        root.gridy = 0;
+        root.anchor = GridBagConstraints.WEST;
+        root.fill = GridBagConstraints.HORIZONTAL;
+        root.weightx = 1.0;
 
         JPanel statsRow = new JPanel(new GridLayout(2, 2, 24, 2));
         statsRow.add(makeStat("Highest Rank Defeated", highestRankLabel, highestTimeLabel));

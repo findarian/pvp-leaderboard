@@ -857,7 +857,15 @@ private void startFight(String opponentName)
         final int startWorld; // kept for diagnostics
         volatile long lastActivityMs;
         volatile boolean finalized = false;
-        FightEntry(String op, long ts, int sb, boolean multi, int world){ opponent=op; startTs=ts; startSpellbook=sb; wasInMulti=multi; startWorld=world; lastActivityMs=System.currentTimeMillis(); }
+        FightEntry(String op, long ts, int sb, boolean multi, int world)
+        {
+            opponent = op;
+            startTs = ts;
+            startSpellbook = sb;
+            wasInMulti = multi;
+            startWorld = world;
+            lastActivityMs = System.currentTimeMillis();
+        }
     }
 
     private void touchFight(String opponentName)

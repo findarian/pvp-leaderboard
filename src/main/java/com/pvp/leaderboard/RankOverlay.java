@@ -60,8 +60,20 @@ public class RankOverlay extends Overlay
             }
         }
     );
-    private static class CacheEntry { final String rank; final long ts; CacheEntry(String r, long t){ this.rank=r; this.ts=t; } }
-    private String cacheKeyFor(String name){ return bucketKey(config.rankBucket()) + "|" + (name == null ? "" : name.trim().replaceAll("\\s+"," ")); }
+    private static class CacheEntry {
+        final String rank;
+        final long ts;
+        CacheEntry(String r, long t) {
+            this.rank = r;
+            this.ts = t;
+        }
+    }
+
+    private String cacheKeyFor(String name)
+    {
+        String normalized = (name == null ? "" : name.trim().replaceAll("\\s+"," "));
+        return bucketKey(config.rankBucket()) + "|" + normalized;
+    }
     private static long computeThrottleDelayMs(int level)
     {
         if (level <= 0) return 10L;          // level 0 → 10ms

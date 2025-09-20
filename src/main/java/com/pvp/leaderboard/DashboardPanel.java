@@ -506,9 +506,15 @@ public class DashboardPanel extends PluginPanel
             }
             setLoginBusy(true);
             authService.login().thenAccept(success -> {
-                if (success && authService != null && authService.isLoggedIn() && authService.getStoredIdToken() != null) {
-                    SwingUtilities.invokeLater(() -> { setLoginBusy(false); completeLogin(); });
-                } else {
+                if (success && authService != null && authService.isLoggedIn() && authService.getStoredIdToken() != null)
+                {
+                    SwingUtilities.invokeLater(() -> {
+                        setLoginBusy(false);
+                        completeLogin();
+                    });
+                }
+                else
+                {
                     SwingUtilities.invokeLater(() -> {
                         setLoginBusy(false);
                         // UI error popups always allowed
@@ -1366,7 +1372,12 @@ public class DashboardPanel extends PluginPanel
 
             BufferedReader r = new BufferedReader(new InputStreamReader(conn.getInputStream(), java.nio.charset.StandardCharsets.UTF_8));
             StringBuilder sb = new StringBuilder();
-            String ln; while ((ln = r.readLine()) != null) sb.append(ln); r.close();
+            String ln;
+            while ((ln = r.readLine()) != null)
+            {
+                sb.append(ln);
+            }
+            r.close();
             JsonObject obj = JsonParser.parseString(sb.toString()).getAsJsonObject();
             shardCache.put(cacheKey, new ShardEntry(obj, now));
             shardThrottle.put(cacheKey, now);
