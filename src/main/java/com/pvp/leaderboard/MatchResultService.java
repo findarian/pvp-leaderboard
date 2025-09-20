@@ -41,8 +41,8 @@ public class MatchResultService
         return CompletableFuture.supplyAsync(() -> {
             try
             {
-                log.info("[Submit] begin playerId={} opponentId={} result={} world={} startTs={} endTs={} startSpell={} endSpell={} multi={} acctHash={} authed={}",
-                        playerId, opponentId, result, world, fightStartTs, fightEndTs, fightStartSpellbook, fightEndSpellbook, wasInMulti, accountHash, (idToken != null && !idToken.isEmpty()));
+                // log.info("[Submit] begin playerId={} opponentId={} result={} world={} startTs={} endTs={} startSpell={} endSpell={} multi={} acctHash={} authed={}",
+                //         playerId, opponentId, result, world, fightStartTs, fightEndTs, fightStartSpellbook, fightEndSpellbook, wasInMulti, accountHash, (idToken != null && !idToken.isEmpty()));
                 JsonObject body = new JsonObject();
                 body.addProperty("player_id", playerId);
                 body.addProperty("opponent_id", opponentId);
@@ -63,7 +63,7 @@ public class MatchResultService
                     boolean ok = submitAuthenticatedFight(bodyJson, accountHash, idToken);
                     if (!ok)
                     {
-                        log.warn("[Submit] authenticated failed; fallback to unauth path");
+                        // log.warn("[Submit] authenticated failed; fallback to unauth path");
                         return submitUnauthenticatedFight(bodyJson, accountHash);
                     }
                     log.info("[Submit] authenticated path accepted");
@@ -75,7 +75,7 @@ public class MatchResultService
             }
             catch (Exception e)
             {
-                log.error("[Submit] exception during submit", e);
+                // log.error("[Submit] exception during submit", e);
                 return false;
             }
         }, httpExecutor);
@@ -93,14 +93,14 @@ public class MatchResultService
         conn.setConnectTimeout(5000);
         conn.setReadTimeout(10000);
         
-        log.info("=== AUTHENTICATED REQUEST ===");
-        log.info("URL: {}", API_URL);
-        log.info("Method: POST");
-        log.info("Headers:");
-        log.info("  Content-Type: application/json; charset=utf-8");
-        log.info("  Authorization: Bearer {}", idToken);
-        log.info("  x-account-hash: {}", accountHash);
-        log.info("Body: {}", body);
+        // log.info("=== AUTHENTICATED REQUEST ===");
+        // log.info("URL: {}", API_URL);
+        // log.info("Method: POST");
+        // log.info("Headers:");
+        // log.info("  Content-Type: application/json; charset=utf-8");
+        // log.info("  Authorization: Bearer {}", idToken);
+        // log.info("  x-account-hash: {}", accountHash);
+        // log.info("Body: {}", body);
         
         try (OutputStream os = conn.getOutputStream())
         {
@@ -108,10 +108,10 @@ public class MatchResultService
         }
         
         int responseCode = conn.getResponseCode();
-        String resp = HttpUtil.readResponseBody(conn);
-        log.info("Response Code: {}", responseCode);
+        /* String resp = */ HttpUtil.readResponseBody(conn);
+        // log.info("Response Code: {}", responseCode);
         if (responseCode >= 200 && responseCode < 300) return true;
-        log.warn("[Submit] authenticated failed: {} - {}", responseCode, resp);
+        // log.warn("[Submit] authenticated failed: {} - {}", responseCode, resp);
         return false;
     }
     
@@ -132,17 +132,17 @@ public class MatchResultService
         conn.setConnectTimeout(5000);
         conn.setReadTimeout(10000);
         
-        log.info("=== UNAUTHENTICATED REQUEST ===");
-        log.info("URL: {}", API_URL);
-        log.info("Method: POST");
-        log.info("Headers:");
-        log.info("  Content-Type: application/json; charset=utf-8");
-        log.info("  x-account-hash: {}", accountHash);
-        log.info("  x-client-id: {}", CLIENT_ID);
-        log.info("  x-timestamp: {}", timestamp);
-        log.info("  x-signature: {}", signature);
-        log.info("Body: {}", body);
-        log.info("Signature Message: POST\n/matchresult\n{}\n{}", body, timestamp);
+        // log.info("=== UNAUTHENTICATED REQUEST ===");
+        // log.info("URL: {}", API_URL);
+        // log.info("Method: POST");
+        // log.info("Headers:");
+        // log.info("  Content-Type: application/json; charset=utf-8");
+        // log.info("  x-account-hash: {}", accountHash);
+        // log.info("  x-client-id: {}", CLIENT_ID);
+        // log.info("  x-timestamp: {}", timestamp);
+        // log.info("  x-signature: {}", signature);
+        // log.info("Body: {}", body);
+        // log.info("Signature Message: POST\n/matchresult\n{}\n{}", body, timestamp);
         
         try (OutputStream os = conn.getOutputStream())
         {
@@ -150,15 +150,15 @@ public class MatchResultService
         }
         
         int responseCode = conn.getResponseCode();
-        String respBody = HttpUtil.readResponseBody(conn);
-        log.info("Response Code: {}", responseCode);
+        /* String respBody = */ HttpUtil.readResponseBody(conn);
+        // log.info("Response Code: {}", responseCode);
         if (responseCode >= 200 && responseCode < 300) return true;
         if (responseCode == 202)
         {
             // 202 Accepted is considered success; backend processes asynchronously
             return true;
         }
-        log.warn("[Submit] unauthenticated failed: {} - {}", responseCode, respBody);
+        // log.warn("[Submit] unauthenticated failed: {} - {}", responseCode, respBody);
         return false;
     }
     

@@ -484,7 +484,7 @@ private volatile long suppressFightStartUntilMs = 0L;
 			Player player = (Player) actorDeath.getActor();
 			Player localPlayer = client.getLocalPlayer();
 			
-            try { log.info("[Fight] onActorDeath actor={}, inFight={}, opponent={} ", player != null ? player.getName() : "null", inFight, opponent); } catch (Exception ignore) {}
+            // try { log.info("[Fight] onActorDeath actor={}, inFight={}, opponent={} ", player != null ? player.getName() : "null", inFight, opponent); } catch (Exception ignore) {}
 
             if (player == localPlayer)
             {
@@ -496,7 +496,7 @@ private volatile long suppressFightStartUntilMs = 0L;
                         opponent = actualKiller;
                     }
                 } catch (Exception ignore) {}
-                try { log.info("[Fight] self death at {} ms; opponent={}", selfDeathMs, opponent); } catch (Exception ignore) {}
+                // try { log.info("[Fight] self death at {} ms; opponent={}", selfDeathMs, opponent); } catch (Exception ignore) {}
                 // Pick killer as the opponent who did the most damage within the current combat window
                 String killer = null; long bestDmg = -1L;
                 try {
@@ -529,10 +529,8 @@ private volatile long suppressFightStartUntilMs = 0L;
                     if (activeFights.containsKey(name) || isEngagedWithLocal)
                     {
                         opponentDeathMs = System.currentTimeMillis();
-                        try { log.info("[Fight] opponent death at {} ms; opponent={}", opponentDeathMs, opponent); } catch (Exception ignore) {}
-                        try {
-                            log.info("[Fight] end snapshot: opponent={} world={} startTs={} spellStart={} spellEnd={} multi={}", opponent, client.getWorld(), fightStartTime, fightStartSpellbook, client.getVarbitValue(Varbits.SPELLBOOK), wasInMulti);
-                        } catch (Exception ignore) {}
+                        // try { log.info("[Fight] opponent death at {} ms; opponent={}", opponentDeathMs, opponent); } catch (Exception ignore) {}
+                        // try { log.info("[Fight] end snapshot: opponent={} world={} startTs={} spellStart={} spellEnd={} multi={}", opponent, client.getWorld(), fightStartTime, fightStartSpellbook, client.getVarbitValue(Varbits.SPELLBOOK), wasInMulti); } catch (Exception ignore) {}
                         endFightFor(name, "win");
                     }
                 }
@@ -558,9 +556,7 @@ private void startFight(String opponentName)
         fightFinalized = false;
         selfDeathMs = 0L;
         opponentDeathMs = 0L;
-        try { log.info("[Fight] start snapshot: opponent={} world={} spellbook={} multi={}", opponentName, client.getWorld(), fightStartSpellbook, wasInMulti); } catch (Exception ignore) {}
-        
-        log.info("Fight started against: " + opponent + ", Multi: " + wasInMulti + ", Spellbook: " + fightStartSpellbook);
+        // try { log.info("[Fight] start snapshot: opponent={} world={} spellbook={} multi={}", opponentName, client.getWorld(), fightStartSpellbook, wasInMulti); } catch (Exception ignore) {}
 	}
 
 	public String getCurrentOpponent()
@@ -619,15 +615,11 @@ private void startFight(String opponentName)
         java.util.concurrent.CompletableFuture.runAsync(() -> {
             try
             {
-                try { log.info("[Fight] submitting outcome={} vs={} world={} startTs={} endTs={} startSpell={} endSpell={} multi={} acctHash={} idTokenPresent={}",
-                        result, opponentSafe, worldSafe, startTimeSafe, endTimeSafe, startSpellbookSafe, endSpellbookSafe, wasInMultiSafe, accountHashSafe, (idTokenSafe != null && !idTokenSafe.isEmpty())); } catch (Exception ignore) {}
+                // try { log.info("[Fight] submitting outcome={} vs={} world={} startTs={} endTs={} startSpell={} endSpell={} multi={} acctHash={} idTokenPresent={}",
+                //         result, opponentSafe, worldSafe, startTimeSafe, endTimeSafe, startSpellbookSafe, endSpellbookSafe, wasInMultiSafe, accountHashSafe, (idTokenSafe != null && !idTokenSafe.isEmpty())); } catch (Exception ignore) {}
                 String bucket = wasInMultiSafe ? "multi" : (startSpellbookSafe == 1 ? "veng" : "nh");
 
-                try {
-                    boolean authLoggedIn = dashboardPanel != null && dashboardPanel.isAuthLoggedIn();
-                    boolean tokenPresent = idTokenSafe != null && !idTokenSafe.isEmpty();
-                    log.info("[Fight] submit snapshot authLoggedIn={} tokenPresent={} opponent={} world={} startTs={} endTs={}", authLoggedIn, tokenPresent, opponentSafe, worldSafe, startTimeSafe, endTimeSafe);
-                } catch (Exception ignore) {}
+                // try { boolean authLoggedIn = dashboardPanel != null && dashboardPanel.isAuthLoggedIn(); boolean tokenPresent = idTokenSafe != null && !idTokenSafe.isEmpty(); log.info("[Fight] submit snapshot authLoggedIn={} tokenPresent={} opponent={} world={} startTs={} endTs={}", authLoggedIn, tokenPresent, opponentSafe, worldSafe, startTimeSafe, endTimeSafe); } catch (Exception ignore) {}
                 // Fire submission first for immediacy; do other UI work afterwards
                 submitMatchResultSnapshot(result, endTimeSafe, selfNameSafe, opponentSafe, worldSafe,
                     startTimeSafe, startSpellbookSafe, endSpellbookSafe, wasInMultiSafe, accountHashSafe, idTokenSafe);
