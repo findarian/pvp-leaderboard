@@ -1,4 +1,4 @@
-plugins {
+﻿plugins {
 	id 'java'
 }
 
@@ -21,8 +21,6 @@ dependencies {
 	compileOnly 'org.projectlombok:lombok:1.18.30'
 	annotationProcessor 'org.projectlombok:lombok:1.18.30'
     // OkHttp/Gson are provided by RuneLite at runtime; add as compileOnly for IDE/compile
-    compileOnly 'com.squareup.okhttp3:okhttp:4.9.3'
-    compileOnly 'com.google.code.gson:gson:2.10.1'
 	// Ensure Lombok works in tests too
 	testCompileOnly 'org.projectlombok:lombok:1.18.30'
 	testAnnotationProcessor 'org.projectlombok:lombok:1.18.30'
