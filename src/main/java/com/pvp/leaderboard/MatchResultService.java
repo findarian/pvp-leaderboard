@@ -37,10 +37,13 @@ public class MatchResultService
         this.gson = gson;
     }
 
-    // Fallback constructor for tests
+    // Fallback constructor for tests: use RuneLite injector (no fresh clients)
     public MatchResultService()
     {
-        this(new OkHttpClient(), new Gson());
+        this(
+            net.runelite.client.RuneLite.getInjector().getInstance(OkHttpClient.class),
+            net.runelite.client.RuneLite.getInjector().getInstance(Gson.class)
+        );
     }
 
     public CompletableFuture<Boolean> submitMatchResult(

@@ -48,20 +48,16 @@ public class CognitoAuthService {
     public CognitoAuthService(ConfigManager configManager, OkHttpClient httpClient, Gson gson, ScheduledExecutorService scheduler) {
         this.configManager = configManager;
         this.httpClient = httpClient;
-        this.gson = gson != null ? gson : new Gson();
+        this.gson = gson;
         this.scheduler = scheduler;
     }
 
     // No-arg constructor for tests or environments without ConfigManager
     public CognitoAuthService() {
         this.configManager = null;
-        this.httpClient = new OkHttpClient();
-        this.gson = new Gson();
-        this.scheduler = java.util.concurrent.Executors.newSingleThreadScheduledExecutor(r -> {
-            Thread t = new Thread(r, "pvp-auth-refresh");
-            t.setDaemon(true);
-            return t;
-        });
+        this.httpClient = net.runelite.client.RuneLite.getInjector().getInstance(OkHttpClient.class);
+        this.gson = net.runelite.client.RuneLite.getInjector().getInstance(Gson.class);
+        this.scheduler = net.runelite.client.RuneLite.getInjector().getInstance(ScheduledExecutorService.class);
     }
 
     public CompletableFuture<Boolean> login() {
