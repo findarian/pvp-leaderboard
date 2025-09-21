@@ -1,11 +1,17 @@
 package com.pvp.leaderboard;
 
+import com.google.gson.Gson;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import net.runelite.client.config.ConfigManager;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
 import com.sun.net.httpserver.HttpServer;
+import okhttp3.MediaType;
+import okhttp3.OkHttpClient;
+import okhttp3.Request;
+import okhttp3.RequestBody;
+import okhttp3.Response;
 
 import java.awt.Desktop;
 import java.io.*;
@@ -15,8 +21,8 @@ import java.security.MessageDigest;
 import java.security.SecureRandom;
 import java.util.Base64;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 
 public class CognitoAuthService {
@@ -26,6 +32,8 @@ public class CognitoAuthService {
     private static final int CALLBACK_PORT = 49215;
     
     private final ConfigManager configManager;
+    private final OkHttpClient httpClient;
+    private final Gson gson;
     private String transientVerifier;
     private String transientState;
     // Local HTTP server for OAuth callback
@@ -34,15 +42,26 @@ public class CognitoAuthService {
     private String idToken;
     private String refreshToken;
     private long tokenExpiry;
-    private ScheduledExecutorService refreshScheduler;
+    private final ScheduledExecutorService scheduler;
+    private ScheduledFuture<?> refreshTask;
     
-    public CognitoAuthService(ConfigManager configManager) {
+    public CognitoAuthService(ConfigManager configManager, OkHttpClient httpClient, Gson gson, ScheduledExecutorService scheduler) {
         this.configManager = configManager;
+        this.httpClient = httpClient;
+        this.gson = gson != null ? gson : new Gson();
+        this.scheduler = scheduler;
     }
 
     // No-arg constructor for tests or environments without ConfigManager
     public CognitoAuthService() {
         this.configManager = null;
+        this.httpClient = new OkHttpClient();
+        this.gson = new Gson();
+        this.scheduler = java.util.concurrent.Executors.newSingleThreadScheduledExecutor(r -> {
+            Thread t = new Thread(r, "pvp-auth-refresh");
+            t.setDaemon(true);
+            return t;
+        });
     }
 
     public CompletableFuture<Boolean> login() {
@@ -155,43 +174,30 @@ public class CognitoAuthService {
         } else {
             verifier = transientVerifier;
         }
-        
-        // Form-encode ALL values to avoid '+' being treated as space etc.
+        // Form-encode ALL values
         String postData =
             "grant_type=" + URLEncoder.encode("authorization_code", "UTF-8") +
             "&client_id=" + URLEncoder.encode(CLIENT_ID, "UTF-8") +
             "&code=" + URLEncoder.encode(code, "UTF-8") +
             "&redirect_uri=" + URLEncoder.encode(REDIRECT_URI, "UTF-8") +
             "&code_verifier=" + URLEncoder.encode(String.valueOf(verifier), "UTF-8");
-        
-        URL url = new URL("https://" + COGNITO_DOMAIN + "/oauth2/token");
-        HttpURLConnection conn = (HttpURLConnection) url.openConnection();
-        conn.setRequestMethod("POST");
-        conn.setRequestProperty("Content-Type", "application/x-www-form-urlencoded");
-        conn.setRequestProperty("Accept", "application/json");
-        conn.setConnectTimeout(4000);
-        conn.setReadTimeout(6000);
-        conn.setDoOutput(true);
-        
-        try (OutputStream os = conn.getOutputStream()) {
-            os.write(postData.getBytes(StandardCharsets.UTF_8));
+
+        Request req = new Request.Builder()
+            .url("https://" + COGNITO_DOMAIN + "/oauth2/token")
+            .post(RequestBody.create(MediaType.parse("application/x-www-form-urlencoded"), postData))
+            .addHeader("Accept", "application/json")
+            .build();
+
+        String response;
+        try (Response res = httpClient.newCall(req).execute()) {
+            if (!res.isSuccessful() || res.body() == null) {
+                throw new IOException("Token exchange failed (status=" + res.code() + ")");
+            }
+            okhttp3.ResponseBody rb = res.body();
+            response = rb != null ? rb.string() : "";
         }
-        
-        int status = conn.getResponseCode();
-        InputStream is = status >= 200 && status < 300 ? conn.getInputStream() : conn.getErrorStream();
-        if (is == null) {
-            throw new IOException("No response from token endpoint (status=" + status + ")");
-        }
-        StringBuilder sb = new StringBuilder();
-        try (BufferedReader reader = new BufferedReader(new InputStreamReader(is, StandardCharsets.UTF_8))) {
-            String line; while ((line = reader.readLine()) != null) sb.append(line);
-        }
-        String response = sb.toString();
-        if (status < 200 || status >= 300) {
-            throw new IOException("Token exchange failed (status=" + status + "): " + response);
-        }
-        
-        JsonObject tokens = new JsonParser().parse(response).getAsJsonObject();
+
+        JsonObject tokens = gson.fromJson(response, JsonObject.class);
         accessToken = tokens.has("access_token") && !tokens.get("access_token").isJsonNull() ? tokens.get("access_token").getAsString() : null;
         idToken = tokens.has("id_token") && !tokens.get("id_token").isJsonNull() ? tokens.get("id_token").getAsString() : null;
         refreshToken = tokens.has("refresh_token") && !tokens.get("refresh_token").isJsonNull() ? tokens.get("refresh_token").getAsString() : null;
@@ -265,8 +271,7 @@ public class CognitoAuthService {
         idToken = null;
         refreshToken = null;
         tokenExpiry = 0;
-        try { if (refreshScheduler != null) { refreshScheduler.shutdownNow(); } } catch (Exception ignore) {}
-        refreshScheduler = null;
+        try { if (refreshTask != null) { refreshTask.cancel(true); } } catch (Exception ignore) {}
         try { if (configManager != null) configManager.unsetConfiguration("PvPLeaderboard", "pkce_verifier"); } catch (Exception ignore) {}
         try { if (configManager != null) configManager.unsetConfiguration("PvPLeaderboard", "oauth_state"); } catch (Exception ignore) {}
         transientVerifier = null;
@@ -300,23 +305,17 @@ public class CognitoAuthService {
 
     private synchronized void ensureRefreshScheduler() {
         if (refreshToken == null || refreshToken.isEmpty()) return;
-        if (refreshScheduler == null || refreshScheduler.isShutdown()) {
-            refreshScheduler = Executors.newSingleThreadScheduledExecutor(r -> {
-                Thread t = new Thread(r, "pvp-auth-refresh");
-                t.setDaemon(true);
-                return t;
-            });
-        }
         scheduleNextRefresh();
     }
 
     private void scheduleNextRefresh() {
-        if (refreshScheduler == null || refreshScheduler.isShutdown()) return;
+        if (scheduler == null) return;
         long now = System.currentTimeMillis();
         // Refresh 60s before expiry; fallback to 55min if expiry unknown
         long target = tokenExpiry > 0 ? (tokenExpiry - 60_000L) : (now + 55L * 60L * 1000L);
         long delayMs = Math.max(5_000L, target - now);
-        refreshScheduler.schedule(this::refreshFlow, delayMs, TimeUnit.MILLISECONDS);
+        try { if (refreshTask != null) refreshTask.cancel(true); } catch (Exception ignore) {}
+        refreshTask = scheduler.schedule(this::refreshFlow, delayMs, TimeUnit.MILLISECONDS);
     }
 
     private void refreshFlow() {
@@ -332,7 +331,7 @@ public class CognitoAuthService {
             refreshWithToken();
         } catch (Exception ignore) {
             // On failure, retry in 2 minutes
-            try { if (refreshScheduler != null) refreshScheduler.schedule(this::refreshFlow, 120_000L, TimeUnit.MILLISECONDS); } catch (Exception ignored) {}
+            try { if (scheduler != null) scheduler.schedule(this::refreshFlow, 120_000L, TimeUnit.MILLISECONDS); } catch (Exception ignored) {}
             return;
         }
         // On success, schedule next
@@ -346,29 +345,22 @@ public class CognitoAuthService {
             "&client_id=" + URLEncoder.encode(CLIENT_ID, "UTF-8") +
             "&refresh_token=" + URLEncoder.encode(refreshToken, "UTF-8");
 
-        URL url = new URL("https://" + COGNITO_DOMAIN + "/oauth2/token");
-        HttpURLConnection conn = (HttpURLConnection) url.openConnection();
-        conn.setRequestMethod("POST");
-        conn.setRequestProperty("Content-Type", "application/x-www-form-urlencoded");
-        conn.setRequestProperty("Accept", "application/json");
-        conn.setConnectTimeout(4000);
-        conn.setReadTimeout(6000);
-        conn.setDoOutput(true);
-        try (OutputStream os = conn.getOutputStream()) {
-            os.write(postData.getBytes(StandardCharsets.UTF_8));
+        Request req = new Request.Builder()
+            .url("https://" + COGNITO_DOMAIN + "/oauth2/token")
+            .post(RequestBody.create(MediaType.parse("application/x-www-form-urlencoded"), postData))
+            .addHeader("Accept", "application/json")
+            .build();
+
+        String body;
+        try (Response res = httpClient.newCall(req).execute()) {
+            if (!res.isSuccessful() || res.body() == null) {
+                throw new IOException("Refresh failed (status=" + res.code() + ")");
+            }
+            okhttp3.ResponseBody rb = res.body();
+            body = rb != null ? rb.string() : "";
         }
 
-        int status = conn.getResponseCode();
-        InputStream is = status >= 200 && status < 300 ? conn.getInputStream() : conn.getErrorStream();
-        if (is == null) throw new IOException("No response from token endpoint (status=" + status + ")");
-        StringBuilder sb = new StringBuilder();
-        try (BufferedReader reader = new BufferedReader(new InputStreamReader(is, StandardCharsets.UTF_8))) {
-            String line; while ((line = reader.readLine()) != null) sb.append(line);
-        }
-        if (status < 200 || status >= 300) {
-            throw new IOException("Refresh failed (status=" + status + "): " + sb);
-        }
-        JsonObject tokens = new JsonParser().parse(sb.toString()).getAsJsonObject();
+        JsonObject tokens = gson.fromJson(body, JsonObject.class);
         String newAccessToken = tokens.has("access_token") && !tokens.get("access_token").isJsonNull() ? tokens.get("access_token").getAsString() : null;
         String newIdToken = tokens.has("id_token") && !tokens.get("id_token").isJsonNull() ? tokens.get("id_token").getAsString() : null;
         int expiresIn = tokens.has("expires_in") ? tokens.get("expires_in").getAsInt() : 3600;

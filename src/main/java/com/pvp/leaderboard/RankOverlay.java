@@ -147,7 +147,7 @@ public class RankOverlay extends Overlay
                             displayedRanks.put(playerName, rank);
                             if (loggedFetch.putIfAbsent(playerName, Boolean.TRUE) == null)
                             {
-                                log.info("Fetched rank for {}: {}", playerName, rank);
+                                log.debug("Fetched rank for {}: {}", playerName, rank);
                             }
                         }
                         else if (loggedFetch.putIfAbsent(playerName, Boolean.TRUE) == null)
@@ -299,7 +299,7 @@ public class RankOverlay extends Overlay
                                 try { nameRankCache.put(cacheKeyFor(selfName), new CacheEntry(rank, System.currentTimeMillis())); } catch (Exception ignore) {}
                                 if (loggedFetch.putIfAbsent(selfName, Boolean.TRUE) == null)
                                 {
-                                    log.info("Fetched rank for {}: {}", selfName, rank);
+                                log.debug("Fetched rank for {}: {}", selfName, rank);
                                 }
                             }
                             else if (loggedFetch.putIfAbsent(selfName, Boolean.TRUE) == null)
@@ -434,7 +434,7 @@ public class RankOverlay extends Overlay
                                 try { nameRankCache.put(cacheKeyFor(playerName), new CacheEntry(rank, System.currentTimeMillis())); } catch (Exception ignore) {}
                                 if (loggedFetch.putIfAbsent(playerName, Boolean.TRUE) == null)
                                 {
-                                    log.info("Fetched rank for {}: {}", playerName, rank);
+                                    log.debug("Fetched rank for {}: {}", playerName, rank);
                                 }
                             }
                             else if (loggedFetch.putIfAbsent(playerName, Boolean.TRUE) == null)
@@ -524,7 +524,11 @@ public class RankOverlay extends Overlay
         return null;
     }
 
-    // Low-priority bounded executor for overlay lookups to avoid stuttering the client
+    // Low-priority bounded executor for overlay lookups to avoid stuttering the client.
+    // This is intentionally separate from the shared scheduler because:
+    // - Work is latency/tick sensitive and uses a bounded queue with discard policy to avoid frame hitches.
+    // - Thread count is dynamically tuned per throttle level and may be 1-3.
+    // - Tasks are short-lived network lookups and image resolves; isolating protects client thread.
     private static volatile ExecutorService OVERLAY_EXECUTOR;
     private static void ensureExecutor()
     {

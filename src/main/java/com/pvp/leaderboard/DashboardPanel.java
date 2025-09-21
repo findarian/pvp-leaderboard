@@ -10,9 +10,15 @@ import java.net.HttpURLConnection;
 import java.net.URL;
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
+import com.google.gson.Gson;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
+import okhttp3.Call;
+import okhttp3.Callback;
+import okhttp3.OkHttpClient;
+import okhttp3.Request;
+import okhttp3.Response;
 import java.text.SimpleDateFormat;
 import java.util.Date;
 import java.awt.Graphics;
@@ -80,6 +86,8 @@ public class DashboardPanel extends PluginPanel
     private static final int MATCHES_PAGE_SIZE = 100;
     private final Map<String, MatchesCache> matchesCache = new HashMap<>();
     private boolean loginInProgress = false;
+    private final OkHttpClient httpClient;
+    private final Gson gson;
     // Shard lookup caching
     private final Map<String, ShardEntry> shardCache = Collections.synchronizedMap(
         new LinkedHashMap<String, ShardEntry>(128, 0.75f, true)
@@ -160,11 +168,13 @@ public class DashboardPanel extends PluginPanel
         return display; // keep spaces intact for player_id; URL-encoding will handle safely
     }
     
-    public DashboardPanel(PvPLeaderboardConfig config, ConfigManager configManager, PvPLeaderboardPlugin plugin)
+    public DashboardPanel(PvPLeaderboardConfig config, ConfigManager configManager, PvPLeaderboardPlugin plugin, OkHttpClient httpClient, Gson gson)
     {
         this.config = config;
         this.configManager = configManager;
         this.plugin = plugin;
+        this.httpClient = httpClient;
+        this.gson = gson;
         progressBars = new JProgressBar[5];
         progressLabels = new JLabel[5];
         
@@ -517,7 +527,10 @@ public class DashboardPanel extends PluginPanel
         try
         {
             if (authService == null) {
-                authService = new CognitoAuthService(configManager);
+                okhttp3.OkHttpClient ok = net.runelite.client.RuneLite.getInjector().getInstance(okhttp3.OkHttpClient.class);
+                com.google.gson.Gson gs = net.runelite.client.RuneLite.getInjector().getInstance(com.google.gson.Gson.class);
+                java.util.concurrent.ScheduledExecutorService sched = net.runelite.client.RuneLite.getInjector().getInstance(java.util.concurrent.ScheduledExecutorService.class);
+                authService = new CognitoAuthService(configManager, ok, gs, sched);
             }
             setLoginBusy(true);
             authService.login().thenAccept(success -> {
@@ -611,99 +624,75 @@ public class DashboardPanel extends PluginPanel
             if (loadMoreButton != null) loadMoreButton.setVisible(matchesNextToken != null && !matchesNextToken.isEmpty());
         }
 
-        SwingWorker<Void, Void> worker = new SwingWorker<Void, Void>()
-        {
-            @Override
-            protected Void doInBackground() throws Exception
-            {
-                try
-                {
-                    String normalizedId = currentMatchesPlayerId;
-                    loadPlayerStats(normalizedId);
-                    
-                    String apiUrl = "https://kekh0x6kfk.execute-api.us-east-1.amazonaws.com/prod/matches?player_id=" + URLEncoder.encode(normalizedId, "UTF-8") + "&limit=" + MATCHES_PAGE_SIZE;
-                    URL url = new URL(apiUrl);
-                    HttpURLConnection conn = (HttpURLConnection) url.openConnection();
-                    conn.setRequestMethod("GET");
-                    conn.setConnectTimeout(3000);
-                    conn.setReadTimeout(4000);
+        // Begin async loads using OkHttp
+        try {
+            String normalizedId = currentMatchesPlayerId;
+            loadPlayerStats(normalizedId);
 
-                    int status = conn.getResponseCode();
-                    String response = HttpUtil.readResponseBody(conn);
-                    if (status < 200 || status >= 300)
-                    {
+            String apiUrl = "https://kekh0x6kfk.execute-api.us-east-1.amazonaws.com/prod/matches?player_id=" + URLEncoder.encode(normalizedId, "UTF-8") + "&limit=" + MATCHES_PAGE_SIZE;
+            Request req = new Request.Builder().url(apiUrl).get().build();
+            httpClient.newCall(req).enqueue(new Callback() {
+                @Override
+                public void onFailure(Call call, java.io.IOException e) {
+                    // Popup disabled per requirement
+                }
+
+                @Override
+                public void onResponse(Call call, Response response) throws java.io.IOException {
+                    try (Response res = response) {
+                        if (!res.isSuccessful() || res.body() == null) {
+                            return;
+                        }
+                        okhttp3.ResponseBody rb = res.body();
+                        String body = rb != null ? rb.string() : "";
+                        JsonObject jsonResponse = gson.fromJson(body, JsonObject.class);
+                        JsonArray matches = jsonResponse.has("matches") && jsonResponse.get("matches").isJsonArray() ? jsonResponse.getAsJsonArray("matches") : new JsonArray();
+                        String nextToken = jsonResponse.has("next_token") && !jsonResponse.get("next_token").isJsonNull() ? jsonResponse.get("next_token").getAsString() : null;
+
                         SwingUtilities.invokeLater(() -> {
-                            // Popup disabled per requirement
-                        });
-                        return null;
-                    }
-
-                    JsonObject jsonResponse = new JsonParser().parse(response).getAsJsonObject();
-                    JsonArray matches = jsonResponse.getAsJsonArray("matches");
-                    String nextToken = jsonResponse.has("next_token") && !jsonResponse.get("next_token").isJsonNull() ? jsonResponse.get("next_token").getAsString() : null;
-
-                    SwingUtilities.invokeLater(() ->
-                    {
-                        tableModel.setRowCount(0);
-                        int wins = 0, losses = 0, ties = 0;
-                        
-                        for (int i = 0; i < matches.size(); i++)
-                        {
-                            JsonObject match = matches.get(i).getAsJsonObject();
-                            String result = match.has("result") ? match.get("result").getAsString() : "";
-                            String opponent = match.has("opponent_id") ? match.get("opponent_id").getAsString() : "";
-                            String matchType = match.has("bucket") ? match.get("bucket").getAsString().toUpperCase() : "Unknown";
-                            String playerRank = computeRank(match, "player_");
-                            String opponentRank = computeRank(match, "opponent_");
-                            String matchDisplay = playerRank + " vs " + opponentRank;
-                            String change = computeRatingChange(match);
-                            String time = match.has("when") ? formatTime(match.get("when").getAsLong()) : "";
-                            
-                            // Count match results
-                            if ("win".equalsIgnoreCase(result)) wins++;
-                            else if ("loss".equalsIgnoreCase(result)) losses++;
-                            else if ("tie".equalsIgnoreCase(result)) ties++;
-                            
-                            tableModel.addRow(new Object[]{result, opponent, matchType, matchDisplay, change, time});
-                        }
-                        
-                        updatePerformanceStats(wins, losses, ties);
-                        updateWinRateChart(matches);
-                        updateRankBreakdown(matches);
-                        
-                        // Update additional stats if logged in
-                        if (isLoggedIn) {
+                            tableModel.setRowCount(0);
+                            int wins = 0, losses = 0, ties = 0;
+                            for (int i = 0; i < matches.size(); i++)
+                            {
+                                JsonObject match = matches.get(i).getAsJsonObject();
+                                String result = match.has("result") ? match.get("result").getAsString() : "";
+                                String opponent = match.has("opponent_id") ? match.get("opponent_id").getAsString() : "";
+                                String matchType = match.has("bucket") ? match.get("bucket").getAsString().toUpperCase() : "Unknown";
+                                String playerRank = computeRank(match, "player_");
+                                String opponentRank = computeRank(match, "opponent_");
+                                String matchDisplay = playerRank + " vs " + opponentRank;
+                                String change = computeRatingChange(match);
+                                String time = match.has("when") ? formatTime(match.get("when").getAsLong()) : "";
+                                if ("win".equalsIgnoreCase(result)) wins++;
+                                else if ("loss".equalsIgnoreCase(result)) losses++;
+                                else if ("tie".equalsIgnoreCase(result)) ties++;
+                                tableModel.addRow(new Object[]{result, opponent, matchType, matchDisplay, change, time});
+                            }
+                            updatePerformanceStats(wins, losses, ties);
+                            updateWinRateChart(matches);
+                            updateRankBreakdown(matches);
+                            if (isLoggedIn) {
+                                allMatches = matches;
+                                updateAdditionalStats(matches);
+                            }
                             allMatches = matches;
-                            updateAdditionalStats(matches);
-                        }
-                        
-                        // Update bucket bars from matches after they're loaded
-                        allMatches = matches;
-                        updateBucketBarsFromMatches();
-                        if (extraStatsPanel != null) {
-                            extraStatsPanel.setMatches(matches);
-                        }
-
-                        matchesNextToken = nextToken;
-                        if (loadMoreButton != null) {
-                            loadMoreButton.setVisible(matchesNextToken != null && !matchesNextToken.isEmpty());
-                        }
-
-                        // Update cache
-                        if (currentMatchesPlayerId != null)
-                        {
-                            matchesCache.put(currentMatchesPlayerId, new MatchesCache(matches.deepCopy(), matchesNextToken, System.currentTimeMillis()));
-                        }
-                    });
+                            updateBucketBarsFromMatches();
+                            if (extraStatsPanel != null) {
+                                extraStatsPanel.setMatches(matches);
+                            }
+                            matchesNextToken = nextToken;
+                            if (loadMoreButton != null) {
+                                loadMoreButton.setVisible(matchesNextToken != null && !matchesNextToken.isEmpty());
+                            }
+                            if (currentMatchesPlayerId != null)
+                            {
+                                matchesCache.put(currentMatchesPlayerId, new MatchesCache(matches.deepCopy(), matchesNextToken, System.currentTimeMillis()));
+                            }
+                        });
+                    }
                 }
-                catch (Exception e)
-                {
-                    e.printStackTrace();
-                }
-                return null;
-            }
-        };
-        worker.execute();
+            });
+        } catch (Exception ignore) {}
     }
 
     private void resetUiForNewSearch()
@@ -1015,7 +1004,7 @@ public class DashboardPanel extends PluginPanel
             {
                 try { lastLoadedAccountHash = stats.get("account_hash").getAsString(); } catch (Exception ignore) {}
             }
-
+            
             SwingUtilities.invokeLater(() -> {
                 updateProgressBars(stats);
                 // Force immediate rank number lookup for all buckets

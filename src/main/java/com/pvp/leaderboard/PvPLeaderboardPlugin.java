@@ -29,8 +29,8 @@ import java.awt.image.BufferedImage;
 import javax.swing.SwingUtilities;
 import net.runelite.client.menus.MenuManager;
 import net.runelite.client.callback.ClientThread;
-import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.ConcurrentHashMap;
 
 @Slf4j
@@ -89,11 +89,13 @@ public class PvPLeaderboardPlugin extends Plugin
 	private String highestRankDefeated = null;
 	private String lowestRankLostTo = null;
 	private long fightStartTime = 0;
-    private MatchResultService matchResultService = new MatchResultService();
-    private ScheduledExecutorService fightScheduler;
+    @Inject
+    private MatchResultService matchResultService;
+    @Inject
+    private ScheduledExecutorService scheduler;
     // Tracks multiple simultaneous fights (per-opponent) with 10s inactivity expiry
     private final java.util.concurrent.ConcurrentHashMap<String, FightEntry> activeFights = new java.util.concurrent.ConcurrentHashMap<>();
-    private ScheduledExecutorService fightGcScheduler;
+    private ScheduledFuture<?> fightGcTask;
     private volatile long selfDeathMs = 0L;
     private volatile long opponentDeathMs = 0L;
     private volatile boolean fightFinalized = false;
@@ -113,23 +115,14 @@ private volatile long suppressFightStartUntilMs = 0L;
 	protected void startUp() throws Exception
 	{
         shardReady = false;
-        dashboardPanel = new DashboardPanel(config, configManager, this);
+        // Inject OkHttp/Gson via RuneLite injector
+        okhttp3.OkHttpClient ok = net.runelite.client.RuneLite.getInjector().getInstance(okhttp3.OkHttpClient.class);
+        com.google.gson.Gson gs = net.runelite.client.RuneLite.getInjector().getInstance(com.google.gson.Gson.class);
+        dashboardPanel = new DashboardPanel(config, configManager, this, ok, gs);
 
-        // Initialize scheduler for fight event checks (double-KO detection)
+        // Schedule GC task on injected scheduler
         try {
-            fightScheduler = Executors.newSingleThreadScheduledExecutor(r -> {
-                Thread t = new Thread(r, "pvp-fight-events");
-                t.setDaemon(true);
-                return t;
-            });
-        } catch (Exception ignore) {}
-        try {
-            fightGcScheduler = Executors.newSingleThreadScheduledExecutor(r -> {
-                Thread t = new Thread(r, "pvp-fight-gc");
-                t.setDaemon(true);
-                return t;
-            });
-            fightGcScheduler.scheduleAtFixedRate(() -> {
+            fightGcTask = scheduler.scheduleAtFixedRate(() -> {
                 try {
                     long now = System.currentTimeMillis();
                     for (java.util.Map.Entry<String, FightEntry> e : activeFights.entrySet())
@@ -191,7 +184,7 @@ private volatile long suppressFightStartUntilMs = 0L;
 		overlayManager.add(rankOverlay);
         overlayManager.add(topNearbyOverlay);
         overlayManager.add(bottomNearbyOverlay);
-		log.info("PvP Leaderboard started!");
+		log.debug("PvP Leaderboard started!");
 	}
 
 	@Override
@@ -202,8 +195,7 @@ private volatile long suppressFightStartUntilMs = 0L;
 		overlayManager.remove(rankOverlay);
         overlayManager.remove(topNearbyOverlay);
         overlayManager.remove(bottomNearbyOverlay);
-        try { if (fightScheduler != null) { fightScheduler.shutdownNow(); } } catch (Exception ignore) {}
-        try { if (fightGcScheduler != null) { fightGcScheduler.shutdownNow(); } } catch (Exception ignore) {}
+        try { if (fightGcTask != null) { fightGcTask.cancel(true); } } catch (Exception ignore) {}
 		log.info("PvP Leaderboard stopped!");
 	}
     @Subscribe
@@ -732,19 +724,10 @@ private void startFight(String opponentName)
 	{
 		try
 		{
-            if (fightScheduler == null || fightScheduler.isShutdown())
-            {
-                try {
-                    fightScheduler = Executors.newSingleThreadScheduledExecutor(r -> {
-                        Thread t = new Thread(r, "pvp-fight-events");
-                        t.setDaemon(true);
-                        return t;
-                    });
-                } catch (Exception ignore) {}
-            }
+            // Use injected scheduler for finalize checks
             final long scheduledAt = System.currentTimeMillis();
             try { log.info("[Fight] scheduling finalize in 1500ms (fallback={}), a={}, b={}", fallbackResult, selfDeathMs, opponentDeathMs); } catch (Exception ignore) {}
-            fightScheduler.schedule(() -> {
+            scheduler.schedule(() -> {
 				try
 				{
                     try { log.info("[Fight] finalize task fired; fightFinalized={} a={} b={} inFight={}", fightFinalized, selfDeathMs, opponentDeathMs, inFight); } catch (Exception ignore) {}
@@ -784,7 +767,7 @@ private void startFight(String opponentName)
             }, 1500L, java.util.concurrent.TimeUnit.MILLISECONDS);
 
             // Watchdog: force finalize shortly after guard if still not finalized
-            fightScheduler.schedule(() -> {
+            scheduler.schedule(() -> {
                 try
                 {
                     if (fightFinalized) { try { log.info("[Fight] watchdog exit: already finalized"); } catch (Exception ignore) {} return; }
@@ -935,7 +918,7 @@ private void startFight(String opponentName)
                     if (!inShard && !Boolean.TRUE.equals(apiFallbackActive.get(opponentSafe)) && dashboardPanel != null && rankOverlay != null)
                     {
                         apiFallbackActive.put(opponentSafe, Boolean.TRUE);
-                        fightScheduler.schedule(() -> {
+                        scheduler.schedule(() -> {
                             try {
                                 String bucket = bucketKey(config.rankBucket());
                                 String tier = dashboardPanel.fetchTierFromApi(opponentSafe, bucket);

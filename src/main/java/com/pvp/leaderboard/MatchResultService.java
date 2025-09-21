@@ -1,16 +1,21 @@
 package com.pvp.leaderboard;
 
+import com.google.gson.Gson;
 import com.google.gson.JsonObject;
 import lombok.extern.slf4j.Slf4j;
+import okhttp3.Call;
+import okhttp3.Callback;
+import okhttp3.MediaType;
+import okhttp3.OkHttpClient;
+import okhttp3.Request;
+import okhttp3.RequestBody;
+import okhttp3.Response;
 import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
-import java.io.OutputStream;
-import java.net.HttpURLConnection;
-import java.net.URL;
+import javax.inject.Inject;
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
 
 @Slf4j
 public class MatchResultService
@@ -19,16 +24,29 @@ public class MatchResultService
     private static final String CLIENT_ID = "runelite";
     private static final String PLUGIN_VERSION = "1.0.0";
     private static final String RUNELITE_CLIENT_SECRET = "7f2f6a0e-2c6b-4b1d-9a39-6f2b2a8a1f3c"; // Replace with actual secret
-    private final ExecutorService httpExecutor = Executors.newFixedThreadPool(2, r -> {
-        Thread t = new Thread(r, "pvp-http");
-        t.setDaemon(true);
-        return t;
-    });
-    
+
+    private static final MediaType JSON = MediaType.parse("application/json; charset=utf-8");
+
+    private final OkHttpClient httpClient;
+    private final Gson gson;
+
+    @Inject
+    public MatchResultService(OkHttpClient httpClient, Gson gson)
+    {
+        this.httpClient = httpClient;
+        this.gson = gson;
+    }
+
+    // Fallback constructor for tests
+    public MatchResultService()
+    {
+        this(new OkHttpClient(), new Gson());
+    }
+
     public CompletableFuture<Boolean> submitMatchResult(
-        String playerId, 
-        String opponentId, 
-        String result, 
+        String playerId,
+        String opponentId,
+        String result,
         int world,
         long fightStartTs,
         long fightEndTs,
@@ -38,130 +56,187 @@ public class MatchResultService
         long accountHash,
         String idToken)
     {
-        return CompletableFuture.supplyAsync(() -> {
-            try
+        CompletableFuture<Boolean> overall = new CompletableFuture<>();
+        try
+        {
+            log.debug("[Submit] begin playerId={} opponentId={} result={} world={} startTs={} endTs={} startSpell={} endSpell={} multi={} acctHash={} authed={}",
+                playerId, opponentId, result, world, fightStartTs, fightEndTs, fightStartSpellbook, fightEndSpellbook, wasInMulti, accountHash, (idToken != null && !idToken.isEmpty()));
+
+            JsonObject body = new JsonObject();
+            body.addProperty("player_id", playerId);
+            body.addProperty("opponent_id", opponentId);
+            body.addProperty("result", result);
+            body.addProperty("world", world);
+            body.addProperty("fight_start_ts", fightStartTs);
+            body.addProperty("fight_end_ts", fightEndTs);
+            body.addProperty("fightStartSpellbook", fightStartSpellbook);
+            body.addProperty("fightEndSpellbook", fightEndSpellbook);
+            body.addProperty("wasInMulti", wasInMulti);
+            body.addProperty("client_id", CLIENT_ID);
+            body.addProperty("plugin_version", PLUGIN_VERSION);
+
+            String bodyJson = gson.toJson(body);
+
+            if (idToken != null && !idToken.isEmpty())
             {
-                log.debug("[Submit] begin playerId={} opponentId={} result={} world={} startTs={} endTs={} startSpell={} endSpell={} multi={} acctHash={} authed={}",
-                        playerId, opponentId, result, world, fightStartTs, fightEndTs, fightStartSpellbook, fightEndSpellbook, wasInMulti, accountHash, (idToken != null && !idToken.isEmpty()));
-                JsonObject body = new JsonObject();
-                body.addProperty("player_id", playerId);
-                body.addProperty("opponent_id", opponentId);
-                body.addProperty("result", result);
-                body.addProperty("world", world);
-                body.addProperty("fight_start_ts", fightStartTs);
-                body.addProperty("fight_end_ts", fightEndTs);
-                body.addProperty("fightStartSpellbook", fightStartSpellbook);
-                body.addProperty("fightEndSpellbook", fightEndSpellbook);
-                body.addProperty("wasInMulti", wasInMulti);
-                body.addProperty("client_id", CLIENT_ID);
-                body.addProperty("plugin_version", PLUGIN_VERSION);
-                
-                String bodyJson = body.toString();
-                
-                if (idToken != null && !idToken.isEmpty())
-                {
-                    boolean ok = submitAuthenticatedFight(bodyJson, accountHash, idToken);
-                    if (!ok)
+                submitAuthenticatedFightAsync(bodyJson, accountHash, idToken).whenComplete((ok, ex) -> {
+                    if (ex != null)
+                    {
+                        log.debug("[Submit] authenticated exception; fallback to unauth path", ex);
+                        submitUnauthenticatedFightAsync(bodyJson, accountHash).whenComplete((ok2, ex2) -> {
+                            if (ex2 != null) overall.complete(false); else overall.complete(ok2);
+                        });
+                        return;
+                    }
+                    if (Boolean.TRUE.equals(ok))
+                    {
+                        log.debug("[Submit] authenticated path accepted");
+                        overall.complete(true);
+                    }
+                    else
                     {
                         log.debug("[Submit] authenticated failed; fallback to unauth path");
-                        return submitUnauthenticatedFight(bodyJson, accountHash);
+                        submitUnauthenticatedFightAsync(bodyJson, accountHash).whenComplete((ok2, ex2) -> {
+                            if (ex2 != null) overall.complete(false); else overall.complete(ok2);
+                        });
                     }
-                    log.info("[Submit] authenticated path accepted");
-                    return true;
-                }
-                boolean ok = submitUnauthenticatedFight(bodyJson, accountHash);
-                if (ok) log.info("[Submit] unauthenticated path accepted");
-                return ok;
+                });
             }
-            catch (Exception e)
+            else
             {
-                log.debug("[Submit] exception during submit", e);
-                return false;
+                submitUnauthenticatedFightAsync(bodyJson, accountHash).whenComplete((ok, ex) -> {
+                    if (ex != null) overall.complete(false); else overall.complete(ok);
+                });
             }
-        }, httpExecutor);
+        }
+        catch (Exception e)
+        {
+            log.debug("[Submit] exception during submit", e);
+            overall.complete(false);
+        }
+        return overall;
     }
-    
-    private boolean submitAuthenticatedFight(String body, long accountHash, String idToken) throws Exception
+
+    private CompletableFuture<Boolean> submitAuthenticatedFightAsync(String body, long accountHash, String idToken)
     {
-        URL url = new URL(API_URL);
-        HttpURLConnection conn = (HttpURLConnection) url.openConnection();
-        conn.setRequestMethod("POST");
-        conn.setRequestProperty("Content-Type", "application/json; charset=utf-8");
-        conn.setRequestProperty("Authorization", "Bearer " + idToken);
-        conn.setRequestProperty("x-account-hash", String.valueOf(accountHash));
-        conn.setDoOutput(true);
-        conn.setConnectTimeout(4000);
-        conn.setReadTimeout(6000);
-        
+        CompletableFuture<Boolean> future = new CompletableFuture<>();
+
+        Request request = new Request.Builder()
+            .url(API_URL)
+            .post(RequestBody.create(JSON, body))
+            .addHeader("Authorization", "Bearer " + idToken)
+            .addHeader("x-account-hash", String.valueOf(accountHash))
+            .build();
+
         log.debug("=== AUTHENTICATED REQUEST ===");
         log.debug("URL: {}", API_URL);
         log.debug("Method: POST");
         log.debug("Headers:");
-        log.debug("  Content-Type: application/json; charset=utf-8");
         log.debug("  Authorization: Bearer {}", idToken);
         log.debug("  x-account-hash: {}", accountHash);
         log.debug("Body: {}", body);
-        
-        try (OutputStream os = conn.getOutputStream())
+
+        httpClient.newCall(request).enqueue(new Callback()
         {
-            os.write(body.getBytes(StandardCharsets.UTF_8));
-        }
-        
-        int responseCode = conn.getResponseCode();
-        /* String resp = */ HttpUtil.readResponseBody(conn);
-        log.debug("Response Code: {}", responseCode);
-        if (responseCode >= 200 && responseCode < 300) return true;
-        // Keep failure terse here; debug already printed
-        return false;
+            @Override
+            public void onFailure(Call call, IOException e)
+            {
+                log.debug("[Submit] auth request failure", e);
+                future.complete(false);
+            }
+
+            @Override
+            public void onResponse(Call call, Response response) throws IOException
+            {
+                try (Response res = response)
+                {
+                    int code = res.code();
+                    okhttp3.ResponseBody b1 = res.body();
+                    if (b1 != null) { b1.string(); }
+                    log.debug("Response Code: {}", code);
+                    if (code >= 200 && code < 300)
+                    {
+                        future.complete(true);
+                    }
+                    else
+                    {
+                        future.complete(false);
+                    }
+                }
+            }
+        });
+
+        return future;
     }
-    
-    private boolean submitUnauthenticatedFight(String body, long accountHash) throws Exception
+
+    private CompletableFuture<Boolean> submitUnauthenticatedFightAsync(String body, long accountHash)
     {
+        CompletableFuture<Boolean> future = new CompletableFuture<>();
         long timestamp = System.currentTimeMillis() / 1000;
-        String signature = generateSignature(body, timestamp);
-        
-        URL url = new URL(API_URL);
-        HttpURLConnection conn = (HttpURLConnection) url.openConnection();
-        conn.setRequestMethod("POST");
-        conn.setRequestProperty("Content-Type", "application/json; charset=utf-8");
-        conn.setRequestProperty("x-account-hash", String.valueOf(accountHash));
-        conn.setRequestProperty("x-client-id", CLIENT_ID);
-        conn.setRequestProperty("x-timestamp", String.valueOf(timestamp));
-        conn.setRequestProperty("x-signature", signature);
-        conn.setDoOutput(true);
-        conn.setConnectTimeout(4000);
-        conn.setReadTimeout(6000);
-        
+        String signature;
+        try
+        {
+            signature = generateSignature(body, timestamp);
+        }
+        catch (Exception e)
+        {
+            future.completeExceptionally(e);
+            return future;
+        }
+
+        Request request = new Request.Builder()
+            .url(API_URL)
+            .post(RequestBody.create(JSON, body))
+            .addHeader("x-account-hash", String.valueOf(accountHash))
+            .addHeader("x-client-id", CLIENT_ID)
+            .addHeader("x-timestamp", String.valueOf(timestamp))
+            .addHeader("x-signature", signature)
+            .build();
+
         log.debug("=== UNAUTHENTICATED REQUEST ===");
         log.debug("URL: {}", API_URL);
         log.debug("Method: POST");
         log.debug("Headers:");
-        log.debug("  Content-Type: application/json; charset=utf-8");
         log.debug("  x-account-hash: {}", accountHash);
         log.debug("  x-client-id: {}", CLIENT_ID);
         log.debug("  x-timestamp: {}", timestamp);
         log.debug("  x-signature: {}", signature);
         log.debug("Body: {}", body);
         log.debug("Signature Message: POST\n/matchresult\n{}\n{}", body, timestamp);
-        
-        try (OutputStream os = conn.getOutputStream())
+
+        httpClient.newCall(request).enqueue(new Callback()
         {
-            os.write(body.getBytes(StandardCharsets.UTF_8));
-        }
-        
-        int responseCode = conn.getResponseCode();
-        /* String respBody = */ HttpUtil.readResponseBody(conn);
-        log.debug("Response Code: {}", responseCode);
-        if (responseCode >= 200 && responseCode < 300) return true;
-        if (responseCode == 202)
-        {
-            // 202 Accepted is considered success; backend processes asynchronously
-            return true;
-        }
-        // Keep failure terse here; debug already printed
-        return false;
+            @Override
+            public void onFailure(Call call, IOException e)
+            {
+                log.debug("[Submit] unauth request failure", e);
+                future.complete(false);
+            }
+
+            @Override
+            public void onResponse(Call call, Response response) throws IOException
+            {
+                try (Response res = response)
+                {
+                    int code = res.code();
+                    okhttp3.ResponseBody b2 = res.body();
+                    if (b2 != null) { b2.string(); }
+                    log.debug("Response Code: {}", code);
+                    if ((code >= 200 && code < 300) || code == 202)
+                    {
+                        future.complete(true);
+                    }
+                    else
+                    {
+                        future.complete(false);
+                    }
+                }
+            }
+        });
+
+        return future;
     }
-    
+
     private String generateSignature(String body, long timestamp) throws Exception
     {
         String message = "POST\n/matchresult\n" + body + "\n" + timestamp;
@@ -169,7 +244,7 @@ public class MatchResultService
         SecretKeySpec secretKey = new SecretKeySpec(RUNELITE_CLIENT_SECRET.getBytes(StandardCharsets.UTF_8), "HmacSHA256");
         mac.init(secretKey);
         byte[] hash = mac.doFinal(message.getBytes(StandardCharsets.UTF_8));
-        
+
         StringBuilder hexString = new StringBuilder();
         for (byte b : hash)
         {
