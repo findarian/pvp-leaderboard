@@ -90,8 +90,8 @@ public class MatchResultService
         conn.setRequestProperty("Authorization", "Bearer " + idToken);
         conn.setRequestProperty("x-account-hash", String.valueOf(accountHash));
         conn.setDoOutput(true);
-        conn.setConnectTimeout(5000);
-        conn.setReadTimeout(10000);
+        conn.setConnectTimeout(4000);
+        conn.setReadTimeout(6000);
         
         // log.info("=== AUTHENTICATED REQUEST ===");
         // log.info("URL: {}", API_URL);
@@ -129,8 +129,8 @@ public class MatchResultService
         conn.setRequestProperty("x-timestamp", String.valueOf(timestamp));
         conn.setRequestProperty("x-signature", signature);
         conn.setDoOutput(true);
-        conn.setConnectTimeout(5000);
-        conn.setReadTimeout(10000);
+        conn.setConnectTimeout(4000);
+        conn.setReadTimeout(6000);
         
         // log.info("=== UNAUTHENTICATED REQUEST ===");
         // log.info("URL: {}", API_URL);

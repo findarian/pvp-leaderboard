@@ -169,6 +169,8 @@ public class CognitoAuthService {
         conn.setRequestMethod("POST");
         conn.setRequestProperty("Content-Type", "application/x-www-form-urlencoded");
         conn.setRequestProperty("Accept", "application/json");
+        conn.setConnectTimeout(4000);
+        conn.setReadTimeout(6000);
         conn.setDoOutput(true);
         
         try (OutputStream os = conn.getOutputStream()) {
@@ -349,6 +351,8 @@ public class CognitoAuthService {
         conn.setRequestMethod("POST");
         conn.setRequestProperty("Content-Type", "application/x-www-form-urlencoded");
         conn.setRequestProperty("Accept", "application/json");
+        conn.setConnectTimeout(4000);
+        conn.setReadTimeout(6000);
         conn.setDoOutput(true);
         try (OutputStream os = conn.getOutputStream()) {
             os.write(postData.getBytes(StandardCharsets.UTF_8));

@@ -124,6 +124,8 @@ public class DashboardPanel extends PluginPanel
     private final ConfigManager configManager;
     private Map<String, Integer> bucketRankNumbers = new HashMap<>();
     private PvPLeaderboardPlugin plugin; 
+    // Prevent repeated API attempts when network/DNS is down
+    private volatile long apiDownUntilMs = 0L;
     
     private String canonName(String name) {
         return String.valueOf(name != null ? name : "").trim().replaceAll("\\s+", " ").toLowerCase();
@@ -132,6 +134,19 @@ public class DashboardPanel extends PluginPanel
     private Client getClientSafe()
     {
         try { return plugin != null ? plugin.getClient() : null; } catch (Exception ignore) { return null; }
+    }
+
+    private boolean isApiTemporarilyDown()
+    {
+        return System.currentTimeMillis() < apiDownUntilMs;
+    }
+
+    private void markApiDownForMillis(long millis)
+    {
+        long now = System.currentTimeMillis();
+        long until = now + Math.max(0L, millis);
+        // Only extend, never shorten
+        if (until > apiDownUntilMs) apiDownUntilMs = until;
     }
 
     private static String normalizeDisplayName(String name) {
@@ -610,8 +625,8 @@ public class DashboardPanel extends PluginPanel
                     URL url = new URL(apiUrl);
                     HttpURLConnection conn = (HttpURLConnection) url.openConnection();
                     conn.setRequestMethod("GET");
-                    conn.setConnectTimeout(10000);
-                    conn.setReadTimeout(15000);
+                    conn.setConnectTimeout(3000);
+                    conn.setReadTimeout(4000);
 
                     int status = conn.getResponseCode();
                     String response = HttpUtil.readResponseBody(conn);
@@ -975,13 +990,17 @@ public class DashboardPanel extends PluginPanel
     {
         try
         {
+            if (isApiTemporarilyDown())
+            {
+                return;
+            }
             // Use user endpoint by player_id like website does
             String apiUrl = "https://kekh0x6kfk.execute-api.us-east-1.amazonaws.com/prod/user?player_id=" + URLEncoder.encode(normalizePlayerId(playerId), "UTF-8");
             URL url = new URL(apiUrl);
             HttpURLConnection conn = (HttpURLConnection) url.openConnection();
             conn.setRequestMethod("GET");
-            conn.setConnectTimeout(10000);
-            conn.setReadTimeout(15000);
+            conn.setConnectTimeout(3000);
+            conn.setReadTimeout(4000);
 
             int status = conn.getResponseCode();
             String response = HttpUtil.readResponseBody(conn);
@@ -996,9 +1015,7 @@ public class DashboardPanel extends PluginPanel
             {
                 try { lastLoadedAccountHash = stats.get("account_hash").getAsString(); } catch (Exception ignore) {}
             }
-            
 
-            
             SwingUtilities.invokeLater(() -> {
                 updateProgressBars(stats);
                 // Force immediate rank number lookup for all buckets
@@ -1009,9 +1026,17 @@ public class DashboardPanel extends PluginPanel
                 }
             });
         }
+        catch (java.net.UnknownHostException uhe)
+        {
+            markApiDownForMillis(120_000L);
+        }
+        catch (java.net.SocketTimeoutException ste)
+        {
+            markApiDownForMillis(15_000L);
+        }
         catch (Exception e)
         {
-            e.printStackTrace();
+            markApiDownForMillis(10_000L);
         }
     }
     
@@ -1203,8 +1228,8 @@ public class DashboardPanel extends PluginPanel
                 URL url = new URL(apiUrl);
                 HttpURLConnection conn = (HttpURLConnection) url.openConnection();
                 conn.setRequestMethod("GET");
-                conn.setConnectTimeout(5000);
-                conn.setReadTimeout(8000);
+                conn.setConnectTimeout(3000);
+                conn.setReadTimeout(4000);
                 int status = conn.getResponseCode();
                 String response = HttpUtil.readResponseBody(conn);
                 if (status >= 200 && status < 300 && response != null && !response.isEmpty())
@@ -1226,8 +1251,8 @@ public class DashboardPanel extends PluginPanel
                 URL url = new URL(apiUrl);
                 HttpURLConnection conn = (HttpURLConnection) url.openConnection();
                 conn.setRequestMethod("GET");
-                conn.setConnectTimeout(5000);
-                conn.setReadTimeout(8000);
+                conn.setConnectTimeout(3000);
+                conn.setReadTimeout(4000);
                 int status = conn.getResponseCode();
                 String response = HttpUtil.readResponseBody(conn);
                 if (status < 200 || status >= 300 || response == null || response.isEmpty()) return null;
@@ -1360,13 +1385,14 @@ public class DashboardPanel extends PluginPanel
                 // Fetch
             URL url = new URL(urlStr);
             HttpURLConnection conn = (HttpURLConnection) url.openConnection();
-                conn.setConnectTimeout(5000);
-                conn.setReadTimeout(10000);
+                conn.setConnectTimeout(3000);
+                conn.setReadTimeout(4000);
             conn.setRequestMethod("GET");
                 int status = conn.getResponseCode();
                 if (status != 200)
                 {
                     shardFailUntil.put(cacheKey, now + SHARD_FAIL_BACKOFF_MS);
+                    shardThrottle.put(cacheKey, now);
                     return null;
                 }
 
@@ -1392,8 +1418,40 @@ public class DashboardPanel extends PluginPanel
                 return out;
             }
         }
+        catch (java.net.UnknownHostException uhe)
+        {
+            try {
+                long nowEx = System.currentTimeMillis();
+                String canon = canonName(playerName);
+                String dir = (bucket == null || bucket.trim().isEmpty() || "overall".equalsIgnoreCase(bucket)) ? "overall" : bucket.toLowerCase();
+                String shard = canon != null && !canon.isEmpty() ? canon.substring(0, Math.min(2, canon.length())).toLowerCase() : "";
+                String cacheKey = dir + "/" + shard;
+                shardThrottle.put(cacheKey, nowEx);
+                shardFailUntil.put(cacheKey, nowEx + 60_000L);
+            } catch (Exception ignore) {}
+        }
+        catch (java.net.SocketTimeoutException ste)
+        {
+            try {
+                long nowEx = System.currentTimeMillis();
+                String canon = canonName(playerName);
+                String dir = (bucket == null || bucket.trim().isEmpty() || "overall".equalsIgnoreCase(bucket)) ? "overall" : bucket.toLowerCase();
+                String shard = canon != null && !canon.isEmpty() ? canon.substring(0, Math.min(2, canon.length())).toLowerCase() : "";
+                String cacheKey = dir + "/" + shard;
+                shardThrottle.put(cacheKey, nowEx);
+                shardFailUntil.put(cacheKey, nowEx + 30_000L);
+            } catch (Exception ignore) {}
+        }
         catch (Exception ignore)
         {
+            try {
+                long nowEx = System.currentTimeMillis();
+                String canon = canonName(playerName);
+                String dir = (bucket == null || bucket.trim().isEmpty() || "overall".equalsIgnoreCase(bucket)) ? "overall" : bucket.toLowerCase();
+                String shard = canon != null && !canon.isEmpty() ? canon.substring(0, Math.min(2, canon.length())).toLowerCase() : "";
+                String cacheKey = dir + "/" + shard;
+                shardThrottle.put(cacheKey, nowEx);
+            } catch (Exception ignored) {}
             // Swallow and return null – overlay handles absence gracefully
         }
         return null;
