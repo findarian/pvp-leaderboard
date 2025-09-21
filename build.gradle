@@ -17,16 +17,12 @@ def runeLiteVersion = 'latest.release'
 
 dependencies {
 	compileOnly group: 'net.runelite', name:'client', version: runeLiteVersion
-	implementation 'com.google.code.gson:gson:2.10.1'
 
 	compileOnly 'org.projectlombok:lombok:1.18.30'
 	annotationProcessor 'org.projectlombok:lombok:1.18.30'
 	// Ensure Lombok works in tests too
 	testCompileOnly 'org.projectlombok:lombok:1.18.30'
 	testAnnotationProcessor 'org.projectlombok:lombok:1.18.30'
-
-	// Lombok @Slf4j generates references to slf4j-api; ensure it's on compile classpath
-	compileOnly 'org.slf4j:slf4j-api:1.7.36'
 
 	testImplementation 'junit:junit:4.12'
 	testImplementation group: 'net.runelite', name:'client', version: runeLiteVersion
