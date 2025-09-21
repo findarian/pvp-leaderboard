@@ -191,7 +191,7 @@ public class CognitoAuthService {
             throw new IOException("Token exchange failed (status=" + status + "): " + response);
         }
         
-        JsonObject tokens = JsonParser.parseString(response).getAsJsonObject();
+        JsonObject tokens = new JsonParser().parse(response).getAsJsonObject();
         accessToken = tokens.has("access_token") && !tokens.get("access_token").isJsonNull() ? tokens.get("access_token").getAsString() : null;
         idToken = tokens.has("id_token") && !tokens.get("id_token").isJsonNull() ? tokens.get("id_token").getAsString() : null;
         refreshToken = tokens.has("refresh_token") && !tokens.get("refresh_token").isJsonNull() ? tokens.get("refresh_token").getAsString() : null;
@@ -278,7 +278,7 @@ public class CognitoAuthService {
             String[] parts = jwt.split("\\.");
             if (parts.length < 2) return false;
             String payloadJson = new String(Base64.getUrlDecoder().decode(parts[1]), StandardCharsets.UTF_8);
-            JsonObject payload = JsonParser.parseString(payloadJson).getAsJsonObject();
+            JsonObject payload = new JsonParser().parse(payloadJson).getAsJsonObject();
 
             // Required claims
             String tokenUse = payload.has("token_use") && !payload.get("token_use").isJsonNull() ? payload.get("token_use").getAsString() : null;
@@ -368,7 +368,7 @@ public class CognitoAuthService {
         if (status < 200 || status >= 300) {
             throw new IOException("Refresh failed (status=" + status + "): " + sb);
         }
-        JsonObject tokens = JsonParser.parseString(sb.toString()).getAsJsonObject();
+        JsonObject tokens = new JsonParser().parse(sb.toString()).getAsJsonObject();
         String newAccessToken = tokens.has("access_token") && !tokens.get("access_token").isJsonNull() ? tokens.get("access_token").getAsString() : null;
         String newIdToken = tokens.has("id_token") && !tokens.get("id_token").isJsonNull() ? tokens.get("id_token").getAsString() : null;
         int expiresIn = tokens.has("expires_in") ? tokens.get("expires_in").getAsInt() : 3600;

@@ -638,7 +638,7 @@ public class DashboardPanel extends PluginPanel
                         return null;
                     }
 
-                    JsonObject jsonResponse = JsonParser.parseString(response).getAsJsonObject();
+                    JsonObject jsonResponse = new JsonParser().parse(response).getAsJsonObject();
                     JsonArray matches = jsonResponse.getAsJsonArray("matches");
                     String nextToken = jsonResponse.has("next_token") && !jsonResponse.get("next_token").isJsonNull() ? jsonResponse.get("next_token").getAsString() : null;
 
@@ -1010,7 +1010,7 @@ public class DashboardPanel extends PluginPanel
                 return;
             }
 
-            JsonObject stats = JsonParser.parseString(response).getAsJsonObject();
+            JsonObject stats = new JsonParser().parse(response).getAsJsonObject();
             if (stats.has("account_hash") && !stats.get("account_hash").isJsonNull())
             {
                 try { lastLoadedAccountHash = stats.get("account_hash").getAsString(); } catch (Exception ignore) {}
@@ -1234,7 +1234,7 @@ public class DashboardPanel extends PluginPanel
                 String response = HttpUtil.readResponseBody(conn);
                 if (status >= 200 && status < 300 && response != null && !response.isEmpty())
                 {
-                    JsonObject stats = JsonParser.parseString(response).getAsJsonObject();
+                    JsonObject stats = new JsonParser().parse(response).getAsJsonObject();
                     if (stats.has("mmr") && !stats.get("mmr").isJsonNull())
                     {
                         double mmr = stats.get("mmr").getAsDouble();
@@ -1256,7 +1256,7 @@ public class DashboardPanel extends PluginPanel
                 int status = conn.getResponseCode();
                 String response = HttpUtil.readResponseBody(conn);
                 if (status < 200 || status >= 300 || response == null || response.isEmpty()) return null;
-                JsonObject obj = JsonParser.parseString(response).getAsJsonObject();
+                JsonObject obj = new JsonParser().parse(response).getAsJsonObject();
                 JsonArray matches = obj.has("matches") ? obj.getAsJsonArray("matches") : null;
                 if (matches == null) return null;
                 JsonObject latest = null;
@@ -1404,7 +1404,7 @@ public class DashboardPanel extends PluginPanel
                 sb.append(ln);
             }
             r.close();
-            JsonObject obj = JsonParser.parseString(sb.toString()).getAsJsonObject();
+            JsonObject obj = new JsonParser().parse(sb.toString()).getAsJsonObject();
             shardCache.put(cacheKey, new ShardEntry(obj, now));
             shardThrottle.put(cacheKey, now);
                 shardFailUntil.remove(cacheKey);
@@ -1799,7 +1799,7 @@ public class DashboardPanel extends PluginPanel
                         return null;
                     }
 
-                    JsonObject data = JsonParser.parseString(response).getAsJsonObject();
+                    JsonObject data = new JsonParser().parse(response).getAsJsonObject();
                     
                     // Check for account_hash like website does
                     if (data.has("account_hash") && !data.get("account_hash").isJsonNull())
@@ -1874,7 +1874,7 @@ public class DashboardPanel extends PluginPanel
                     String response = HttpUtil.readResponseBody(conn);
                     if (status >= 200 && status < 300)
                     {
-                        JsonObject stats = JsonParser.parseString(response).getAsJsonObject();
+                        JsonObject stats = new JsonParser().parse(response).getAsJsonObject();
                         // Preload account linkage for shard by account when applicable
                         if (stats.has("account_hash") && !stats.get("account_hash").isJsonNull())
                         {
@@ -2040,7 +2040,7 @@ public class DashboardPanel extends PluginPanel
                     String response = HttpUtil.readResponseBody(conn);
                     if (status >= 200 && status < 300)
                     {
-                        JsonObject stats = JsonParser.parseString(response).getAsJsonObject();
+                        JsonObject stats = new JsonParser().parse(response).getAsJsonObject();
                     if (stats.has("account_hash") && !stats.get("account_hash").isJsonNull())
                     {
                         try { lastLoadedAccountHash = stats.get("account_hash").getAsString(); } catch (Exception ignore) {}
