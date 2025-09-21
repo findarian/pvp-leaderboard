@@ -323,7 +323,7 @@ private volatile long suppressFightStartUntilMs = 0L;
 		if (gameStateChanged.getGameState() == GameState.LOGGED_IN)
 		{
 			accountHash = client.getAccountHash();
-			log.info("PvP Leaderboard ready! Account hash: " + accountHash);
+			log.debug("PvP Leaderboard ready! Account hash: {}", accountHash);
             shardReady = true; // on-demand shard fetch; no prewarm
 			// Default lookup to local player and populate panel
 			try
@@ -352,8 +352,7 @@ private volatile long suppressFightStartUntilMs = 0L;
 				if (rankOverlay != null) {
 					rankOverlay.resetLookupStateOnWorldHop();
 				}
-				// Do NOT reset active fights on LOADING/HOPPING. Teleports and instancing trigger these states during fights.
-				try { log.info("[Fight] scene change: {} (fight preserved)", gameStateChanged.getGameState()); } catch (Exception ignore) {}
+				try { log.debug("[Fight] scene change: {} (fight preserved)", gameStateChanged.getGameState()); } catch (Exception ignore) {}
 			} catch (Exception ignore) {}
 		}
 	}
@@ -427,8 +426,8 @@ private volatile long suppressFightStartUntilMs = 0L;
                     if (tickNow - lastCombatActivityTick > OUT_OF_COMBAT_TICKS)
                     {
                         activeFights.clear();
-                        damageFromOpponent.clear();
-                        try { log.info("[Fight] combat window reset after {} ticks idle", tickNow - lastCombatActivityTick); } catch (Exception ignore) {}
+                    damageFromOpponent.clear();
+                    try { log.debug("[Fight] combat window reset after {} ticks idle", tickNow - lastCombatActivityTick); } catch (Exception ignore) {}
                     }
                     lastCombatActivityTick = tickNow;
                     // Avoid starting fights with our own name due to fallback errors
@@ -615,8 +614,8 @@ private void startFight(String opponentName)
         java.util.concurrent.CompletableFuture.runAsync(() -> {
             try
             {
-                // try { log.info("[Fight] submitting outcome={} vs={} world={} startTs={} endTs={} startSpell={} endSpell={} multi={} acctHash={} idTokenPresent={}",
-                //         result, opponentSafe, worldSafe, startTimeSafe, endTimeSafe, startSpellbookSafe, endSpellbookSafe, wasInMultiSafe, accountHashSafe, (idTokenSafe != null && !idTokenSafe.isEmpty())); } catch (Exception ignore) {}
+                try { log.debug("[Fight] submitting outcome={} vs={} world={} startTs={} endTs={} startSpell={} endSpell={} multi={} acctHash={} idTokenPresent={}",
+                    result, opponentSafe, worldSafe, startTimeSafe, endTimeSafe, startSpellbookSafe, endSpellbookSafe, wasInMultiSafe, accountHashSafe, (idTokenSafe != null && !idTokenSafe.isEmpty())); } catch (Exception ignore) {}
                 String bucket = wasInMultiSafe ? "multi" : (startSpellbookSafe == 1 ? "veng" : "nh");
 
                 // try { boolean authLoggedIn = dashboardPanel != null && dashboardPanel.isAuthLoggedIn(); boolean tokenPresent = idTokenSafe != null && !idTokenSafe.isEmpty(); log.info("[Fight] submit snapshot authLoggedIn={} tokenPresent={} opponent={} world={} startTs={} endTs={}", authLoggedIn, tokenPresent, opponentSafe, worldSafe, startTimeSafe, endTimeSafe); } catch (Exception ignore) {}
@@ -877,7 +876,7 @@ private void startFight(String opponentName)
         int world = client.getWorld();
         activeFights.compute(opponentName, (k, v) -> {
             if (v == null) {
-                try { log.info("[Fight] start (multi-track) vs={} world={} spellbook={} multi={}", opponentName, world, sb, multi); } catch (Exception ignore) {}
+                try { log.debug("[Fight] start (multi-track) vs={} world={} spellbook={} multi={}", opponentName, world, sb, multi); } catch (Exception ignore) {}
                 return new FightEntry(opponentName, ts, sb, multi, world);
             }
             v.lastActivityMs = System.currentTimeMillis();
@@ -926,8 +925,8 @@ private void startFight(String opponentName)
         java.util.concurrent.CompletableFuture.runAsync(() -> {
             try
             {
-                try { log.info("[Fight] submitting outcome={} vs={} world={} startTs={} endTs={} startSpell={} endSpell={} multi={} acctHash={} idTokenPresent={}",
-                        result, opponentSafe, worldSafe, startTimeSafe, endTimeSafe, startSpellbookSafe, endSpellbookSafe, wasInMultiSafe, accountHashSafe, (idTokenSafe != null && !idTokenSafe.isEmpty())); } catch (Exception ignore) {}
+                // try { log.info("[Fight] submitting outcome={} vs={} world={} startTs={} endTs={} startSpell={} endSpell={} multi={} acctHash={} idTokenPresent={}",
+                //         result, opponentSafe, worldSafe, startTimeSafe, endTimeSafe, startSpellbookSafe, endSpellbookSafe, wasInMultiSafe, accountHashSafe, (idTokenSafe != null && !idTokenSafe.isEmpty())); } catch (Exception ignore) {}
                 submitMatchResultSnapshot(result, endTimeSafe, selfNameSafe, opponentSafe, worldSafe,
                         startTimeSafe, startSpellbookSafe, endSpellbookSafe, wasInMultiSafe, accountHashSafe, idTokenSafe);
                 // If opponent wasn't found in shard, schedule API fallback rank update after 15s

@@ -285,7 +285,7 @@ public class RankOverlay extends Overlay
                 if (fetchInFlight.putIfAbsent(selfName, Boolean.TRUE) == null)
                 {
                     selfRankAttempted = true;
-                    log.info("[Overlay] fetch self first name={} bucket={}", selfName, bucketKey(config.rankBucket()));
+                    log.debug("[Overlay] fetch self first name={} bucket={}", selfName, bucketKey(config.rankBucket()));
                     java.util.concurrent.CompletableFuture.supplyAsync(() -> {
                         try {
                             return plugin != null ? plugin.resolvePlayerRank(selfName, bucketKey(config.rankBucket())) : null;
@@ -406,7 +406,7 @@ public class RankOverlay extends Overlay
                     // Only log once per name per bucket to avoid spam in crowded areas
                     if (loggedFetch.putIfAbsent(playerName, Boolean.TRUE) == null)
                     {
-                        log.info("[Overlay] fetch once for player={} bucket={}", playerName, bucketKey(config.rankBucket()));
+                        log.debug("[Overlay] fetch once for player={} bucket={}", playerName, bucketKey(config.rankBucket()));
                     }
                     scheduledThisTick++;
                     java.util.concurrent.CompletableFuture.supplyAsync(() -> {
