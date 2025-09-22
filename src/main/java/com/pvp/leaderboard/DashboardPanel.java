@@ -6,14 +6,9 @@ import net.runelite.client.config.ConfigManager;
 import javax.swing.*;
 import javax.swing.table.DefaultTableModel;
 import java.awt.*;
-import java.net.HttpURLConnection;
-import java.net.URL;
-import java.io.BufferedReader;
-import java.io.InputStreamReader;
 import com.google.gson.Gson;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
-import com.google.gson.JsonParser;
 import okhttp3.Call;
 import okhttp3.Callback;
 import okhttp3.OkHttpClient;
@@ -983,23 +978,22 @@ public class DashboardPanel extends PluginPanel
             {
                 return;
             }
-            // Use user endpoint by player_id like website does
-            String apiUrl = "https://kekh0x6kfk.execute-api.us-east-1.amazonaws.com/prod/user?player_id=" + URLEncoder.encode(normalizePlayerId(playerId), "UTF-8");
-            URL url = new URL(apiUrl);
-            HttpURLConnection conn = (HttpURLConnection) url.openConnection();
-            conn.setRequestMethod("GET");
-            conn.setConnectTimeout(3000);
-            conn.setReadTimeout(4000);
+			// Use user endpoint by player_id like website does (OkHttp + Gson)
+			String apiUrl = "https://kekh0x6kfk.execute-api.us-east-1.amazonaws.com/prod/user?player_id=" + URLEncoder.encode(normalizePlayerId(playerId), "UTF-8");
+			Request req = new Request.Builder().url(apiUrl).get().build();
+			String response;
+			try (Response res = httpClient.newCall(req).execute())
+			{
+				if (!res.isSuccessful() || res.body() == null)
+				{
+					// Suppress popup after matches if the player isn't on the leaderboard
+					return;
+				}
+				okhttp3.ResponseBody rb = res.body();
+				response = rb != null ? rb.string() : "";
+			}
 
-            int status = conn.getResponseCode();
-            String response = HttpUtil.readResponseBody(conn);
-            if (status < 200 || status >= 300)
-            {
-                // Suppress popup after matches if the player isn't on the leaderboard
-                return;
-            }
-
-            JsonObject stats = new JsonParser().parse(response).getAsJsonObject();
+			JsonObject stats = gson.fromJson(response, JsonObject.class);
             if (stats.has("account_hash") && !stats.get("account_hash").isJsonNull())
             {
                 try { lastLoadedAccountHash = stats.get("account_hash").getAsString(); } catch (Exception ignore) {}
@@ -1211,19 +1205,20 @@ public class DashboardPanel extends PluginPanel
             String canonBucket = bucket == null ? "overall" : bucket.toLowerCase();
             String pid = normalizePlayerId(playerName);
             if (pid == null || pid.isEmpty()) return null;
-            if ("overall".equals(canonBucket))
+			if ("overall".equals(canonBucket))
             {
-                String apiUrl = "https://kekh0x6kfk.execute-api.us-east-1.amazonaws.com/prod/user?player_id=" + URLEncoder.encode(pid, "UTF-8");
-                URL url = new URL(apiUrl);
-                HttpURLConnection conn = (HttpURLConnection) url.openConnection();
-                conn.setRequestMethod("GET");
-                conn.setConnectTimeout(3000);
-                conn.setReadTimeout(4000);
-                int status = conn.getResponseCode();
-                String response = HttpUtil.readResponseBody(conn);
-                if (status >= 200 && status < 300 && response != null && !response.isEmpty())
+				String apiUrl = "https://kekh0x6kfk.execute-api.us-east-1.amazonaws.com/prod/user?player_id=" + URLEncoder.encode(pid, "UTF-8");
+				Request req = new Request.Builder().url(apiUrl).get().build();
+				String response;
+				try (Response res = httpClient.newCall(req).execute())
                 {
-                    JsonObject stats = new JsonParser().parse(response).getAsJsonObject();
+					if (!res.isSuccessful() || res.body() == null) return null;
+					okhttp3.ResponseBody rb = res.body();
+					response = rb != null ? rb.string() : "";
+				}
+				if (response != null && !response.isEmpty())
+				{
+					JsonObject stats = gson.fromJson(response, JsonObject.class);
                     if (stats.has("mmr") && !stats.get("mmr").isJsonNull())
                     {
                         double mmr = stats.get("mmr").getAsDouble();
@@ -1235,17 +1230,18 @@ public class DashboardPanel extends PluginPanel
             }
             else
             {
-                // Pull recent matches and infer tier for the requested bucket from latest match
-                String apiUrl = "https://kekh0x6kfk.execute-api.us-east-1.amazonaws.com/prod/matches?player_id=" + URLEncoder.encode(pid, "UTF-8") + "&limit=50";
-                URL url = new URL(apiUrl);
-                HttpURLConnection conn = (HttpURLConnection) url.openConnection();
-                conn.setRequestMethod("GET");
-                conn.setConnectTimeout(3000);
-                conn.setReadTimeout(4000);
-                int status = conn.getResponseCode();
-                String response = HttpUtil.readResponseBody(conn);
-                if (status < 200 || status >= 300 || response == null || response.isEmpty()) return null;
-                JsonObject obj = new JsonParser().parse(response).getAsJsonObject();
+				// Pull recent matches and infer tier for the requested bucket from latest match
+				String apiUrl = "https://kekh0x6kfk.execute-api.us-east-1.amazonaws.com/prod/matches?player_id=" + URLEncoder.encode(pid, "UTF-8") + "&limit=50";
+				Request req = new Request.Builder().url(apiUrl).get().build();
+				String response;
+				try (Response res = httpClient.newCall(req).execute())
+				{
+					if (!res.isSuccessful() || res.body() == null) return null;
+					okhttp3.ResponseBody rb = res.body();
+					response = rb != null ? rb.string() : "";
+				}
+				if (response == null || response.isEmpty()) return null;
+				JsonObject obj = gson.fromJson(response, JsonObject.class);
                 JsonArray matches = obj.has("matches") ? obj.getAsJsonArray("matches") : null;
                 if (matches == null) return null;
                 JsonObject latest = null;
@@ -1372,28 +1368,20 @@ public class DashboardPanel extends PluginPanel
                 }
 
                 // Fetch
-            URL url = new URL(urlStr);
-            HttpURLConnection conn = (HttpURLConnection) url.openConnection();
-                conn.setConnectTimeout(3000);
-                conn.setReadTimeout(4000);
-            conn.setRequestMethod("GET");
-                int status = conn.getResponseCode();
-                if (status != 200)
+            Request req = new Request.Builder().url(urlStr).get().build();
+            String body;
+            try (Response res = httpClient.newCall(req).execute())
+            {
+                if (res.code() != 200 || res.body() == null)
                 {
                     shardFailUntil.put(cacheKey, now + SHARD_FAIL_BACKOFF_MS);
                     shardThrottle.put(cacheKey, now);
                     return null;
                 }
-
-            BufferedReader r = new BufferedReader(new InputStreamReader(conn.getInputStream(), java.nio.charset.StandardCharsets.UTF_8));
-            StringBuilder sb = new StringBuilder();
-            String ln;
-            while ((ln = r.readLine()) != null)
-            {
-                sb.append(ln);
+                okhttp3.ResponseBody rb = res.body();
+                body = rb != null ? rb.string() : "";
             }
-            r.close();
-            JsonObject obj = new JsonParser().parse(sb.toString()).getAsJsonObject();
+            JsonObject obj = gson.fromJson(body, JsonObject.class);
             shardCache.put(cacheKey, new ShardEntry(obj, now));
             shardThrottle.put(cacheKey, now);
                 shardFailUntil.remove(cacheKey);
@@ -1775,20 +1763,19 @@ public class DashboardPanel extends PluginPanel
                 {
                     // Get account hash from API using display name slug
                     String apiUrl = "https://kekh0x6kfk.execute-api.us-east-1.amazonaws.com/prod/user?player_id=" + URLEncoder.encode(exact, "UTF-8");
-                    URL url = new URL(apiUrl);
-                    HttpURLConnection conn = (HttpURLConnection) url.openConnection();
-                    conn.setRequestMethod("GET");
-                    conn.setConnectTimeout(10000);
-                    conn.setReadTimeout(15000);
-
-                    int status = conn.getResponseCode();
-                    String response = HttpUtil.readResponseBody(conn);
-                    if (status < 200 || status >= 300)
+                    Request req = new Request.Builder().url(apiUrl).get().build();
+                    String response;
+                    try (Response res = httpClient.newCall(req).execute())
                     {
-                        return null;
+                        if (!res.isSuccessful() || res.body() == null)
+                        {
+                            return null;
+                        }
+                        okhttp3.ResponseBody rb = res.body();
+                        response = rb != null ? rb.string() : "";
                     }
 
-                    JsonObject data = new JsonParser().parse(response).getAsJsonObject();
+                    JsonObject data = gson.fromJson(response, JsonObject.class);
                     
                     // Check for account_hash like website does
                     if (data.has("account_hash") && !data.get("account_hash").isJsonNull())
@@ -1854,16 +1841,16 @@ public class DashboardPanel extends PluginPanel
                 try
                 {
                     String apiUrl = "https://kekh0x6kfk.execute-api.us-east-1.amazonaws.com/prod/user?player_id=" + URLEncoder.encode(normalizePlayerId(playerName), "UTF-8");
-                    URL url = new URL(apiUrl);
-                    HttpURLConnection conn = (HttpURLConnection) url.openConnection();
-                    conn.setRequestMethod("GET");
-                    conn.setConnectTimeout(10000);
-                    conn.setReadTimeout(15000);
-                    int status = conn.getResponseCode();
-                    String response = HttpUtil.readResponseBody(conn);
-                    if (status >= 200 && status < 300)
-                    {
-                        JsonObject stats = new JsonParser().parse(response).getAsJsonObject();
+                Request req = new Request.Builder().url(apiUrl).get().build();
+                String response;
+                try (Response res = httpClient.newCall(req).execute()) {
+                    if (!res.isSuccessful() || res.body() == null) return null;
+                    okhttp3.ResponseBody rb = res.body();
+                    response = rb != null ? rb.string() : "";
+                }
+                if (!response.isEmpty())
+                {
+                    JsonObject stats = gson.fromJson(response, JsonObject.class);
                         // Preload account linkage for shard by account when applicable
                         if (stats.has("account_hash") && !stats.get("account_hash").isJsonNull())
                         {
@@ -2020,16 +2007,16 @@ public class DashboardPanel extends PluginPanel
                 try
                 {
                     String apiUrl = "https://kekh0x6kfk.execute-api.us-east-1.amazonaws.com/prod/user?player_id=" + URLEncoder.encode(normalizePlayerId(playerName), "UTF-8");
-                    URL url = new URL(apiUrl);
-                    HttpURLConnection conn = (HttpURLConnection) url.openConnection();
-                    conn.setRequestMethod("GET");
-                    conn.setConnectTimeout(10000);
-                    conn.setReadTimeout(15000);
-                    int status = conn.getResponseCode();
-                    String response = HttpUtil.readResponseBody(conn);
-                    if (status >= 200 && status < 300)
-                    {
-                        JsonObject stats = new JsonParser().parse(response).getAsJsonObject();
+                Request req = new Request.Builder().url(apiUrl).get().build();
+                String response;
+                try (Response res = httpClient.newCall(req).execute()) {
+                    if (!res.isSuccessful() || res.body() == null) return null;
+                    okhttp3.ResponseBody rb = res.body();
+                    response = rb != null ? rb.string() : "";
+                }
+                if (!response.isEmpty())
+                {
+                        JsonObject stats = gson.fromJson(response, JsonObject.class);
                     if (stats.has("account_hash") && !stats.get("account_hash").isJsonNull())
                     {
                         try { lastLoadedAccountHash = stats.get("account_hash").getAsString(); } catch (Exception ignore) {}

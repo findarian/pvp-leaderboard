@@ -19,11 +19,7 @@ import java.util.Map;
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.LinkedBlockingQueue;
-import java.util.concurrent.ThreadFactory;
-import java.util.concurrent.ThreadPoolExecutor;
-import java.util.concurrent.TimeUnit;
+import java.util.concurrent.ScheduledExecutorService;
 
 @Slf4j
 @SuppressWarnings("deprecation")
@@ -135,11 +131,11 @@ public class RankOverlay extends Overlay
             if (fetchInFlight.putIfAbsent(playerName, Boolean.TRUE) == null)
             {
                 log.info("[Overlay] forced fetch for player={} bucket={}", playerName, bucketKey(config.rankBucket()));
-                java.util.concurrent.CompletableFuture.supplyAsync(() -> {
+                    java.util.concurrent.CompletableFuture.supplyAsync(() -> {
                     try {
                         return plugin != null ? plugin.resolvePlayerRank(playerName, bucketKey(config.rankBucket())) : null;
                     } catch (Exception e) { return null; }
-                }, OVERLAY_EXECUTOR).thenAccept(rank -> {
+                    }, scheduler).thenAccept(rank -> {
                     try
                     {
                         if (rank != null)
@@ -207,13 +203,16 @@ public class RankOverlay extends Overlay
     private boolean dragging = false;
     private java.awt.Point dragStart = null;
 
+    private final ScheduledExecutorService scheduler;
+
     @Inject
-    public RankOverlay(Client client, PvPLeaderboardConfig config, ItemManager itemManager, PvPLeaderboardPlugin plugin)
+    public RankOverlay(Client client, PvPLeaderboardConfig config, ItemManager itemManager, PvPLeaderboardPlugin plugin, ScheduledExecutorService scheduler)
     {
         this.client = client;
         this.config = config;
         this.itemManager = itemManager;
         this.plugin = plugin;
+        this.scheduler = scheduler;
         setPosition(OverlayPosition.DYNAMIC);
         // Draw over the 3D scene but under widgets/menus so menus cover the rank text
         setLayer(OverlayLayer.ABOVE_SCENE);
@@ -223,10 +222,7 @@ public class RankOverlay extends Overlay
     @Override
     public Dimension render(Graphics2D graphics)
     {
-        // Initialize and tune the low-priority executor according to current throttle level
-        ensureExecutor();
-        int levelForExec = 0; try { levelForExec = Math.max(0, Math.min(10, config.lookupThrottleLevel())); } catch (Exception ignore) {}
-        tuneExecutor(levelForExec);
+        // lookupThrottleLevel is honored below in per-tick scheduling and in-flight limits
         // Gate on shard readiness instead of fixed delay
         if (plugin != null && !plugin.isShardReady())
         {
@@ -290,7 +286,7 @@ public class RankOverlay extends Overlay
                         try {
                             return plugin != null ? plugin.resolvePlayerRank(selfName, bucketKey(config.rankBucket())) : null;
                         } catch (Exception e) { return null; }
-                    }, OVERLAY_EXECUTOR).thenAccept(rank -> {
+                    }, scheduler).thenAccept(rank -> {
                         try
                         {
                             if (rank != null)
@@ -383,13 +379,7 @@ public class RankOverlay extends Overlay
                 if (scheduledThisTick >= maxPerTick) {
                     continue;
                 }
-                if (OVERLAY_EXECUTOR instanceof ThreadPoolExecutor) {
-                    ThreadPoolExecutor tpe = (ThreadPoolExecutor) OVERLAY_EXECUTOR;
-                    int queueThreshold = Math.max(8, 64 - level * 5); // higher level → smaller queue
-                    if (tpe.getQueue().size() >= queueThreshold) {
-                        continue;
-                    }
-                }
+                // Using shared scheduler; rely on per-tick and in-flight limits for backpressure
                 // Also space out scheduling to avoid bursts
                 long perScheduleDelayMs = computeThrottleDelayMs(level);
                 long nowMsFetch = System.currentTimeMillis();
@@ -413,7 +403,7 @@ public class RankOverlay extends Overlay
                         try {
                             return plugin != null ? plugin.resolvePlayerRank(playerName, bucketKey(config.rankBucket())) : null;
                         } catch (Exception e) { return null; }
-                    }, OVERLAY_EXECUTOR).thenAccept(rank -> {
+                    }, scheduler).thenAccept(rank -> {
                         try
                         {
                             if (rank != null)
@@ -529,43 +519,7 @@ public class RankOverlay extends Overlay
     // - Work is latency/tick sensitive and uses a bounded queue with discard policy to avoid frame hitches.
     // - Thread count is dynamically tuned per throttle level and may be 1-3.
     // - Tasks are short-lived network lookups and image resolves; isolating protects client thread.
-    private static volatile ExecutorService OVERLAY_EXECUTOR;
-    private static void ensureExecutor()
-    {
-        if (OVERLAY_EXECUTOR != null) return;
-        synchronized (RankOverlay.class)
-        {
-            if (OVERLAY_EXECUTOR != null) return;
-            ThreadFactory tf = r -> {
-                Thread t = new Thread(r, "pvp-overlay");
-                t.setDaemon(true);
-                try { t.setPriority(Thread.MIN_PRIORITY); } catch (Exception ignore) {}
-                return t;
-            };
-            OVERLAY_EXECUTOR = new ThreadPoolExecutor(
-                2, 2,
-                30L, TimeUnit.SECONDS,
-                new LinkedBlockingQueue<>(64),
-                tf,
-                new ThreadPoolExecutor.DiscardPolicy()
-            );
-        }
-    }
-
-    // Dynamically adjust thread count to throttle level (higher → fewer threads)
-    private static void tuneExecutor(int level)
-    {
-        if (!(OVERLAY_EXECUTOR instanceof ThreadPoolExecutor)) return;
-        ThreadPoolExecutor tpe = (ThreadPoolExecutor) OVERLAY_EXECUTOR;
-        int maxThreads;
-        if (level <= 2) maxThreads = 3;
-        else if (level <= 5) maxThreads = 2;
-        else maxThreads = 1;
-        try {
-            if (tpe.getCorePoolSize() != maxThreads) tpe.setCorePoolSize(maxThreads);
-            if (tpe.getMaximumPoolSize() != maxThreads) tpe.setMaximumPoolSize(maxThreads);
-        } catch (Exception ignore) {}
-    }
+    // Using shared injected scheduler; no custom executor
 
     // Per-tick scheduling counters
     private int lastFetchTick = -1;

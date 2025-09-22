@@ -2,7 +2,6 @@ package com.pvp.leaderboard;
 
 import com.google.gson.Gson;
 import com.google.gson.JsonObject;
-import com.google.gson.JsonParser;
 import net.runelite.client.config.ConfigManager;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
@@ -279,7 +278,7 @@ public class CognitoAuthService {
             String[] parts = jwt.split("\\.");
             if (parts.length < 2) return false;
             String payloadJson = new String(Base64.getUrlDecoder().decode(parts[1]), StandardCharsets.UTF_8);
-            JsonObject payload = new JsonParser().parse(payloadJson).getAsJsonObject();
+            JsonObject payload = gson.fromJson(payloadJson, JsonObject.class);
 
             // Required claims
             String tokenUse = payload.has("token_use") && !payload.get("token_use").isJsonNull() ? payload.get("token_use").getAsString() : null;
