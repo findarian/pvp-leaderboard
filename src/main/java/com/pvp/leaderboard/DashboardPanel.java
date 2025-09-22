@@ -1754,66 +1754,40 @@ public class DashboardPanel extends PluginPanel
             // Fallback to API path below
         }
         
-        SwingWorker<String, Void> worker = new SwingWorker<String, Void>()
-        {
-            @Override
-            protected String doInBackground() throws Exception
-            {
-                try
-                {
-                    // Get account hash from API using display name slug
-                    String apiUrl = "https://kekh0x6kfk.execute-api.us-east-1.amazonaws.com/prod/user?player_id=" + URLEncoder.encode(exact, "UTF-8");
-                    Request req = new Request.Builder().url(apiUrl).get().build();
-                    String response;
-                    try (Response res = httpClient.newCall(req).execute())
-                    {
-                        if (!res.isSuccessful() || res.body() == null)
-                        {
-                            return null;
-                        }
-                        okhttp3.ResponseBody rb = res.body();
-                        response = rb != null ? rb.string() : "";
-                    }
-
-                    JsonObject data = gson.fromJson(response, JsonObject.class);
-                    
-                    // Check for account_hash like website does
-                    if (data.has("account_hash") && !data.get("account_hash").isJsonNull())
-                    {
-                        String accountHash = data.get("account_hash").getAsString();
-                        return generateAccountSha(accountHash);
-                    }
-                }
-                catch (Exception e)
-                {
-                    e.printStackTrace();
-                }
-                return null;
-            }
-            
-            @Override
-            protected void done()
-            {
-                try
-                {
-                    String accountSha = get();
-                    if (accountSha != null)
-                    {
-                        String profileUrl = "https://devsecopsautomated.com/profile.html?acct=" + accountSha;
-                        Desktop.getDesktop().browse(URI.create(profileUrl));
-                    }
-                    else
-                    {
-                        // Popup disabled per requirement
-                    }
-                }
-                catch (Exception e)
-                {
+        // Async via OkHttp; UI updates on EDT
+        try {
+            String apiUrl = "https://kekh0x6kfk.execute-api.us-east-1.amazonaws.com/prod/user?player_id=" + URLEncoder.encode(exact, "UTF-8");
+            Request req = new Request.Builder().url(apiUrl).get().build();
+            httpClient.newCall(req).enqueue(new Callback() {
+                @Override
+                public void onFailure(Call call, java.io.IOException e) {
                     // Popup disabled per requirement
                 }
-            }
-        };
-        worker.execute();
+
+                @Override
+                public void onResponse(Call call, Response response) throws java.io.IOException {
+                    try (Response res = response) {
+                        if (!res.isSuccessful() || res.body() == null) return;
+                        okhttp3.ResponseBody rb = res.body();
+                        String body = rb != null ? rb.string() : "";
+                        JsonObject data = gson.fromJson(body, JsonObject.class);
+                        if (data.has("account_hash") && !data.get("account_hash").isJsonNull()) {
+                            String accountHash = data.get("account_hash").getAsString();
+                            String accountSha;
+                            try {
+                                accountSha = generateAccountSha(accountHash);
+                            } catch (Exception ex) {
+                                return;
+                            }
+                            String profileUrl = "https://devsecopsautomated.com/profile.html?acct=" + accountSha;
+                            SwingUtilities.invokeLater(() -> {
+                                try { Desktop.getDesktop().browse(URI.create(profileUrl)); } catch (Exception ignore) {}
+                            });
+                        }
+                    }
+                }
+            });
+        } catch (Exception ignore) {}
     }
     
     private void searchUserOnPlugin()
@@ -1833,152 +1807,100 @@ public class DashboardPanel extends PluginPanel
         // no-op: ProfileState no longer carries fields
         
         // Use /user API to populate panel first; match history remains as-is
-        SwingWorker<Void, Void> worker = new SwingWorker<Void, Void>()
-        {
-            @Override
-            protected Void doInBackground() throws Exception
-            {
-                try
-                {
-                    String apiUrl = "https://kekh0x6kfk.execute-api.us-east-1.amazonaws.com/prod/user?player_id=" + URLEncoder.encode(normalizePlayerId(playerName), "UTF-8");
-                Request req = new Request.Builder().url(apiUrl).get().build();
-                String response;
-                try (Response res = httpClient.newCall(req).execute()) {
-                    if (!res.isSuccessful() || res.body() == null) return null;
-                    okhttp3.ResponseBody rb = res.body();
-                    response = rb != null ? rb.string() : "";
-                }
-                if (!response.isEmpty())
-                {
-                    JsonObject stats = gson.fromJson(response, JsonObject.class);
-                        // Preload account linkage for shard by account when applicable
-                        if (stats.has("account_hash") && !stats.get("account_hash").isJsonNull())
-                        {
+        try {
+            String apiUrl = "https://kekh0x6kfk.execute-api.us-east-1.amazonaws.com/prod/user?player_id=" + URLEncoder.encode(normalizePlayerId(playerName), "UTF-8");
+            Request req = new Request.Builder().url(apiUrl).get().build();
+            httpClient.newCall(req).enqueue(new Callback() {
+                @Override public void onFailure(Call call, java.io.IOException e) { /* popup disabled */ }
+                @Override public void onResponse(Call call, Response response) throws java.io.IOException {
+                    try (Response res = response) {
+                        if (!res.isSuccessful() || res.body() == null) return;
+                        okhttp3.ResponseBody rb = res.body();
+                        String body = rb != null ? rb.string() : "";
+                        if (body.isEmpty()) return;
+                        JsonObject stats = gson.fromJson(body, JsonObject.class);
+                        if (stats.has("account_hash") && !stats.get("account_hash").isJsonNull()) {
                             try { lastLoadedAccountHash = stats.get("account_hash").getAsString(); } catch (Exception ignore) {}
                         }
-                        // Update bucket bars from current data. Support both nested buckets and flat keys.
                         String[] buckets = new String[]{"overall","nh","veng","multi","dmm"};
                         JsonObject bucketsObj = null;
                         try { if (stats.has("buckets") && stats.get("buckets").isJsonObject()) bucketsObj = stats.getAsJsonObject("buckets"); } catch (Exception ignore) {}
-                        for (String key : buckets)
-                        {
-                            String rankLabel = null;
-                            int division = 0;
-                            double pct = 0.0;
-                            int worldRankNum = -1;
-
-                            if (bucketsObj != null && bucketsObj.has(key) && bucketsObj.get(key).isJsonObject())
-                            {
+                        for (String key : buckets) {
+                            String rankLabel = null; int division = 0; double pct = 0.0; int worldRankNum = -1;
+                            if (bucketsObj != null && bucketsObj.has(key) && bucketsObj.get(key).isJsonObject()) {
                                 JsonObject b = bucketsObj.getAsJsonObject(key);
                                 try {
-                                    if (b.has("mmr") && !b.get("mmr").isJsonNull())
-                                    {
+                                    if (b.has("mmr") && !b.get("mmr").isJsonNull()) {
                                         double mmr = b.get("mmr").getAsDouble();
                                         RankInfo ri = rankLabelAndProgressFromMMR(mmr);
                                         if (ri != null) { rankLabel = ri.rank; division = ri.division; pct = ri.progress; }
                                     }
-                                    // If API provides explicit progress, prefer it
-                                    if (b.has("rank_progress") && b.get("rank_progress").isJsonObject())
-                                    {
+                                    if (b.has("rank_progress") && b.get("rank_progress").isJsonObject()) {
                                         try {
                                             JsonObject rp = b.getAsJsonObject("rank_progress");
-                                            if (rp.has("progress_to_next_rank_pct") && !rp.get("progress_to_next_rank_pct").isJsonNull())
-                                            {
+                                            if (rp.has("progress_to_next_rank_pct") && !rp.get("progress_to_next_rank_pct").isJsonNull()) {
                                                 pct = Math.max(0, Math.min(100, rp.get("progress_to_next_rank_pct").getAsDouble()));
                                             }
                                         } catch (Exception ignore) {}
                                     }
-                                    if (rankLabel == null && b.has("rank") && !b.get("rank").isJsonNull())
-                                    {
+                                    if (rankLabel == null && b.has("rank") && !b.get("rank").isJsonNull()) {
                                         String raw = b.get("rank").getAsString();
                                         String formatted = formatTierLabel(raw);
                                         String[] parts = formatted.split(" ");
                                         rankLabel = parts.length > 0 ? parts[0] : formatted;
                                         if (parts.length > 1) { try { division = Integer.parseInt(parts[1]); } catch (Exception ignore) {} }
                                     }
-                                    if (b.has("division") && !b.get("division").isJsonNull())
-                                    {
+                                    if (b.has("division") && !b.get("division").isJsonNull()) {
                                         try { division = b.get("division").getAsInt(); } catch (Exception ignore) {}
                                     }
                                 } catch (Exception ignore) {}
-                            }
-                            else
-                            {
-                                // Flat keys fallback
-                                String mmrKey = key + "_mmr";
-                                String rankKey = key + "_rank";
-                                String divKey = key + "_division";
-                                String worldKey = key + "_world_rank";
-                                try
-                                {
-                                    if ("overall".equals(key) && stats.has("mmr") && !stats.get("mmr").isJsonNull())
-                                    {
+                            } else {
+                                String mmrKey = key + "_mmr"; String rankKey = key + "_rank"; String divKey = key + "_division"; String worldKey = key + "_world_rank";
+                                try {
+                                    if ("overall".equals(key) && stats.has("mmr") && !stats.get("mmr").isJsonNull()) {
                                         double mmr = stats.get("mmr").getAsDouble();
                                         RankInfo ri = rankLabelAndProgressFromMMR(mmr);
                                         if (ri != null) { rankLabel = ri.rank; division = ri.division; pct = ri.progress; }
-                                    }
-                                    else if (stats.has(mmrKey) && !stats.get(mmrKey).isJsonNull())
-                                    {
+                                    } else if (stats.has(mmrKey) && !stats.get(mmrKey).isJsonNull()) {
                                         double mmr = stats.get(mmrKey).getAsDouble();
                                         RankInfo ri = rankLabelAndProgressFromMMR(mmr);
                                         if (ri != null) { rankLabel = ri.rank; division = ri.division; pct = ri.progress; }
                                     }
-                                    if (rankLabel == null && stats.has(rankKey) && !stats.get(rankKey).isJsonNull())
-                                    {
+                                    if (rankLabel == null && stats.has(rankKey) && !stats.get(rankKey).isJsonNull()) {
                                         String formatted = formatTierLabel(stats.get(rankKey).getAsString());
                                         String[] parts = formatted.split(" ");
                                         rankLabel = parts.length > 0 ? parts[0] : formatted;
                                         if (parts.length > 1) { try { division = Integer.parseInt(parts[1]); } catch (Exception ignore) {} }
                                     }
-                                    if (stats.has(divKey) && !stats.get(divKey).isJsonNull())
-                                    {
+                                    if (stats.has(divKey) && !stats.get(divKey).isJsonNull()) {
                                         try { division = stats.get(divKey).getAsInt(); } catch (Exception ignore) {}
                                     }
-                                    if (stats.has(worldKey) && !stats.get(worldKey).isJsonNull())
-                                    {
+                                    if (stats.has(worldKey) && !stats.get(worldKey).isJsonNull()) {
                                         try { worldRankNum = stats.get(worldKey).getAsInt(); } catch (Exception ignore) {}
                                     }
-                                }
-                                catch (Exception ignore) {}
+                                } catch (Exception ignore) {}
                             }
-
-                            // If overall bucket and top-level world_rank exists, use it
-                            if (worldRankNum < 0 && "overall".equals(key))
-                            {
+                            if (worldRankNum < 0 && "overall".equals(key)) {
                                 try {
-                                    if (stats.has("world_rank") && !stats.get("world_rank").isJsonNull())
-                                    {
+                                    if (stats.has("world_rank") && !stats.get("world_rank").isJsonNull()) {
                                         worldRankNum = stats.get("world_rank").getAsInt();
                                     }
                                 } catch (Exception ignore) {}
                             }
-
-                            if (rankLabel != null)
-                            {
+                            if (rankLabel != null) {
                                 final String fKey = key; final String fRank = rankLabel; final int fDiv = division; final double fPct = pct; final int fRankNum = worldRankNum;
                                 SwingUtilities.invokeLater(() -> setBucketBarWithRank(fKey, fRank, fDiv, fPct, fRankNum));
                             }
                         }
                     }
+                    // keep behavior: load match history and show extra stats if logged in
+                    SwingUtilities.invokeLater(() -> {
+                        loadMatchHistory(playerName);
+                        if (isLoggedIn) showAdditionalStats(true);
+                    });
                 }
-                catch (Exception ignore)
-                {
-                }
-                return null;
-            }
-
-            @Override
-            protected void done()
-            {
-                // Keep existing behavior to load matches for the player
-                loadMatchHistory(playerName);
-        if (isLoggedIn)
-        {
-            showAdditionalStats(true);
-        }
-            }
-        };
-        worker.execute();
+            });
+        } catch (Exception ignore) {}
     }
 
     public void lookupPlayerFromRightClick(String name)
@@ -1999,43 +1921,26 @@ public class DashboardPanel extends PluginPanel
     {
         final String playerName = normalizeDisplayName(displayName);
         if (playerName.isEmpty()) return;
-        SwingWorker<Void, Void> worker = new SwingWorker<Void, Void>()
-        {
-            @Override
-            protected Void doInBackground() throws Exception
-            {
-                try
-                {
-                    String apiUrl = "https://kekh0x6kfk.execute-api.us-east-1.amazonaws.com/prod/user?player_id=" + URLEncoder.encode(normalizePlayerId(playerName), "UTF-8");
-                Request req = new Request.Builder().url(apiUrl).get().build();
-                String response;
-                try (Response res = httpClient.newCall(req).execute()) {
-                    if (!res.isSuccessful() || res.body() == null) return null;
-                    okhttp3.ResponseBody rb = res.body();
-                    response = rb != null ? rb.string() : "";
-                }
-                if (!response.isEmpty())
-                {
-                        JsonObject stats = gson.fromJson(response, JsonObject.class);
-                    if (stats.has("account_hash") && !stats.get("account_hash").isJsonNull())
-                    {
-                        try { lastLoadedAccountHash = stats.get("account_hash").getAsString(); } catch (Exception ignore) {}
+        try {
+            String apiUrl = "https://kekh0x6kfk.execute-api.us-east-1.amazonaws.com/prod/user?player_id=" + URLEncoder.encode(normalizePlayerId(playerName), "UTF-8");
+            Request req = new Request.Builder().url(apiUrl).get().build();
+            httpClient.newCall(req).enqueue(new Callback() {
+                @Override public void onFailure(Call call, java.io.IOException e) { }
+                @Override public void onResponse(Call call, Response response) throws java.io.IOException {
+                    try (Response res = response) {
+                        if (!res.isSuccessful() || res.body() == null) return;
+                        okhttp3.ResponseBody rb = res.body();
+                        String body = rb != null ? rb.string() : "";
+                        if (body.isEmpty()) return;
+                        JsonObject stats = gson.fromJson(body, JsonObject.class);
+                        if (stats.has("account_hash") && !stats.get("account_hash").isJsonNull()) {
+                            try { lastLoadedAccountHash = stats.get("account_hash").getAsString(); } catch (Exception ignore) {}
                         }
                     }
+                    SwingUtilities.invokeLater(() -> updateAllRankNumbers(playerName));
                 }
-                catch (Exception ignore)
-                {
-                }
-                return null;
-            }
-
-            @Override
-            protected void done()
-            {
-                updateAllRankNumbers(playerName);
-            }
-        };
-        worker.execute();
+            });
+        } catch (Exception ignore) {}
     }
     
     private String generateAccountSha(String accountHash) throws Exception

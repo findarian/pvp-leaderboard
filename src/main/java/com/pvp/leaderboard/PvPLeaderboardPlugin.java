@@ -198,6 +198,8 @@ private volatile long suppressFightStartUntilMs = 0L;
         overlayManager.remove(topNearbyOverlay);
         overlayManager.remove(bottomNearbyOverlay);
         try { if (fightGcTask != null) { fightGcTask.cancel(true); } } catch (Exception ignore) {}
+        // No long-lived OkHttp calls created by this class directly; DashboardPanel uses enqueue
+        // If needed, we could tag calls and cancel here.
 		log.info("PvP Leaderboard stopped!");
 	}
     @Subscribe
@@ -235,7 +237,7 @@ private volatile long suppressFightStartUntilMs = 0L;
                     // Fast-follow: push API-derived tier into overlay immediately
                     java.util.concurrent.CompletableFuture.supplyAsync(() -> {
                         try { return dashboardPanel.fetchSelfTierFromApi(selfName, currentBucket); } catch (Exception e) { return null; }
-                    }).thenAccept(tier -> {
+                    }, scheduler).thenAccept(tier -> {
                         if (tier != null && !tier.isEmpty() && rankOverlay != null) {
                             rankOverlay.setRankFromApi(selfName, tier);
                         }
@@ -287,7 +289,7 @@ private volatile long suppressFightStartUntilMs = 0L;
                 String bucket = bucketKey(config.rankBucket());
                 java.util.concurrent.CompletableFuture.supplyAsync(() -> {
                     try { return dashboardPanel.fetchTierFromApi(playerName, bucket); } catch (Exception e) { return null; }
-                }).thenAccept(tier -> {
+                }, scheduler).thenAccept(tier -> {
                     if (tier != null && !tier.isEmpty()) {
                         // Force override from API immediately
                         rankOverlay.setRankFromApi(playerName, tier);
@@ -654,9 +656,9 @@ private void startFight(String opponentName)
                     try { dashboardPanel.updateTierGraphRealTime(bucket, currentMMR); } catch (Exception ignore) {}
                     try {
                         final String currentBucket = bucketKey(config.rankBucket());
-                        java.util.concurrent.CompletableFuture.supplyAsync(() -> {
+                java.util.concurrent.CompletableFuture.supplyAsync(() -> {
                             try { return dashboardPanel.fetchSelfTierFromApi(selfNameSafe, currentBucket); } catch (Exception e) { return null; }
-                        }).thenAccept(tier -> {
+                        }, scheduler).thenAccept(tier -> {
                             if (tier != null && !tier.isEmpty() && rankOverlay != null) {
                                 rankOverlay.setRankFromApi(selfNameSafe, tier);
                             }
@@ -671,7 +673,7 @@ private void startFight(String opponentName)
             {
                 try { log.error("[Fight] async finalize error", e); } catch (Exception ignore) {}
             }
-        });
+        }, scheduler);
 
         log.info("Fight ended with result: " + result + ", Multi during fight: " + wasInMulti + ", Start spellbook: " + startSpellbookSafe + ", End spellbook: " + endSpellbookSafe);
         // Add per-opponent suppression for 3 seconds so trailing hitsplats from that opponent don't re-start a fight,
@@ -961,6 +963,17 @@ private void startFight(String opponentName)
             try {
                 isSelf = client != null && client.getLocalPlayer() != null && playerName != null && playerName.equals(client.getLocalPlayer().getName());
             } catch (Exception ignore) {}
+            return resolvePlayerRankNoClient(playerName, bucket, isSelf);
+        }
+        catch (Exception ignore) {}
+        return null;
+    }
+
+    // Variant that avoids accessing client; caller determines isSelf on the client thread
+    public String resolvePlayerRankNoClient(String playerName, String bucket, boolean isSelf)
+    {
+        try
+        {
             int rankIndex = -1;
             if (dashboardPanel != null)
             {
@@ -983,10 +996,10 @@ private void startFight(String opponentName)
             // Fallback for self only when shard misses: derive tier from API
             try
             {
-                if (client != null && client.getLocalPlayer() != null && client.getLocalPlayer().getName() != null)
+                if (isSelf && client != null && client.getLocalPlayer() != null && client.getLocalPlayer().getName() != null)
                 {
                     String self = client.getLocalPlayer().getName();
-                    if (self != null && self.equals(playerName) && dashboardPanel != null)
+                    if (self != null && dashboardPanel != null)
                     {
                         String tier = dashboardPanel.fetchSelfTierFromApi(playerName, bucket);
                         if (tier != null && !tier.isEmpty()) return tier;

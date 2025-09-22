@@ -131,11 +131,13 @@ public class RankOverlay extends Overlay
             if (fetchInFlight.putIfAbsent(playerName, Boolean.TRUE) == null)
             {
                 log.info("[Overlay] forced fetch for player={} bucket={}", playerName, bucketKey(config.rankBucket()));
-                    java.util.concurrent.CompletableFuture.supplyAsync(() -> {
+                final String ln; try { ln = client != null && client.getLocalPlayer() != null ? client.getLocalPlayer().getName() : null; } catch (Exception ex) { /* fallback */ return; }
+                final boolean isSelf = (ln != null && ln.equals(playerName));
+                java.util.concurrent.CompletableFuture.supplyAsync(() -> {
                     try {
-                        return plugin != null ? plugin.resolvePlayerRank(playerName, bucketKey(config.rankBucket())) : null;
+                        return plugin != null ? plugin.resolvePlayerRankNoClient(playerName, bucketKey(config.rankBucket()), isSelf) : null;
                     } catch (Exception e) { return null; }
-                    }, scheduler).thenAccept(rank -> {
+                }, scheduler).thenAccept(rank -> {
                     try
                     {
                         if (rank != null)
@@ -284,7 +286,7 @@ public class RankOverlay extends Overlay
                     log.debug("[Overlay] fetch self first name={} bucket={}", selfName, bucketKey(config.rankBucket()));
                     java.util.concurrent.CompletableFuture.supplyAsync(() -> {
                         try {
-                            return plugin != null ? plugin.resolvePlayerRank(selfName, bucketKey(config.rankBucket())) : null;
+                            return plugin != null ? plugin.resolvePlayerRankNoClient(selfName, bucketKey(config.rankBucket()), true) : null;
                         } catch (Exception e) { return null; }
                     }, scheduler).thenAccept(rank -> {
                         try
@@ -401,7 +403,7 @@ public class RankOverlay extends Overlay
                     scheduledThisTick++;
                     java.util.concurrent.CompletableFuture.supplyAsync(() -> {
                         try {
-                            return plugin != null ? plugin.resolvePlayerRank(playerName, bucketKey(config.rankBucket())) : null;
+                            return plugin != null ? plugin.resolvePlayerRankNoClient(playerName, bucketKey(config.rankBucket()), false) : null;
                         } catch (Exception e) { return null; }
                     }, scheduler).thenAccept(rank -> {
                         try
