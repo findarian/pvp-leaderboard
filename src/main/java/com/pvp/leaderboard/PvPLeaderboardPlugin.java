@@ -709,7 +709,7 @@ private void startFight(String opponentName)
                 damageToOpponentLocal
             ).thenAccept(success -> {
                 if (success) {
-                    log.info("Match result submitted successfully");
+                    log.debug("Match result submitted successfully");
                 } else {
                     log.warn("Failed to submit match result");
                 }
@@ -1179,7 +1179,7 @@ private void submitMatchResult(String result, long fightEndTime)
             dmgOut
         ).thenAccept(success -> {
             if (success) {
-                log.info("Match result submitted successfully");
+                log.debug("Match result submitted successfully");
             } else {
                 log.warn("Failed to submit match result");
             }

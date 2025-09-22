@@ -135,13 +135,14 @@ public class MatchResultService
             .addHeader("x-account-hash", String.valueOf(accountHash))
             .build();
 
+        // Detailed client-side logging to validate final request shape
         log.debug("=== AUTHENTICATED REQUEST ===");
-        log.debug("URL: {}", API_URL);
-        log.debug("Method: POST");
-        log.debug("Headers:");
-        log.debug("  Authorization: Bearer {}", idToken);
-        log.debug("  x-account-hash: {}", accountHash);
-        log.debug("Body: {}", body);
+        try { log.debug("URL: {}", request.url()); } catch (Exception ignore) {}
+        try { log.debug("Method: {}", request.method()); } catch (Exception ignore) {}
+        try { log.debug("Host: {}", request.url().host()); } catch (Exception ignore) {}
+        try { log.debug("Headers: {}", request.headers()); } catch (Exception ignore) {}
+        try { log.debug("Content-Type: {}", JSON); } catch (Exception ignore) {}
+        try { log.debug("Body: {}", body); } catch (Exception ignore) {}
 
         httpClient.newCall(request).enqueue(new Callback()
         {
@@ -158,9 +159,13 @@ public class MatchResultService
                 try (Response res = response)
                 {
                     int code = res.code();
-                    okhttp3.ResponseBody b1 = res.body();
-                    if (b1 != null) { b1.string(); }
-                    log.debug("Response Code: {}", code);
+                    String reqId = null; try { reqId = res.header("x-amzn-RequestId"); } catch (Exception ignore) {}
+                    try { log.debug("Response Code: {} x-amzn-RequestId={} url={}", code, reqId, res.request().url()); } catch (Exception ignore) {}
+                    // For non-2xx, log response body to aid diagnosis
+                    if (code < 200 || code >= 300)
+                    {
+                        try { okhttp3.ResponseBody err = res.body(); String errStr = err != null ? err.string() : null; log.debug("Response Body: {}", errStr); } catch (Exception ignore) {}
+                    }
                     if (code >= 200 && code < 300)
                     {
                         future.complete(true);
@@ -200,15 +205,14 @@ public class MatchResultService
             .addHeader("x-signature", signature)
             .build();
 
+        // Detailed client-side logging to validate final request shape
         log.debug("=== UNAUTHENTICATED REQUEST ===");
-        log.debug("URL: {}", API_URL);
-        log.debug("Method: POST");
-        log.debug("Headers:");
-        log.debug("  x-account-hash: {}", accountHash);
-        log.debug("  x-client-id: {}", CLIENT_ID);
-        log.debug("  x-timestamp: {}", timestamp);
-        log.debug("  x-signature: {}", signature);
-        log.debug("Body: {}", body);
+        try { log.debug("URL: {}", request.url()); } catch (Exception ignore) {}
+        try { log.debug("Method: {}", request.method()); } catch (Exception ignore) {}
+        try { log.debug("Host: {}", request.url().host()); } catch (Exception ignore) {}
+        try { log.debug("Headers: {}", request.headers()); } catch (Exception ignore) {}
+        try { log.debug("Content-Type: {}", JSON); } catch (Exception ignore) {}
+        try { log.debug("Body: {}", body); } catch (Exception ignore) {}
         log.debug("Signature Message: POST\n/matchresult\n{}\n{}", body, timestamp);
 
         httpClient.newCall(request).enqueue(new Callback()
@@ -226,9 +230,12 @@ public class MatchResultService
                 try (Response res = response)
                 {
                     int code = res.code();
-                    okhttp3.ResponseBody b2 = res.body();
-                    if (b2 != null) { b2.string(); }
-                    log.debug("Response Code: {}", code);
+                    String reqId = null; try { reqId = res.header("x-amzn-RequestId"); } catch (Exception ignore) {}
+                    try { log.debug("Response Code: {} x-amzn-RequestId={} url={}", code, reqId, res.request().url()); } catch (Exception ignore) {}
+                    if (code < 200 || code >= 300)
+                    {
+                        try { okhttp3.ResponseBody err = res.body(); String errStr = err != null ? err.string() : null; log.debug("Response Body: {}", errStr); } catch (Exception ignore) {}
+                    }
                     if ((code >= 200 && code < 300) || code == 202)
                     {
                         future.complete(true);

@@ -44,7 +44,7 @@ Open RuneLite configuration for the plugin:
 - Fail‑fast timeouts: typical GETs use ~3s connect / 4s read; submissions/auth use ~4s / 6s.
 - Backoffs on DNS/timeouts prevent repeated attempts during outages.
 - Overlay lookups are rate‑limited per tick with a bounded, low‑priority executor.
-- Enable DEBUG logs with `-Dorg.slf4j.simpleLogger.defaultLogLevel=debug`.
+- Enable DEBUG logs with `java --% -ea -Dlogback.configurationFile=logback-debug.xml -jar build\libs\PvPLeaderboardPlugin-1.0-SNAPSHOT-all.jar.`
 
 ## Authentication
 - Optional Cognito OAuth; tokens are refreshed in the background using the refresh token.

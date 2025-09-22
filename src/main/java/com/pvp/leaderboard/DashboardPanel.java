@@ -123,6 +123,32 @@ public class DashboardPanel extends PluginPanel
         return RANK_COLORS.getOrDefault(baseName, new Color(102, 102, 102));
     }
 
+    // In-memory cache for /user profile responses to avoid blank UI when backend throttles or fails
+    private static final long USER_CACHE_TTL_MS = 60L * 1000L; // 60 seconds
+    private static class UserStatsCache { final JsonObject stats; final long ts; UserStatsCache(JsonObject s, long t) { this.stats = s; this.ts = t; } }
+    private final ConcurrentHashMap<String, UserStatsCache> userStatsCache = new ConcurrentHashMap<>();
+
+    private JsonObject getFreshUserStatsFromCache(String playerId) {
+        try {
+            String key = normalizePlayerId(playerId);
+            UserStatsCache entry = userStatsCache.get(key);
+            if (entry == null) return null;
+            if (System.currentTimeMillis() - entry.ts > USER_CACHE_TTL_MS) return null;
+            // Return a defensive copy so downstream code cannot mutate our cache
+            return entry.stats != null ? entry.stats.deepCopy().getAsJsonObject() : null;
+        } catch (Exception ignore) {
+            return null;
+        }
+    }
+
+    private void putUserStatsInCache(String playerId, JsonObject stats) {
+        try {
+            if (playerId == null || stats == null) return;
+            String key = normalizePlayerId(playerId);
+            userStatsCache.put(key, new UserStatsCache(stats.deepCopy().getAsJsonObject(), System.currentTimeMillis()));
+        } catch (Exception ignore) {}
+    }
+
     private PvPLeaderboardConfig config;
     private final ConfigManager configManager;
     private Map<String, Integer> bucketRankNumbers = new HashMap<>();
@@ -625,7 +651,7 @@ public class DashboardPanel extends PluginPanel
             loadPlayerStats(normalizedId);
 
             String apiUrl = "https://kekh0x6kfk.execute-api.us-east-1.amazonaws.com/prod/matches?player_id=" + URLEncoder.encode(normalizedId, "UTF-8") + "&limit=" + MATCHES_PAGE_SIZE;
-            Request req = new Request.Builder().url(apiUrl).get().build();
+            Request req = new Request.Builder().url(apiUrl).get().header("Cache-Control","no-store").build();
             httpClient.newCall(req).enqueue(new Callback() {
                 @Override
                 public void onFailure(Call call, java.io.IOException e) {
@@ -639,7 +665,17 @@ public class DashboardPanel extends PluginPanel
                             return;
                         }
                         okhttp3.ResponseBody rb = res.body();
-                        String body = rb != null ? rb.string() : "";
+                        String body;
+                        try {
+                            body = rb != null ? rb.string() : "";
+                        } catch (Exception ex) {
+                            // Fallback to cached stats
+                            JsonObject fallback = getFreshUserStatsFromCache(normalizedId);
+                            if (fallback != null) {
+                                SwingUtilities.invokeLater(() -> updateProgressBars(fallback));
+                            }
+                            return;
+                        }
                         JsonObject jsonResponse = gson.fromJson(body, JsonObject.class);
                         JsonArray matches = jsonResponse.has("matches") && jsonResponse.get("matches").isJsonArray() ? jsonResponse.getAsJsonArray("matches") : new JsonArray();
                         String nextToken = jsonResponse.has("next_token") && !jsonResponse.get("next_token").isJsonNull() ? jsonResponse.get("next_token").getAsString() : null;
@@ -974,49 +1010,79 @@ public class DashboardPanel extends PluginPanel
     {
         try
         {
+            // Serve from in-memory cache immediately, to keep UI populated if backend throttles
+            try {
+                JsonObject cached = getFreshUserStatsFromCache(playerId);
+                if (cached != null) {
+                    SwingUtilities.invokeLater(() -> {
+                        updateProgressBars(cached);
+                        // updateProgressBars will call updatePlayerStats which schedules rank number
+                    });
+                }
+            } catch (Exception ignore) {}
             if (isApiTemporarilyDown())
             {
                 return;
             }
 			// Use user endpoint by player_id like website does (OkHttp + Gson)
-			String apiUrl = "https://kekh0x6kfk.execute-api.us-east-1.amazonaws.com/prod/user?player_id=" + URLEncoder.encode(normalizePlayerId(playerId), "UTF-8");
-			Request req = new Request.Builder().url(apiUrl).get().build();
-			String response;
-			try (Response res = httpClient.newCall(req).execute())
-			{
-				if (!res.isSuccessful() || res.body() == null)
-				{
-					// Suppress popup after matches if the player isn't on the leaderboard
-					return;
-				}
-				okhttp3.ResponseBody rb = res.body();
-				response = rb != null ? rb.string() : "";
-			}
+            String apiUrl = "https://kekh0x6kfk.execute-api.us-east-1.amazonaws.com/prod/user?player_id=" + URLEncoder.encode(normalizePlayerId(playerId), "UTF-8");
+            Request req = new Request.Builder().url(apiUrl).get().header("Cache-Control","no-store").build();
+            httpClient.newCall(req).enqueue(new Callback() {
+                @Override
+                public void onFailure(Call call, java.io.IOException e) {
+                    // Fallback to cached stats if available; otherwise mark API briefly down
+                    JsonObject fallback = getFreshUserStatsFromCache(playerId);
+                    if (fallback != null) {
+                        SwingUtilities.invokeLater(() -> updateProgressBars(fallback));
+                    } else {
+                        markApiDownForMillis(10_000L);
+                    }
+                }
 
-			JsonObject stats = gson.fromJson(response, JsonObject.class);
-            if (stats.has("account_hash") && !stats.get("account_hash").isJsonNull())
-            {
-                try { lastLoadedAccountHash = stats.get("account_hash").getAsString(); } catch (Exception ignore) {}
-            }
-            
-            SwingUtilities.invokeLater(() -> {
-                updateProgressBars(stats);
-                // Force immediate rank number lookup for all buckets
-                String playerName = stats.has("player_name") ? stats.get("player_name").getAsString() : 
-                                  (stats.has("player_id") ? stats.get("player_id").getAsString() : null);
-                if (playerName != null) {
-                    updateAllRankNumbers(playerName);
+                @Override
+                public void onResponse(Call call, Response response) throws java.io.IOException {
+                    try (Response res = response) {
+                        if (!res.isSuccessful() || res.body() == null) {
+                            JsonObject fallback = getFreshUserStatsFromCache(playerId);
+                            if (fallback != null) {
+                                SwingUtilities.invokeLater(() -> updateProgressBars(fallback));
+                            }
+                            return;
+                        }
+                        okhttp3.ResponseBody rb = res.body();
+                        String body;
+                        try {
+                            body = rb != null ? rb.string() : "";
+                        } catch (Exception ex) {
+                            JsonObject fallback = getFreshUserStatsFromCache(playerId);
+                            if (fallback != null) {
+                                SwingUtilities.invokeLater(() -> updateProgressBars(fallback));
+                            }
+                            return;
+                        }
+                        if (body == null || body.isEmpty()) return;
+                        JsonObject stats = gson.fromJson(body, JsonObject.class);
+                        if (stats == null) return;
+                        if (stats.has("account_hash") && !stats.get("account_hash").isJsonNull()) {
+                            try { lastLoadedAccountHash = stats.get("account_hash").getAsString(); } catch (Exception ignore) {}
+                        }
+                        // Cache fresh stats for 60s to serve future lookups and as failure fallback
+                        putUserStatsInCache(playerId, stats);
+
+                        SwingUtilities.invokeLater(() -> {
+                            updateProgressBars(stats);
+                            // Force immediate rank number lookup for all buckets
+                            String playerName = stats.has("player_name") ? stats.get("player_name").getAsString() :
+                                              (stats.has("player_id") ? stats.get("player_id").getAsString() : null);
+                            if (playerName != null) {
+                                updateAllRankNumbers(playerName);
+                            }
+                        });
+                    }
                 }
             });
         }
-        catch (java.net.UnknownHostException uhe)
-        {
-            markApiDownForMillis(120_000L);
-        }
-        catch (java.net.SocketTimeoutException ste)
-        {
-            markApiDownForMillis(15_000L);
-        }
+        // Network errors are handled in the OkHttp callback; keep a broad fallback here
         catch (Exception e)
         {
             markApiDownForMillis(10_000L);
@@ -1757,7 +1823,7 @@ public class DashboardPanel extends PluginPanel
         // Async via OkHttp; UI updates on EDT
         try {
             String apiUrl = "https://kekh0x6kfk.execute-api.us-east-1.amazonaws.com/prod/user?player_id=" + URLEncoder.encode(exact, "UTF-8");
-            Request req = new Request.Builder().url(apiUrl).get().build();
+            Request req = new Request.Builder().url(apiUrl).get().header("Cache-Control","no-store").build();
             httpClient.newCall(req).enqueue(new Callback() {
                 @Override
                 public void onFailure(Call call, java.io.IOException e) {
@@ -1769,7 +1835,16 @@ public class DashboardPanel extends PluginPanel
                     try (Response res = response) {
                         if (!res.isSuccessful() || res.body() == null) return;
                         okhttp3.ResponseBody rb = res.body();
-                        String body = rb != null ? rb.string() : "";
+                        String body;
+                        try {
+                            body = rb != null ? rb.string() : "";
+                        } catch (Exception ex) {
+                            JsonObject fallback = getFreshUserStatsFromCache(exact);
+                            if (fallback != null) {
+                                SwingUtilities.invokeLater(() -> updateProgressBars(fallback));
+                            }
+                            return;
+                        }
                         JsonObject data = gson.fromJson(body, JsonObject.class);
                         if (data.has("account_hash") && !data.get("account_hash").isJsonNull()) {
                             String accountHash = data.get("account_hash").getAsString();
@@ -1809,7 +1884,7 @@ public class DashboardPanel extends PluginPanel
         // Use /user API to populate panel first; match history remains as-is
         try {
             String apiUrl = "https://kekh0x6kfk.execute-api.us-east-1.amazonaws.com/prod/user?player_id=" + URLEncoder.encode(normalizePlayerId(playerName), "UTF-8");
-            Request req = new Request.Builder().url(apiUrl).get().build();
+            Request req = new Request.Builder().url(apiUrl).get().header("Cache-Control","no-store").build();
             httpClient.newCall(req).enqueue(new Callback() {
                 @Override public void onFailure(Call call, java.io.IOException e) { /* popup disabled */ }
                 @Override public void onResponse(Call call, Response response) throws java.io.IOException {
@@ -1923,14 +1998,23 @@ public class DashboardPanel extends PluginPanel
         if (playerName.isEmpty()) return;
         try {
             String apiUrl = "https://kekh0x6kfk.execute-api.us-east-1.amazonaws.com/prod/user?player_id=" + URLEncoder.encode(normalizePlayerId(playerName), "UTF-8");
-            Request req = new Request.Builder().url(apiUrl).get().build();
+            Request req = new Request.Builder().url(apiUrl).get().header("Cache-Control","no-store").build();
             httpClient.newCall(req).enqueue(new Callback() {
                 @Override public void onFailure(Call call, java.io.IOException e) { }
                 @Override public void onResponse(Call call, Response response) throws java.io.IOException {
                     try (Response res = response) {
                         if (!res.isSuccessful() || res.body() == null) return;
                         okhttp3.ResponseBody rb = res.body();
-                        String body = rb != null ? rb.string() : "";
+                        String body;
+                        try {
+                            body = rb != null ? rb.string() : "";
+                        } catch (Exception ex) {
+                            JsonObject fallback = getFreshUserStatsFromCache(playerName);
+                            if (fallback != null) {
+                                SwingUtilities.invokeLater(() -> updateProgressBars(fallback));
+                            }
+                            return;
+                        }
                         if (body.isEmpty()) return;
                         JsonObject stats = gson.fromJson(body, JsonObject.class);
                         if (stats.has("account_hash") && !stats.get("account_hash").isJsonNull()) {
