@@ -376,19 +376,19 @@ private volatile long suppressFightStartUntilMs = 0L;
 		{
 			Player player = (Player) hitsplatApplied.getActor();
 			Player localPlayer = client.getLocalPlayer();
-			
-            // Process both directions: when we hit another player or get hit by another player
-            if (localPlayer != null)
+
+			// Process only outbound damage as fight-start signal. Inbound damage updates attribution but will NOT start fights.
+			if (localPlayer != null)
 			{
-				// For player vs player combat, ensure both source and target are players
 				String opponentName = null;
-                if (player == localPlayer)
+				boolean startNow = false;
+				int amt = 0; try { amt = hitsplatApplied.getHitsplat() != null ? hitsplatApplied.getHitsplat().getAmount() : 0; } catch (Exception ignore) {}
+				if (player == localPlayer)
 				{
-					// Local player took damage; try to identify attacker
+					// Inbound damage: attribute to attacker and start a fight when attacker is known
 					opponentName = getPlayerAttacker();
 					if (opponentName == null)
 					{
-						// Use who we are currently interacting with (often the attacker in 1v1)
 						try {
 							if (localPlayer.getInteracting() instanceof Player) {
 								opponentName = ((Player) localPlayer.getInteracting()).getName();
@@ -399,73 +399,59 @@ private volatile long suppressFightStartUntilMs = 0L;
 					{
 						opponentName = lastEngagedOpponentName;
 					}
-                    if (opponentName != null) lastEngagedOpponentName = opponentName;
-                    // Damage accounting for killer attribution window
-                    try {
-                        int amt = hitsplatApplied.getHitsplat() != null ? hitsplatApplied.getHitsplat().getAmount() : 0;
-                        if (amt > 0 && opponentName != null) {
-                            damageFromOpponent.merge(opponentName, (long) amt, Long::sum);
-                        }
-                    } catch (Exception ignore) {}
+					if (opponentName != null) lastEngagedOpponentName = opponentName;
+					try { if (opponentName != null) { damageFromOpponent.merge(opponentName, (long) amt, Long::sum); } } catch (Exception ignore) {}
+					// Start on inbound when we have a concrete opponent
+					startNow = (opponentName != null);
 				}
 				else
 				{
-					// Local player dealt damage to another player (any damage counts)
-					opponentName = player.getName();
-                    if (opponentName != null) lastEngagedOpponentName = opponentName;
-					// Track damage dealt to opponent for multi attribution
+					// Outbound damage: only start when we are actually attacking this player
+					boolean weAreAttacking = false; try { weAreAttacking = (localPlayer.getInteracting() == player); } catch (Exception ignore) {}
+					if (weAreAttacking)
+					{
+						opponentName = player.getName();
+						if (opponentName != null) lastEngagedOpponentName = opponentName;
+						try { damageToOpponent.merge(opponentName, (long) amt, Long::sum); } catch (Exception ignore) {}
+						startNow = true;
+					}
+				}
+
+				// Start/update fights if this hitsplat indicates combat (inbound from attacker or outbound while we are attacking)
+				if (startNow && opponentName != null && isPlayerOpponent(opponentName))
+				{
+					int tickNow = 0; try { tickNow = client.getTickCount(); } catch (Exception ignore) {}
+					if (tickNow - lastCombatActivityTick > OUT_OF_COMBAT_TICKS)
+					{
+						activeFights.clear();
+						damageFromOpponent.clear();
+						try { log.debug("[Fight] combat window reset after {} ticks idle", tickNow - lastCombatActivityTick); } catch (Exception ignore) {}
+					}
+					lastCombatActivityTick = tickNow;
 					try {
-						int amt = hitsplatApplied.getHitsplat() != null ? hitsplatApplied.getHitsplat().getAmount() : 0;
-						if (amt > 0 && opponentName != null) {
-							damageToOpponent.merge(opponentName, (long) amt, Long::sum);
+						if (client.getLocalPlayer() != null && opponentName.equals(client.getLocalPlayer().getName())) {
+							try { log.warn("[Fight] suppress start: opponent resolved as self ({}); waiting for better signal", opponentName); } catch (Exception ignore) {}
+							return;
 						}
 					} catch (Exception ignore) {}
-				}
-				
-				// Only proceed if we have a valid player opponent
-				if (opponentName != null && isPlayerOpponent(opponentName))
-				{
-                    // Global combat window check: clear if idle > OUT_OF_COMBAT_TICKS
-                    int tickNow = 0; try { tickNow = client.getTickCount(); } catch (Exception ignore) {}
-                    if (tickNow - lastCombatActivityTick > OUT_OF_COMBAT_TICKS)
-                    {
-                        activeFights.clear();
-                    damageFromOpponent.clear();
-                    try { log.debug("[Fight] combat window reset after {} ticks idle", tickNow - lastCombatActivityTick); } catch (Exception ignore) {}
-                    }
-                    lastCombatActivityTick = tickNow;
-                    // Avoid starting fights with our own name due to fallback errors
-                    try {
-                        if (client.getLocalPlayer() != null && opponentName.equals(client.getLocalPlayer().getName())) {
-                            try { log.warn("[Fight] suppress start: opponent resolved as self ({}); waiting for better signal", opponentName); } catch (Exception ignore) {}
-                            return;
-                        }
-                    } catch (Exception ignore) {}
-                    // Combat activity marker (no-op)
-                    // Suppress starts during the guard window right after a fight ends (use ms)
-                    long nowMsCheck = System.currentTimeMillis();
-                    if (nowMsCheck < suppressFightStartUntilMs)
-                    {
-                        try { log.info("[Fight] start suppressed at {}ms (until {}ms)", nowMsCheck, suppressFightStartUntilMs); } catch (Exception ignore) {}
-                        return;
-                    }
-
-					// Per-opponent suppression: after ending with X, ignore X for 3s but allow others
+					long nowMsCheck = System.currentTimeMillis();
+					if (nowMsCheck < suppressFightStartUntilMs)
+					{
+						try { log.info("[Fight] start suppressed at {}ms (until {}ms)", nowMsCheck, suppressFightStartUntilMs); } catch (Exception ignore) {}
+						return;
+					}
 					Long untilMs = perOpponentSuppressUntilMs.get(opponentName);
 					if (untilMs != null && System.currentTimeMillis() < untilMs)
 					{
 						try { log.info("[Fight] start suppressed for opponent={} until {}ms", opponentName, untilMs); } catch (Exception ignore) {}
 						return;
 					}
-
-					// Start or update per-opponent fight state (multi-fight support)
 					touchFight(opponentName);
 					inFight = true;
 					if (!inFight)
 					{
 						startFight(opponentName);
 					}
-					
 					if (client.getVarbitValue(Varbits.MULTICOMBAT_AREA) == 1)
 					{
 						wasInMulti = true;
