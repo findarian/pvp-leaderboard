@@ -110,6 +110,8 @@ private volatile long suppressFightStartUntilMs = 0L;
     private volatile int lastCombatActivityTick = 0;
     private final java.util.concurrent.ConcurrentHashMap<String, Boolean> shardPresence = new java.util.concurrent.ConcurrentHashMap<>();
     private final java.util.concurrent.ConcurrentHashMap<String, Boolean> apiFallbackActive = new java.util.concurrent.ConcurrentHashMap<>();
+	// Damage dealt by the local player to each opponent during the current combat window
+	private final java.util.concurrent.ConcurrentHashMap<String, Long> damageToOpponent = new java.util.concurrent.ConcurrentHashMap<>();
 
 	@Override
 	protected void startUp() throws Exception
@@ -133,7 +135,7 @@ private volatile long suppressFightStartUntilMs = 0L;
                         {
                             // Expire inactive fights without submission (combat lock ends after 10s)
                             activeFights.remove(e.getKey());
-                            try { log.info("[Fight] expire inactive vs={} lastActivity={}msAgo", e.getKey(), now - fe.lastActivityMs); } catch (Exception ignore) {}
+                            try { log.debug("[Fight] expire inactive vs={} lastActivity={}msAgo", e.getKey(), now - fe.lastActivityMs); } catch (Exception ignore) {}
                         }
                     }
                     // Update global flag for compatibility
@@ -335,7 +337,7 @@ private volatile long suppressFightStartUntilMs = 0L;
 		else if (gameStateChanged.getGameState() == GameState.LOGIN_SCREEN)
         {
 			// Fully clear fight state on logout
-			try { log.info("[Fight] state reset on LOGIN_SCREEN"); } catch (Exception ignore) {}
+            try { log.debug("[Fight] state reset on LOGIN_SCREEN"); } catch (Exception ignore) {}
 			resetFightState();
         }
 		else if (gameStateChanged.getGameState() == GameState.HOPPING || gameStateChanged.getGameState() == GameState.LOADING)
@@ -356,10 +358,11 @@ private volatile long suppressFightStartUntilMs = 0L;
     {
         // If idle beyond the combat window, clear damage and active fights window cleanly
         int tickNow = 0; try { tickNow = client.getTickCount(); } catch (Exception ignore) {}
-        if (tickNow - lastCombatActivityTick > OUT_OF_COMBAT_TICKS && !damageFromOpponent.isEmpty())
+		if (tickNow - lastCombatActivityTick > OUT_OF_COMBAT_TICKS && (!damageFromOpponent.isEmpty() || !damageToOpponent.isEmpty()))
         {
             damageFromOpponent.clear();
-            try { log.info("[Fight] window cleared on tick={} (idle>{} ticks)", tickNow, OUT_OF_COMBAT_TICKS); } catch (Exception ignore) {}
+			damageToOpponent.clear();
+            try { log.debug("[Fight] window cleared on tick={} (idle>{} ticks)", tickNow, OUT_OF_COMBAT_TICKS); } catch (Exception ignore) {}
         }
     }
 
@@ -408,6 +411,13 @@ private volatile long suppressFightStartUntilMs = 0L;
 					// Local player dealt damage to another player (any damage counts)
 					opponentName = player.getName();
                     if (opponentName != null) lastEngagedOpponentName = opponentName;
+					// Track damage dealt to opponent for multi attribution
+					try {
+						int amt = hitsplatApplied.getHitsplat() != null ? hitsplatApplied.getHitsplat().getAmount() : 0;
+						if (amt > 0 && opponentName != null) {
+							damageToOpponent.merge(opponentName, (long) amt, Long::sum);
+						}
+					} catch (Exception ignore) {}
 				}
 				
 				// Only proceed if we have a valid player opponent
@@ -612,8 +622,9 @@ private void startFight(String opponentName)
 
                 // try { boolean authLoggedIn = dashboardPanel != null && dashboardPanel.isAuthLoggedIn(); boolean tokenPresent = idTokenSafe != null && !idTokenSafe.isEmpty(); log.info("[Fight] submit snapshot authLoggedIn={} tokenPresent={} opponent={} world={} startTs={} endTs={}", authLoggedIn, tokenPresent, opponentSafe, worldSafe, startTimeSafe, endTimeSafe); } catch (Exception ignore) {}
                 // Fire submission first for immediacy; do other UI work afterwards
-                submitMatchResultSnapshot(result, endTimeSafe, selfNameSafe, opponentSafe, worldSafe,
-                    startTimeSafe, startSpellbookSafe, endSpellbookSafe, wasInMultiSafe, accountHashSafe, idTokenSafe);
+				long dmgOut = 0L; try { Long v = damageToOpponent.get(opponentSafe); if (v != null) dmgOut = v; } catch (Exception ignore) {}
+				submitMatchResultSnapshot(result, endTimeSafe, selfNameSafe, opponentSafe, worldSafe,
+					startTimeSafe, startSpellbookSafe, endSpellbookSafe, wasInMultiSafe, accountHashSafe, idTokenSafe, dmgOut);
 
                 // Do not clear self rank immediately; request a refresh shortly after to avoid flicker
                 try {
@@ -677,7 +688,7 @@ private void startFight(String opponentName)
     private void submitMatchResultSnapshot(String result, long fightEndTime,
                                            String playerId, String opponentId, int world,
                                            long fightStartTs, int fightStartSpellbookLocal, int fightEndSpellbookLocal,
-                                           boolean wasInMultiLocal, long accountHashLocal, String idTokenLocal)
+                                           boolean wasInMultiLocal, long accountHashLocal, String idTokenLocal, long damageToOpponentLocal)
     {
         try
         {
@@ -692,7 +703,8 @@ private void startFight(String opponentName)
                 getSpellbookName(fightEndSpellbookLocal),
                 wasInMultiLocal,
                 accountHashLocal,
-                idTokenLocal
+                idTokenLocal,
+                damageToOpponentLocal
             ).thenAccept(success -> {
                 if (success) {
                     log.info("Match result submitted successfully");
@@ -904,14 +916,15 @@ private void startFight(String opponentName)
         final String selfNameSafe = client.getLocalPlayer() != null ? client.getLocalPlayer().getName() : "Unknown";
         final String idTokenSafe = dashboardPanel != null ? dashboardPanel.getIdToken() : null;
         final int worldSafe = client.getWorld();
+		final long damageToOpponentSafe; { Long v = damageToOpponent.get(opponentSafe); damageToOpponentSafe = v != null ? v : 0L; }
 
-        java.util.concurrent.CompletableFuture.runAsync(() -> {
+		java.util.concurrent.CompletableFuture.runAsync(() -> {
             try
             {
                 // try { log.info("[Fight] submitting outcome={} vs={} world={} startTs={} endTs={} startSpell={} endSpell={} multi={} acctHash={} idTokenPresent={}",
                 //         result, opponentSafe, worldSafe, startTimeSafe, endTimeSafe, startSpellbookSafe, endSpellbookSafe, wasInMultiSafe, accountHashSafe, (idTokenSafe != null && !idTokenSafe.isEmpty())); } catch (Exception ignore) {}
-                submitMatchResultSnapshot(result, endTimeSafe, selfNameSafe, opponentSafe, worldSafe,
-                        startTimeSafe, startSpellbookSafe, endSpellbookSafe, wasInMultiSafe, accountHashSafe, idTokenSafe);
+				submitMatchResultSnapshot(result, endTimeSafe, selfNameSafe, opponentSafe, worldSafe,
+						startTimeSafe, startSpellbookSafe, endSpellbookSafe, wasInMultiSafe, accountHashSafe, idTokenSafe, damageToOpponentSafe);
                 // If opponent wasn't found in shard, schedule API fallback rank update after 15s
                 try {
                     boolean inShard = Boolean.TRUE.equals(shardPresence.get(opponentSafe));
@@ -1132,34 +1145,36 @@ private void submitMatchResult(String result, long fightEndTime)
         String playerId;
         try { playerId = client.getLocalPlayer() != null ? client.getLocalPlayer().getName() : "Unknown"; } catch (Exception e) { playerId = "Unknown"; }
         int world; try { world = client.getWorld(); } catch (Exception e) { world = -1; }
-		String startSpellbook = getSpellbookName(fightStartSpellbook);
-		String endSpellbook = getSpellbookName(fightEndSpellbook);
+        String startSpellbook = getSpellbookName(fightStartSpellbook);
+        String endSpellbook = getSpellbookName(fightEndSpellbook);
         String idToken = null;
         try { idToken = dashboardPanel != null ? dashboardPanel.getIdToken() : null; } catch (Exception ignore) {}
-		
-		matchResultService.submitMatchResult(
-			playerId,
-			opponent,
-			result,
-			world,
-			fightStartTime,
-			fightEndTime,
-			startSpellbook,
-			endSpellbook,
-			wasInMulti,
-			accountHash,
-			idToken
-		).thenAccept(success -> {
-			if (success) {
-				log.info("Match result submitted successfully");
-			} else {
-				log.warn("Failed to submit match result");
-			}
+        long dmgOut = 0L;
+        
+        matchResultService.submitMatchResult(
+            playerId,
+            opponent,
+            result,
+            world,
+            fightStartTime,
+            fightEndTime,
+            startSpellbook,
+            endSpellbook,
+            wasInMulti,
+            accountHash,
+            idToken,
+            dmgOut
+        ).thenAccept(success -> {
+            if (success) {
+                log.info("Match result submitted successfully");
+            } else {
+                log.warn("Failed to submit match result");
+            }
         }).exceptionally(ex -> {
             try { log.error("Error submitting match result", ex); } catch (Exception ignore) {}
             return null;
         });
-	}
+    }
 	
 	private boolean isPlayerOpponent(String name)
 	{

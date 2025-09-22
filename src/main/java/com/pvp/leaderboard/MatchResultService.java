@@ -57,7 +57,8 @@ public class MatchResultService
         String fightEndSpellbook,
         boolean wasInMulti,
         long accountHash,
-        String idToken)
+        String idToken,
+        long damageToOpponent)
     {
         CompletableFuture<Boolean> overall = new CompletableFuture<>();
         try
@@ -77,6 +78,9 @@ public class MatchResultService
             body.addProperty("wasInMulti", wasInMulti);
             body.addProperty("client_id", CLIENT_ID);
             body.addProperty("plugin_version", PLUGIN_VERSION);
+            if (wasInMulti && damageToOpponent > 0L) {
+                body.addProperty("damage_to_opponent", damageToOpponent);
+            }
 
             String bodyJson = gson.toJson(body);
 
