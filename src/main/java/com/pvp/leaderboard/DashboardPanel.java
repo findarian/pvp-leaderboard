@@ -222,6 +222,12 @@ public class DashboardPanel extends PluginPanel
         JPanel mainPanel = new JPanel();
         mainPanel.setLayout(new BoxLayout(mainPanel, BoxLayout.Y_AXIS));
         
+        // Community Box (Discord)
+        JPanel communityContainer = new JPanel(new FlowLayout(FlowLayout.LEFT, 0, 0));
+        communityContainer.add(createCommunityBox());
+        mainPanel.add(communityContainer);
+        mainPanel.add(Box.createVerticalStrut(12));
+
         // Auth Bar (Login/Search Section)
         JPanel authContainer = new JPanel(new FlowLayout(FlowLayout.LEFT, 0, 0));
         authContainer.add(createAuthBar());
@@ -254,6 +260,32 @@ public class DashboardPanel extends PluginPanel
         return mainPanel;
     }
     
+    private JPanel createCommunityBox()
+    {
+        JPanel box = new JPanel();
+        box.setLayout(new BoxLayout(box, BoxLayout.Y_AXIS));
+        box.setBorder(BorderFactory.createTitledBorder("Join the community"));
+        box.setMaximumSize(new Dimension(220, 60));
+        box.setPreferredSize(new Dimension(220, 60));
+        JPanel row = new JPanel(new FlowLayout(FlowLayout.LEFT, 2, 0));
+        JButton discordBtn = new JButton("Discord");
+        discordBtn.setPreferredSize(new Dimension(90, 25));
+        discordBtn.setToolTipText("Join our Discord");
+        discordBtn.addActionListener(e -> {
+            try { Desktop.getDesktop().browse(URI.create("https://discord.gg/3Ct5CQmCPr")); } catch (Exception ignore) {}
+        });
+        row.add(discordBtn);
+        JButton websiteBtn = new JButton("Website");
+        websiteBtn.setPreferredSize(new Dimension(90, 25));
+        websiteBtn.setToolTipText("Open the website");
+        websiteBtn.addActionListener(e -> {
+            try { Desktop.getDesktop().browse(URI.create("https://devsecopsautomated.com/index.html")); } catch (Exception ignore) {}
+        });
+        row.add(websiteBtn);
+        box.add(row);
+        return box;
+    }
+
     private JPanel createAuthBar()
     {
         JPanel authBar = new JPanel();
@@ -263,8 +295,11 @@ public class DashboardPanel extends PluginPanel
         authBar.setPreferredSize(new Dimension(220, 190));
         
         // Website search
-        authBar.add(new JLabel("Search user on website:"));
+        JLabel websiteLabel = new JLabel("Search user on website:");
+        websiteLabel.setAlignmentX(Component.LEFT_ALIGNMENT);
+        authBar.add(websiteLabel);
         JPanel websitePanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 2, 0));
+        websitePanel.setAlignmentX(Component.LEFT_ALIGNMENT);
         websiteSearchField = new JTextField();
         websiteSearchField.setPreferredSize(new Dimension(120, 25));
         websiteSearchField.addActionListener(e -> searchUserOnWebsite());
@@ -278,8 +313,11 @@ public class DashboardPanel extends PluginPanel
         authBar.add(Box.createVerticalStrut(5));
         
         // Plugin search
-        authBar.add(new JLabel("Search user on plugin:"));
+        JLabel pluginLabel = new JLabel("Search user on plugin:");
+        pluginLabel.setAlignmentX(Component.LEFT_ALIGNMENT);
+        authBar.add(pluginLabel);
         JPanel pluginPanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 2, 0));
+        pluginPanel.setAlignmentX(Component.LEFT_ALIGNMENT);
         pluginSearchField = new JTextField();
         pluginSearchField.setPreferredSize(new Dimension(120, 25));
         pluginSearchField.addActionListener(e -> searchUserOnPlugin());
@@ -295,6 +333,7 @@ public class DashboardPanel extends PluginPanel
         loginButton = new JButton("Login to view more stats");
         loginButton.setPreferredSize(new Dimension(210, 25));
         loginButton.setMaximumSize(new Dimension(220, 25));
+        loginButton.setAlignmentX(Component.LEFT_ALIGNMENT);
         loginButton.addActionListener(e -> handleLogin());
         authBar.add(loginButton);
         
@@ -378,14 +417,14 @@ public class DashboardPanel extends PluginPanel
     {
         JPanel panel = new JPanel();
         panel.setLayout(new BoxLayout(panel, BoxLayout.Y_AXIS));
-        panel.setBorder(BorderFactory.createTitledBorder("Performance Overview"));
+        panel.setBorder(BorderFactory.createTitledBorder("Last 100 Game Performance"));
 
         JPanel summaryRow = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 0));
-        winPercentLabel = new JLabel("Win %: -");
-        kdLabel = new JLabel("KD: -");
-        killsLabel = new JLabel("Kills: -");
-        deathsLabel = new JLabel("Deaths: -");
-        tiesLabel = new JLabel("Ties: -");
+        winPercentLabel = new JLabel("- % Winrate");
+        kdLabel = new JLabel("KD:");
+        killsLabel = new JLabel("K:");
+        deathsLabel = new JLabel("D:");
+        tiesLabel = new JLabel("Ties:");
         Font small = winPercentLabel.getFont().deriveFont(Font.PLAIN, Math.max(10f, winPercentLabel.getFont().getSize2D() - 1f));
         winPercentLabel.setFont(small);
         kdLabel.setFont(small);
@@ -393,19 +432,19 @@ public class DashboardPanel extends PluginPanel
         deathsLabel.setFont(small);
         tiesLabel.setFont(small);
         summaryRow.add(winPercentLabel);
-        summaryRow.add(new JLabel("|"));
+        summaryRow.add(Box.createHorizontalStrut(6));
         summaryRow.add(kdLabel);
-        summaryRow.add(new JLabel("|"));
+        summaryRow.add(Box.createHorizontalStrut(6));
         summaryRow.add(killsLabel);
-        summaryRow.add(new JLabel(":"));
+        summaryRow.add(new JLabel(" | "));
         summaryRow.add(deathsLabel);
-        summaryRow.add(new JLabel("|"));
+        summaryRow.add(Box.createHorizontalStrut(6));
         summaryRow.add(tiesLabel);
         panel.add(summaryRow);
 
-        // Compact rank breakdown table (short height) with horizontal scroll
+        // Rank breakdown table (taller + compact rows)
         JPanel breakdown = createRankBreakdownTable();
-        breakdown.setPreferredSize(new Dimension(0, 100));
+        breakdown.setPreferredSize(new Dimension(0, 340));
         panel.add(breakdown);
         return panel;
     }
@@ -490,11 +529,9 @@ public class DashboardPanel extends PluginPanel
         additionalStatsPanel.add(Box.createVerticalStrut(8));
         
         tierGraphPanel = createTierGraph();
-        JScrollPane tierScrollPane = new JScrollPane(tierGraphPanel);
-        tierScrollPane.setVerticalScrollBarPolicy(JScrollPane.VERTICAL_SCROLLBAR_NEVER);
-        tierScrollPane.setHorizontalScrollBarPolicy(JScrollPane.HORIZONTAL_SCROLLBAR_AS_NEEDED);
-        tierScrollPane.setPreferredSize(new Dimension(0, 260));
-        additionalStatsPanel.add(tierScrollPane);
+        // Fit within ~240px width and avoid scrollbars by constraining preferred size
+        tierGraphPanel.setPreferredSize(new Dimension(240, 240));
+        additionalStatsPanel.add(tierGraphPanel);
         
         // Preview button removed per request
         
@@ -1712,6 +1749,10 @@ public class DashboardPanel extends PluginPanel
         String[] columns = {"Tier", "K", "D", "KD"};
         rankBreakdownModel = new DefaultTableModel(columns, 0);
         rankBreakdownTable = new JTable(rankBreakdownModel);
+        // Compact the table display to fit more rows without scrolling
+        try {
+            rankBreakdownTable.setRowHeight(16);
+        } catch (Exception ignore) {}
         rankBreakdownTable.setFillsViewportHeight(true);
         rankBreakdownTable.setAutoResizeMode(JTable.AUTO_RESIZE_OFF);
         rankBreakdownTable.getColumnModel().getColumn(0).setPreferredWidth(100);
@@ -1722,7 +1763,7 @@ public class DashboardPanel extends PluginPanel
         JScrollPane scrollPane = new JScrollPane(rankBreakdownTable);
         scrollPane.setVerticalScrollBarPolicy(JScrollPane.VERTICAL_SCROLLBAR_AS_NEEDED);
         scrollPane.setHorizontalScrollBarPolicy(JScrollPane.HORIZONTAL_SCROLLBAR_AS_NEEDED);
-        scrollPane.setPreferredSize(new Dimension(0, 100));
+        scrollPane.setPreferredSize(new Dimension(0, 180));
         panel.add(scrollPane, BorderLayout.CENTER);
         
         return panel;
@@ -1814,22 +1855,6 @@ public class DashboardPanel extends PluginPanel
         String input = websiteSearchField.getText().trim();
         if (input.isEmpty()) return;
         String exact = normalizeDisplayName(input);
-        // If we already have account_hash cached from a prior /user load, open directly without an API call
-        try
-        {
-            if (lastLoadedAccountHash != null && !lastLoadedAccountHash.isEmpty())
-            {
-                String accountSha = generateAccountSha(lastLoadedAccountHash);
-                String profileUrl = "https://devsecopsautomated.com/profile.html?acct=" + accountSha;
-                Desktop.getDesktop().browse(URI.create(profileUrl));
-                return;
-            }
-        }
-        catch (Exception ignore)
-        {
-            // Fallback to API path below
-        }
-        
         // Async via OkHttp; UI updates on EDT
         try {
             String apiUrl = "https://kekh0x6kfk.execute-api.us-east-1.amazonaws.com/prod/user?player_id=" + URLEncoder.encode(exact, "UTF-8");
@@ -1885,7 +1910,9 @@ public class DashboardPanel extends PluginPanel
         }
         final String playerName = normalizeDisplayName(input);
         if (playerName.isEmpty()) return;
-        
+        // Reset UI immediately so previous player's progress bars don't linger when new user has no data
+        resetUiForNewSearch();
+
         playerNameLabel.setText(playerName);
         
         // Update player name in current profile for rank lookups
@@ -1975,6 +2002,9 @@ public class DashboardPanel extends PluginPanel
                             if (rankLabel != null) {
                                 final String fKey = key; final String fRank = rankLabel; final int fDiv = division; final double fPct = pct; final int fRankNum = worldRankNum;
                                 SwingUtilities.invokeLater(() -> setBucketBarWithRank(fKey, fRank, fDiv, fPct, fRankNum));
+                            } else {
+                                final String fKey = key;
+                                SwingUtilities.invokeLater(() -> setBucketBar(fKey, "—", 0, 0));
                             }
                         }
                     }
@@ -2219,7 +2249,7 @@ public class DashboardPanel extends PluginPanel
                 }
             }
         };
-        panel.setPreferredSize(new Dimension(Math.max(800, tierHistory.size() * 2), 260));
+        panel.setPreferredSize(new Dimension(240, 240));
         return panel;
     }
     
@@ -2266,9 +2296,8 @@ public class DashboardPanel extends PluginPanel
     {
         if (tierGraphPanel != null)
         {
-            // Update panel size for horizontal scrolling
-            tierGraphPanel.setPreferredSize(new Dimension(Math.max(800, tierHistory.size() * 2), 260));
-            tierGraphPanel.getParent().setPreferredSize(new Dimension(Math.max(800, tierHistory.size() * 2), 300));
+            // Keep fixed size to avoid scrollbars
+            tierGraphPanel.setPreferredSize(new Dimension(240, 240));
             tierGraphPanel.revalidate();
             tierGraphPanel.repaint();
         }
@@ -2327,10 +2356,10 @@ public class DashboardPanel extends PluginPanel
         double winPercent = nonTieMatches > 0 ? (wins * 100.0 / nonTieMatches) : 0;
         double kd = losses > 0 ? (wins / (double) losses) : (wins > 0 ? wins : 0);
         
-        winPercentLabel.setText(String.format("Win %%: %.1f%%", winPercent));
+        winPercentLabel.setText(String.format("%.0f%% Winrate", winPercent));
         kdLabel.setText(String.format("KD: %.2f", kd));
-        killsLabel.setText("Kills: " + wins);
-        deathsLabel.setText("Deaths: " + losses);
+        killsLabel.setText("K: " + wins);
+        deathsLabel.setText("D: " + losses);
         tiesLabel.setText("Ties: " + ties);
     }
     

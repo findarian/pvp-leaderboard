@@ -20,6 +20,8 @@ public class AdditionalStatsPanel extends JPanel {
     private final JButton dmmBtn = new JButton("DMM");
     private final TierGraphPlotPanel graphPlot = new TierGraphPlotPanel();
     private final TierGraphLabelsPanel graphLabels = new TierGraphLabelsPanel();
+    private static final Dimension GRAPH_LABELS_SIZE = new Dimension(80, 240);
+    private static final Dimension GRAPH_PLOT_SIZE   = new Dimension(160, 240);
 
     private final SimpleDateFormat fmt = new SimpleDateFormat("M/d/yyyy, h:mm:ss a");
     private String selectedBucket = "overall";
@@ -88,16 +90,12 @@ public class AdditionalStatsPanel extends JPanel {
         content.add(chips, root);
         root.gridy++;
 
-        graphPlot.setPreferredSize(new Dimension(800, 260));
-        JScrollPane graphScroll = new JScrollPane(graphPlot);
-        graphScroll.setVerticalScrollBarPolicy(JScrollPane.VERTICAL_SCROLLBAR_NEVER);
-        graphScroll.setHorizontalScrollBarPolicy(JScrollPane.HORIZONTAL_SCROLLBAR_AS_NEEDED);
-        graphScroll.setBorder(null);
-        graphScroll.setPreferredSize(new Dimension(0, 260));
+        // Fixed-size graph (no scrollbars) to fit narrow sidebar
+        graphLabels.setPreferredSize(GRAPH_LABELS_SIZE);
+        graphPlot.setPreferredSize(GRAPH_PLOT_SIZE);
         JPanel graphRow = new JPanel(new BorderLayout());
-        graphLabels.setPreferredSize(new Dimension(80, 260));
         graphRow.add(graphLabels, BorderLayout.WEST);
-        graphRow.add(graphScroll, BorderLayout.CENTER);
+        graphRow.add(graphPlot, BorderLayout.CENTER);
         content.add(graphRow, root);
         root.gridy++;
 
@@ -193,22 +191,16 @@ public class AdditionalStatsPanel extends JPanel {
                 .collect(Collectors.toList());
 
         final String want = selectedBucket;
-        final double maxY = 8 * 3.0; // 9 ranks → indices 0..8; 3 divisions each → 0..24
         final int MAX_MMR_DELTA_PER_MATCH = 250;
 
-        java.util.List<Double> series = new ArrayList<>();
+        // Build raw rank index values (0..24)
+        java.util.List<Double> rawY = new ArrayList<>();
         if ("overall".equals(want)) {
-            // Weighted reconstruction across buckets
+            // Weighted overall: 65% NH, 30% Veng, 5% Multi (no DMM). Follows per-bucket progression over time.
             final Map<String, Double> weights = new HashMap<>();
-            weights.put("nh", 0.55);
-            weights.put("veng", 0.30);
-            weights.put("multi", 0.05);
-            weights.put("dmm", 0.10);
+            weights.put("nh", 0.65); weights.put("veng", 0.30); weights.put("multi", 0.05);
             final Map<String, Double> last = new HashMap<>();
-            last.put("nh", 1000.0);
-            last.put("veng", 1000.0);
-            last.put("multi", 1000.0);
-            last.put("dmm", 1000.0);
+            last.put("nh", 1000.0); last.put("veng", 1000.0); last.put("multi", 1000.0);
 
             for (JsonObject m : items) {
                 String b = asStr(m, "bucket").toLowerCase(Locale.ROOT);
@@ -226,9 +218,7 @@ public class AdditionalStatsPanel extends JPanel {
                     double mu = last.getOrDefault(e.getKey(), 1000.0);
                     overallMu += mu * e.getValue();
                 }
-                double y = encodeRankValue(overallMu);
-                double norm = Math.max(0.0, Math.min(100.0, (y / maxY) * 100.0));
-                series.add(norm);
+                rawY.add(encodeRankValue(overallMu));
             }
         } else {
             Double prevMu = null;
@@ -236,19 +226,32 @@ public class AdditionalStatsPanel extends JPanel {
                 double mu = resolveMuFromMatch(m, prevMu);
                 double chosen;
                 if (Double.isFinite(mu)) {
-                    if (prevMu != null && Double.isFinite(prevMu) && Math.abs(mu - prevMu) > MAX_MMR_DELTA_PER_MATCH) {
-                        chosen = prevMu; // outlier guard
-                    } else {
-                        chosen = mu;
-                        prevMu = mu;
-                    }
+                    if (prevMu != null && Double.isFinite(prevMu) && Math.abs(mu - prevMu) > MAX_MMR_DELTA_PER_MATCH) chosen = prevMu; else { chosen = mu; prevMu = mu; }
                 } else {
                     chosen = (prevMu != null) ? prevMu : 1000.0;
                 }
-                double y = encodeRankValue(chosen);
-                double norm = Math.max(0.0, Math.min(100.0, (y / maxY) * 100.0));
-                series.add(norm);
+                rawY.add(encodeRankValue(chosen));
             }
+        }
+
+        // Compute visible range snapped to division-3 boundaries (no extra padding)
+        double minY = 24.0, maxYv = 0.0;
+        for (Double yv : rawY) { if (yv != null && Double.isFinite(yv)) { minY = Math.min(minY, yv); maxYv = Math.max(maxYv, yv); } }
+        if (!Double.isFinite(minY)) { minY = 0.0; }
+        if (!Double.isFinite(maxYv)) { maxYv = 24.0; }
+        double low = Math.max(0, (int)Math.floor(minY / 3.0) * 3);
+        double high = Math.min(24, (int)Math.ceil(maxYv / 3.0) * 3);
+        if (high <= low) high = Math.min(24, low + 3); // ensure a span
+        graphLabels.setVisibleRange(low, high);
+        graphPlot.setVisibleRange(low, high);
+
+        // Normalize to 0..100 within the visible range
+        java.util.List<Double> series = new ArrayList<>();
+        double span = Math.max(1e-6, high - low);
+        for (Double yv : rawY) {
+            double y = (yv != null && Double.isFinite(yv)) ? yv : low;
+            double norm = Math.max(0.0, Math.min(100.0, ((y - low) / span) * 100.0));
+            series.add(norm);
         }
         tierSeries = series;
         graphPlot.setSeries(series);
@@ -300,14 +303,13 @@ public class AdditionalStatsPanel extends JPanel {
     }
 
     private void updateGraphSize() {
-        int count = (tierSeries != null) ? tierSeries.size() : 0;
-        int width = Math.max(800, count * 6); // ~6px per point, similar to site scaling
-        graphPlot.setPreferredSize(new Dimension(width, 260));
-        graphPlot.revalidate();
-        graphPlot.repaint();
-        graphLabels.setPreferredSize(new Dimension(80, 260));
+        // Keep fixed sizes to avoid scrollbars in Additional Stats
+        graphLabels.setPreferredSize(GRAPH_LABELS_SIZE);
+        graphPlot.setPreferredSize(GRAPH_PLOT_SIZE);
         graphLabels.revalidate();
+        graphPlot.revalidate();
         graphLabels.repaint();
+        graphPlot.repaint();
     }
 
     private static String asStr(JsonObject o, String k) {
@@ -358,28 +360,37 @@ public class AdditionalStatsPanel extends JPanel {
 
     // Fixed-width labels + guides panel
     private static class TierGraphLabelsPanel extends JPanel {
+        private double vMin = 0.0, vMax = 24.0;
+        void setVisibleRange(double a, double b) { this.vMin = a; this.vMax = b; repaint(); }
         @Override protected void paintComponent(Graphics g) {
             super.paintComponent(g);
             Graphics2D g2 = (Graphics2D) g;
             g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
             int w = getWidth(), h = getHeight();
             int top = 20, bottom = 20; int innerH = Math.max(1, h - top - bottom);
-            // draw labels for each tier/division step
-            g2.setColor(new Color(120,120,120));
-            int steps = 24;
-            for (int gi = 0; gi <= steps; gi++) {
-                double frac = gi / (double) steps;
+            // draw labels for the visible range only, with tier colors
+            int start = (int)Math.floor(vMin);
+            int end = (int)Math.ceil(vMax);
+            for (int gi = start; gi <= end; gi++) {
+                double frac = (gi - vMin) / Math.max(1e-6, (vMax - vMin));
                 int y = top + innerH - (int) Math.round(frac * innerH);
+                g2.setColor(new Color(120,120,120));
                 g2.drawLine(0, y, w, y);
                 int base = gi / 3; int off = gi % 3; String baseRank = THRESHOLDS[Math.min(base * 3, THRESHOLDS.length - 1)][0];
-                String label = baseRank.equals("3rd Age") ? baseRank : baseRank + " " + (3 - off);
-                g2.drawString(label, 2, y + 5);
+                // Only render division 3 labels (off==0) and 3rd Age
+                if (off == 0) {
+                    String label = baseRank.equals("3rd Age") ? baseRank : baseRank + " 3";
+                    g2.setColor(rankColor(baseRank));
+                    g2.drawString(label, 2, y + 5);
+                }
             }
         }
     }
 
-    // Scrollable plot panel that renders the series and full-width guides
+    // Plot panel that renders the series and full-width guides
     private static class TierGraphPlotPanel extends JPanel {
+        private double vMin = 0.0, vMax = 24.0;
+        void setVisibleRange(double a, double b) { this.vMin = a; this.vMax = b; repaint(); }
         private java.util.List<Double> series = new ArrayList<>();
         void setSeries(java.util.List<Double> s) { this.series = (s != null) ? s : new ArrayList<>(); repaint(); }
         @Override protected void paintComponent(Graphics g) {
@@ -392,9 +403,12 @@ public class AdditionalStatsPanel extends JPanel {
             int innerH = Math.max(1, h - top - bottom);
 
             g2.setColor(new Color(120,120,120));
-            int steps = 24;
-            for (int gi = 0; gi <= steps; gi++) {
-                double frac = gi / (double) steps; // 0 bottom .. 1 top
+            int start = (int)Math.floor(vMin);
+            int end = (int)Math.ceil(vMax);
+            for (int gi = start; gi <= end; gi++) {
+                int off = gi % 3;
+                if (off != 0) continue; // only draw division 3 guides
+                double frac = (gi - vMin) / Math.max(1e-6, (vMax - vMin)); // 0 bottom .. 1 top
                 int y = top + innerH - (int) Math.round(frac * innerH);
                 g2.drawLine(left, y, left + innerW, y);
             }
@@ -413,6 +427,23 @@ public class AdditionalStatsPanel extends JPanel {
                 g2.setColor(Color.GRAY);
                 g2.drawString("No tier data available", w / 2 - 60, h / 2);
             }
+        }
+    }
+
+    // Tier color mapping used for label coloring
+    private static Color rankColor(String baseRank) {
+        if (baseRank == null) return Color.LIGHT_GRAY;
+        switch (baseRank) {
+            case "Bronze": return new Color(184, 115, 51);
+            case "Iron": return new Color(192, 192, 192);
+            case "Steel": return new Color(154, 162, 166);
+            case "Black": return Color.GRAY;
+            case "Mithril": return new Color(59, 167, 214);
+            case "Adamant": return new Color(26, 139, 111);
+            case "Rune": return new Color(78, 159, 227);
+            case "Dragon": return new Color(229, 57, 53);
+            case "3rd Age": return new Color(229, 193, 0);
+            default: return Color.LIGHT_GRAY;
         }
     }
 

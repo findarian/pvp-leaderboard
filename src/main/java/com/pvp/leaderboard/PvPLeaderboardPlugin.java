@@ -240,6 +240,8 @@ private volatile long suppressFightStartUntilMs = 0L;
                     }, scheduler).thenAccept(tier -> {
                         if (tier != null && !tier.isEmpty() && rankOverlay != null) {
                             rankOverlay.setRankFromApi(selfName, tier);
+                            // Mirror pvp lookup behavior: also force a shard lookup (won't overwrite during override window)
+                            try { rankOverlay.forceLookupAndDisplay(selfName); } catch (Exception ignore) {}
                         }
                     });
                     // Update sidebar rank numbers for the new bucket only
@@ -642,18 +644,35 @@ private void startFight(String opponentName)
                     }
                     try { dashboardPanel.updateTierGraphRealTime(bucket, currentMMR); } catch (Exception ignore) {}
                     try {
-                        final String currentBucket = bucketKey(config.rankBucket());
-                java.util.concurrent.CompletableFuture.supplyAsync(() -> {
-                            try { return dashboardPanel.fetchSelfTierFromApi(selfNameSafe, currentBucket); } catch (Exception e) { return null; }
-                        }, scheduler).thenAccept(tier -> {
-                            if (tier != null && !tier.isEmpty() && rankOverlay != null) {
-                                rankOverlay.setRankFromApi(selfNameSafe, tier);
-                            }
-                        });
+                        // Schedule a single self refresh via API at +15s to capture backend-updated rating
+                        scheduler.schedule(() -> {
+                            try {
+                                String bucketLater = bucketKey(config.rankBucket());
+                                String selfTier = dashboardPanel.fetchSelfTierFromApi(selfNameSafe, bucketLater);
+                                if (selfTier != null && !selfTier.isEmpty() && rankOverlay != null) {
+                                    rankOverlay.setRankFromApi(selfNameSafe, selfTier);
+                                    // Force a shard lookup as in pvp lookup; override prevents clobbering
+                                    try { rankOverlay.forceLookupAndDisplay(selfNameSafe); } catch (Exception ignore) {}
+                                }
+                            } catch (Exception ignore) {}
+                        }, 15L, java.util.concurrent.TimeUnit.SECONDS);
                         try { dashboardPanel.preloadSelfRankNumbers(selfNameSafe); } catch (Exception ignore) {}
                     } catch (Exception ignore) {}
                     try { dashboardPanel.updateAdditionalStatsFromPlugin("win".equals(result) ? opponentRank : null,
                             "loss".equals(result) ? opponentRank : null); } catch (Exception ignore) {}
+                    // Also refresh opponent via API at +15s and force a shard lookup
+                    if (opponentSafe != null && !opponentSafe.isEmpty()) {
+                        scheduler.schedule(() -> {
+                            try {
+                                String bucketLater = bucketKey(config.rankBucket());
+                                String oppTier = dashboardPanel.fetchTierFromApi(opponentSafe, bucketLater);
+                                if (oppTier != null && !oppTier.isEmpty() && rankOverlay != null) {
+                                    rankOverlay.setRankFromApi(opponentSafe, oppTier);
+                                    try { rankOverlay.forceLookupAndDisplay(opponentSafe); } catch (Exception ignore) {}
+                                }
+                            } catch (Exception ignore) {}
+                        }, 15L, java.util.concurrent.TimeUnit.SECONDS);
+                    }
                 }
             }
             catch (Exception e)
@@ -926,6 +945,32 @@ private void startFight(String opponentName)
                                 String tier = dashboardPanel.fetchTierFromApi(opponentSafe, bucket);
                                 if (tier != null && !tier.isEmpty()) {
                                     rankOverlay.setRankFromApi(opponentSafe, tier);
+                                }
+                            } catch (Exception ignore) {}
+                        }, 15L, java.util.concurrent.TimeUnit.SECONDS);
+                    }
+                } catch (Exception ignore) {}
+
+                // Unconditional +15s API refresh for self and opponent, and force shard lookup like pvp lookup
+                try {
+                    scheduler.schedule(() -> {
+                        try {
+                            String bucketLater = bucketKey(config.rankBucket());
+                            String selfTierLater = dashboardPanel != null ? dashboardPanel.fetchSelfTierFromApi(selfNameSafe, bucketLater) : null;
+                            if (selfTierLater != null && !selfTierLater.isEmpty() && rankOverlay != null) {
+                                rankOverlay.setRankFromApi(selfNameSafe, selfTierLater);
+                                try { rankOverlay.forceLookupAndDisplay(selfNameSafe); } catch (Exception ignore) {}
+                            }
+                        } catch (Exception ignore) {}
+                    }, 15L, java.util.concurrent.TimeUnit.SECONDS);
+                    if (opponentSafe != null && !opponentSafe.isEmpty()) {
+                        scheduler.schedule(() -> {
+                            try {
+                                String bucketLater = bucketKey(config.rankBucket());
+                                String oppTierLater = dashboardPanel != null ? dashboardPanel.fetchTierFromApi(opponentSafe, bucketLater) : null;
+                                if (oppTierLater != null && !oppTierLater.isEmpty() && rankOverlay != null) {
+                                    rankOverlay.setRankFromApi(opponentSafe, oppTierLater);
+                                    try { rankOverlay.forceLookupAndDisplay(opponentSafe); } catch (Exception ignore) {}
                                 }
                             } catch (Exception ignore) {}
                         }, 15L, java.util.concurrent.TimeUnit.SECONDS);

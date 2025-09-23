@@ -104,7 +104,16 @@ public class RankOverlay extends Overlay
     {
         try
         {
+            // Preserve self rank across scene changes to avoid flicker
+            String selfName = null; String selfRank = null;
+            try {
+                selfName = (client != null && client.getLocalPlayer() != null) ? client.getLocalPlayer().getName() : null;
+                if (selfName != null) selfRank = displayedRanks.get(selfName);
+            } catch (Exception ignore) {}
             displayedRanks.clear();
+            if (selfName != null && selfRank != null) {
+                displayedRanks.put(selfName, selfRank);
+            }
             fetchInFlight.clear();
             attemptedLookup.clear();
             attemptedAtMs.clear();
@@ -171,10 +180,25 @@ public class RankOverlay extends Overlay
         {
             displayedRanks.put(playerName, rank);
             try { nameRankCache.put(cacheKeyFor(playerName), new CacheEntry(rank, System.currentTimeMillis())); } catch (Exception ignore) {}
-            // Mark override so shard results won't replace this until we see the player in shards
-            try { apiOverrideUntilMs.put(playerName, Long.MAX_VALUE); } catch (Exception ignore) {}
+            // Mark override: self = indefinite, others = 15s window
+            long until;
+            try {
+                String self = (client != null && client.getLocalPlayer() != null) ? client.getLocalPlayer().getName() : null;
+                boolean isSelf = (self != null && self.equals(playerName));
+                until = isSelf ? Long.MAX_VALUE : (System.currentTimeMillis() + 15_000L);
+            } catch (Exception e) {
+                until = System.currentTimeMillis() + 15_000L;
+            }
+            try { apiOverrideUntilMs.put(playerName, until); } catch (Exception ignore) {}
         }
         catch (Exception ignore) {}
+    }
+
+    public void holdApiOverride(String playerName, long millis)
+    {
+        if (playerName == null || playerName.trim().isEmpty()) return;
+        long until = System.currentTimeMillis() + Math.max(0L, millis);
+        try { apiOverrideUntilMs.put(playerName, until); } catch (Exception ignore) {}
     }
 
     public java.awt.image.BufferedImage resolveRankIcon(String fullRank)
@@ -245,19 +269,8 @@ public class RankOverlay extends Overlay
         if (lastBucketKey == null || !lastBucketKey.equals(currentBucket))
         {
             // Do not clear nameRankCache (1h persistence across buckets); just reset transient state
-            // Keep displayedRanks for self to avoid flicker on bucket switch
-            String selfName = null;
-            try { selfName = client != null && client.getLocalPlayer() != null ? client.getLocalPlayer().getName() : null; } catch (Exception ignore) {}
-            if (selfName == null)
-            {
-                displayedRanks.clear();
-            }
-            else
-            {
-                String selfRank = displayedRanks.get(selfName);
-                displayedRanks.clear();
-                if (selfRank != null) displayedRanks.put(selfName, selfRank);
-            }
+            // On bucket switch, clear all so a bucket with no rank hides self rank
+            displayedRanks.clear();
             fetchInFlight.clear();
             loggedFetch.clear();
             attemptedLookup.clear();
@@ -266,14 +279,7 @@ public class RankOverlay extends Overlay
             // Allow self lookup again immediately on bucket change and clear cached overlay values for self
             selfRankAttempted = false;
             nextSelfRankAllowedAtMs = 0L;
-            try {
-                if (client != null && client.getLocalPlayer() != null && client.getLocalPlayer().getName() != null)
-                {
-                    String self = client.getLocalPlayer().getName();
-                    displayedRanks.remove(self);
-                    try { nameRankCache.remove(cacheKeyFor(self)); } catch (Exception ignore) {}
-                }
-            } catch (Exception ignore) {}
+            // Keep nameRankCache (1h TTL per bucket); do not purge here
         }
 
         // Always prioritize fetching the local player's rank first, but only once until explicitly refreshed
@@ -296,12 +302,18 @@ public class RankOverlay extends Overlay
                         {
                             if (rank != null)
                             {
-                                displayedRanks.put(selfName, rank);
-                                try { nameRankCache.put(cacheKeyFor(selfName), new CacheEntry(rank, System.currentTimeMillis())); } catch (Exception ignore) {}
-                                if (loggedFetch.putIfAbsent(selfName, Boolean.TRUE) == null)
+                                Long until = apiOverrideUntilMs.get(selfName);
+                                boolean overrideActive = until != null && System.currentTimeMillis() < until;
+                                if (!overrideActive)
                                 {
-                                log.debug("Fetched rank for {}: {}", selfName, rank);
+                                    displayedRanks.put(selfName, rank);
+                                    try { nameRankCache.put(cacheKeyFor(selfName), new CacheEntry(rank, System.currentTimeMillis())); } catch (Exception ignore) {}
+                                    if (loggedFetch.putIfAbsent(selfName, Boolean.TRUE) == null)
+                                    {
+                                        log.debug("Fetched rank for {}: {}", selfName, rank);
+                                    }
                                 }
+                                // If override is active, keep API-derived value; do not clear the override here
                             }
                             else if (loggedFetch.putIfAbsent(selfName, Boolean.TRUE) == null)
                             {
@@ -421,11 +433,7 @@ public class RankOverlay extends Overlay
                                     displayedRanks.put(playerName, rank);
                                     try { nameRankCache.put(cacheKeyFor(playerName), new CacheEntry(rank, System.currentTimeMillis())); } catch (Exception ignore) {}
                                 }
-                                else
-                                {
-                                    // Shard has a value: consider this as fresh and clear override
-                                    apiOverrideUntilMs.remove(playerName);
-                                }
+                                // If override is active, keep API-derived value; do not clear the override early
                                 try { nameRankCache.put(cacheKeyFor(playerName), new CacheEntry(rank, System.currentTimeMillis())); } catch (Exception ignore) {}
                                 if (loggedFetch.putIfAbsent(playerName, Boolean.TRUE) == null)
                                 {
