@@ -10,7 +10,6 @@ import okhttp3.MediaType;
 import okhttp3.OkHttpClient;
 import okhttp3.Request;
 import okhttp3.RequestBody;
-import okhttp3.Response;
 
 import java.awt.Desktop;
 import java.io.*;
@@ -112,7 +111,7 @@ public class CognitoAuthService {
                 clearTokens();
                 return false;
             }
-        });
+        }, scheduler);
     }
     
     private void startCallbackServer(CompletableFuture<String> codeFuture) throws IOException {
@@ -183,14 +182,22 @@ public class CognitoAuthService {
             .addHeader("Accept", "application/json")
             .build();
 
-        String response;
-        try (Response res = httpClient.newCall(req).execute()) {
-            if (!res.isSuccessful() || res.body() == null) {
-                throw new IOException("Token exchange failed (status=" + res.code() + ")");
+        final java.util.concurrent.CompletableFuture<String> fut = new java.util.concurrent.CompletableFuture<>();
+        httpClient.newCall(req).enqueue(new okhttp3.Callback() {
+            @Override public void onFailure(okhttp3.Call call, java.io.IOException e) { fut.completeExceptionally(e); }
+            @Override public void onResponse(okhttp3.Call call, okhttp3.Response response) throws java.io.IOException {
+                try (okhttp3.Response res = response) {
+                    if (!res.isSuccessful() || res.body() == null) {
+                        fut.completeExceptionally(new IOException("Token exchange failed (status=" + res.code() + ")"));
+                        return;
+                    }
+                    okhttp3.ResponseBody rb = res.body();
+                    String body = rb != null ? rb.string() : "";
+                    fut.complete(body);
+                }
             }
-            okhttp3.ResponseBody rb = res.body();
-            response = rb != null ? rb.string() : "";
-        }
+        });
+        String response = fut.get(10, java.util.concurrent.TimeUnit.SECONDS);
 
         JsonObject tokens = gson.fromJson(response, JsonObject.class);
         accessToken = tokens.has("access_token") && !tokens.get("access_token").isJsonNull() ? tokens.get("access_token").getAsString() : null;
@@ -346,14 +353,22 @@ public class CognitoAuthService {
             .addHeader("Accept", "application/json")
             .build();
 
-        String body;
-        try (Response res = httpClient.newCall(req).execute()) {
-            if (!res.isSuccessful() || res.body() == null) {
-                throw new IOException("Refresh failed (status=" + res.code() + ")");
+        final java.util.concurrent.CompletableFuture<String> fut = new java.util.concurrent.CompletableFuture<>();
+        httpClient.newCall(req).enqueue(new okhttp3.Callback() {
+            @Override public void onFailure(okhttp3.Call call, java.io.IOException e) { fut.completeExceptionally(e); }
+            @Override public void onResponse(okhttp3.Call call, okhttp3.Response response) throws java.io.IOException {
+                try (okhttp3.Response res = response) {
+                    if (!res.isSuccessful() || res.body() == null) {
+                        fut.completeExceptionally(new IOException("Refresh failed (status=" + res.code() + ")"));
+                        return;
+                    }
+                    okhttp3.ResponseBody rb = res.body();
+                    String body = rb != null ? rb.string() : "";
+                    fut.complete(body);
+                }
             }
-            okhttp3.ResponseBody rb = res.body();
-            body = rb != null ? rb.string() : "";
-        }
+        });
+        String body = fut.get(10, java.util.concurrent.TimeUnit.SECONDS);
 
         JsonObject tokens = gson.fromJson(body, JsonObject.class);
         String newAccessToken = tokens.has("access_token") && !tokens.get("access_token").isJsonNull() ? tokens.get("access_token").getAsString() : null;

@@ -234,10 +234,13 @@ public class RankOverlay extends Overlay
                 log.info("[Overlay] shard not ready yet; skipping render");
                 lastShardNotReadyLogMs = now;
             }
-            return null;
+            return new Dimension(0, 0);
         }
         // Show text if enabled, otherwise show icons
 
+        if (config == null || client == null) {
+            return new Dimension(0, 0);
+        }
         String currentBucket = bucketKey(config.rankBucket());
         if (lastBucketKey == null || !lastBucketKey.equals(currentBucket))
         {
@@ -513,7 +516,7 @@ public class RankOverlay extends Overlay
             }
         } catch (Exception ignore) {}
 
-        return null;
+        return new Dimension(0, 0);
     }
 
     // Low-priority bounded executor for overlay lookups to avoid stuttering the client.
@@ -558,8 +561,21 @@ public class RankOverlay extends Overlay
 
     private void renderRankSpriteOrFallback(Graphics2D graphics, String rank, int x, int y, int size)
     {
+        if (rank == null || rank.isEmpty())
+        {
+            BufferedImage fallback = resolveUnrankedIcon();
+            if (fallback != null)
+            {
+                if (config.rankIconWhiteOutline())
+                {
+                    drawWhiteOutline(graphics, fallback, x, y, size);
+                }
+                graphics.drawImage(fallback, x, y, size, size, null);
+            }
+            return;
+        }
         String[] parts = rank.split(" ");
-        String rankName = parts[0];
+        String rankName = parts.length > 0 ? parts[0] : rank;
         BufferedImage icon = getRankIcon(rank, rankName);
         if (icon != null)
         {

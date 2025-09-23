@@ -372,17 +372,18 @@ private volatile long suppressFightStartUntilMs = 0L;
 	public void onHitsplatApplied(HitsplatApplied hitsplatApplied)
 	{
 		// Only process Player vs Player combat
-		if (hitsplatApplied.getActor() instanceof Player)
+        if (hitsplatApplied.getActor() instanceof Player)
 		{
-			Player player = (Player) hitsplatApplied.getActor();
-			Player localPlayer = client.getLocalPlayer();
+            if (client == null || config == null) return;
+            Player player = (Player) hitsplatApplied.getActor();
+            Player localPlayer = client.getLocalPlayer();
 
 			// Process only outbound damage as fight-start signal. Inbound damage updates attribution but will NOT start fights.
 			if (localPlayer != null)
 			{
 				String opponentName = null;
 				boolean startNow = false;
-				int amt = 0; try { amt = hitsplatApplied.getHitsplat() != null ? hitsplatApplied.getHitsplat().getAmount() : 0; } catch (Exception ignore) {}
+                int amt = 0; try { net.runelite.api.Hitsplat hs = hitsplatApplied.getHitsplat(); amt = (hs != null ? hs.getAmount() : 0); } catch (Exception ignore) {}
 				if (player == localPlayer)
 				{
 					// Inbound damage: attribute to attacker and start a fight when attacker is known
@@ -574,7 +575,7 @@ private void startFight(String opponentName)
                 // Kick API fast-follow to update overlay immediately
                 java.util.concurrent.CompletableFuture.supplyAsync(() -> {
                     try { return dashboardPanel.fetchSelfTierFromApi(selfName, currentBucket); } catch (Exception e) { return null; }
-                }).thenAccept(tier -> {
+                }, scheduler).thenAccept(tier -> {
                     if (tier != null && !tier.isEmpty() && rankOverlay != null) {
                         rankOverlay.setRankFromApi(selfName, tier);
                     }
@@ -906,7 +907,7 @@ private void startFight(String opponentName)
         final int worldSafe = client.getWorld();
 		final long damageToOpponentSafe; { Long v = damageToOpponent.get(opponentSafe); damageToOpponentSafe = v != null ? v : 0L; }
 
-		java.util.concurrent.CompletableFuture.runAsync(() -> {
+        java.util.concurrent.CompletableFuture.runAsync(() -> {
             try
             {
                 // try { log.info("[Fight] submitting outcome={} vs={} world={} startTs={} endTs={} startSpell={} endSpell={} multi={} acctHash={} idTokenPresent={}",
@@ -933,7 +934,7 @@ private void startFight(String opponentName)
             } catch (Exception e) {
                 try { log.error("[Fight] async finalize error (multi-track)", e); } catch (Exception ignore) {}
             }
-        });
+        }, scheduler);
         // Suppress restarts only for this opponent
         try { if (opponentSafe != null) perOpponentSuppressUntilMs.put(opponentSafe, System.currentTimeMillis() + 3000L); } catch (Exception ignore) {}
         inFight = !activeFights.isEmpty();

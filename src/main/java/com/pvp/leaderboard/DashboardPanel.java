@@ -1273,41 +1273,51 @@ public class DashboardPanel extends PluginPanel
             if (pid == null || pid.isEmpty()) return null;
 			if ("overall".equals(canonBucket))
             {
-				String apiUrl = "https://kekh0x6kfk.execute-api.us-east-1.amazonaws.com/prod/user?player_id=" + URLEncoder.encode(pid, "UTF-8");
-				Request req = new Request.Builder().url(apiUrl).get().build();
-				String response;
-				try (Response res = httpClient.newCall(req).execute())
-                {
-					if (!res.isSuccessful() || res.body() == null) return null;
-					okhttp3.ResponseBody rb = res.body();
-					response = rb != null ? rb.string() : "";
-				}
-				if (response != null && !response.isEmpty())
-				{
-					JsonObject stats = gson.fromJson(response, JsonObject.class);
-                    if (stats.has("mmr") && !stats.get("mmr").isJsonNull())
-                    {
-                        double mmr = stats.get("mmr").getAsDouble();
-                        RankInfo ri = rankLabelAndProgressFromMMR(mmr);
-                        return ri != null ? (ri.rank + (ri.division > 0 ? " " + ri.division : "")) : null;
+                String apiUrl = "https://kekh0x6kfk.execute-api.us-east-1.amazonaws.com/prod/user?player_id=" + URLEncoder.encode(pid, "UTF-8");
+                Request req = new Request.Builder().url(apiUrl).get().build();
+                final java.util.concurrent.CompletableFuture<String> fut = new java.util.concurrent.CompletableFuture<>();
+                httpClient.newCall(req).enqueue(new Callback() {
+                    @Override public void onFailure(Call call, java.io.IOException e) { fut.complete(null); }
+                    @Override public void onResponse(Call call, Response response) throws java.io.IOException {
+                        try (Response res = response) {
+                            if (!res.isSuccessful() || res.body() == null) { fut.complete(null); return; }
+                            okhttp3.ResponseBody rb = res.body();
+                            String body = rb != null ? rb.string() : "";
+                            fut.complete(body);
+                        }
                     }
+                });
+                String response = fut.get(5, java.util.concurrent.TimeUnit.SECONDS);
+                if (response == null || response.isEmpty()) return null;
+                JsonObject stats = gson.fromJson(response, JsonObject.class);
+                if (stats.has("mmr") && !stats.get("mmr").isJsonNull())
+                {
+                    double mmr = stats.get("mmr").getAsDouble();
+                    RankInfo ri = rankLabelAndProgressFromMMR(mmr);
+                    return ri != null ? (ri.rank + (ri.division > 0 ? " " + ri.division : "")) : null;
                 }
                 return null;
             }
             else
             {
 				// Pull recent matches and infer tier for the requested bucket from latest match
-				String apiUrl = "https://kekh0x6kfk.execute-api.us-east-1.amazonaws.com/prod/matches?player_id=" + URLEncoder.encode(pid, "UTF-8") + "&limit=50";
-				Request req = new Request.Builder().url(apiUrl).get().build();
-				String response;
-				try (Response res = httpClient.newCall(req).execute())
-				{
-					if (!res.isSuccessful() || res.body() == null) return null;
-					okhttp3.ResponseBody rb = res.body();
-					response = rb != null ? rb.string() : "";
-				}
-				if (response == null || response.isEmpty()) return null;
-				JsonObject obj = gson.fromJson(response, JsonObject.class);
+                String apiUrl = "https://kekh0x6kfk.execute-api.us-east-1.amazonaws.com/prod/matches?player_id=" + URLEncoder.encode(pid, "UTF-8") + "&limit=50";
+                Request req = new Request.Builder().url(apiUrl).get().build();
+                final java.util.concurrent.CompletableFuture<String> fut2 = new java.util.concurrent.CompletableFuture<>();
+                httpClient.newCall(req).enqueue(new Callback() {
+                    @Override public void onFailure(Call call, java.io.IOException e) { fut2.complete(null); }
+                    @Override public void onResponse(Call call, Response response) throws java.io.IOException {
+                        try (Response res = response) {
+                            if (!res.isSuccessful() || res.body() == null) { fut2.complete(null); return; }
+                            okhttp3.ResponseBody rb = res.body();
+                            String body = rb != null ? rb.string() : "";
+                            fut2.complete(body);
+                        }
+                    }
+                });
+                String response = fut2.get(6, java.util.concurrent.TimeUnit.SECONDS);
+                if (response == null || response.isEmpty()) return null;
+                JsonObject obj = gson.fromJson(response, JsonObject.class);
                 JsonArray matches = obj.has("matches") ? obj.getAsJsonArray("matches") : null;
                 if (matches == null) return null;
                 JsonObject latest = null;
