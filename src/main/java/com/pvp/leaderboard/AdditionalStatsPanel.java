@@ -196,11 +196,11 @@ public class AdditionalStatsPanel extends JPanel {
         // Build raw rank index values (0..24)
         java.util.List<Double> rawY = new ArrayList<>();
         if ("overall".equals(want)) {
-            // Weighted overall: 65% NH, 30% Veng, 5% Multi (no DMM). Follows per-bucket progression over time.
+            // Weighted overall: NH 0.55, Veng 0.30, Multi 0.05, DMM 0.10 (sums to 1.0)
             final Map<String, Double> weights = new HashMap<>();
-            weights.put("nh", 0.65); weights.put("veng", 0.30); weights.put("multi", 0.05);
+            weights.put("nh", 0.55); weights.put("veng", 0.30); weights.put("multi", 0.05); weights.put("dmm", 0.10);
             final Map<String, Double> last = new HashMap<>();
-            last.put("nh", 1000.0); last.put("veng", 1000.0); last.put("multi", 1000.0);
+            last.put("nh", 1000.0); last.put("veng", 1000.0); last.put("multi", 1000.0); last.put("dmm", 1000.0);
 
             for (JsonObject m : items) {
                 String b = asStr(m, "bucket").toLowerCase(Locale.ROOT);

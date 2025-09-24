@@ -1108,12 +1108,6 @@ public class DashboardPanel extends PluginPanel
 
                         SwingUtilities.invokeLater(() -> {
                             updateProgressBars(stats);
-                            // Force immediate rank number lookup for all buckets
-                            String playerName = stats.has("player_name") ? stats.get("player_name").getAsString() :
-                                              (stats.has("player_id") ? stats.get("player_id").getAsString() : null);
-                            if (playerName != null) {
-                                updateAllRankNumbers(playerName);
-                            }
                         });
                     }
                 }
@@ -1938,7 +1932,7 @@ public class DashboardPanel extends PluginPanel
                         JsonObject bucketsObj = null;
                         try { if (stats.has("buckets") && stats.get("buckets").isJsonObject()) bucketsObj = stats.getAsJsonObject("buckets"); } catch (Exception ignore) {}
                         for (String key : buckets) {
-                            String rankLabel = null; int division = 0; double pct = 0.0; int worldRankNum = -1;
+                            String rankLabel = null; int division = 0; double pct = 0.0;
                             if (bucketsObj != null && bucketsObj.has(key) && bucketsObj.get(key).isJsonObject()) {
                                 JsonObject b = bucketsObj.getAsJsonObject(key);
                                 try {
@@ -1966,42 +1960,18 @@ public class DashboardPanel extends PluginPanel
                                         try { division = b.get("division").getAsInt(); } catch (Exception ignore) {}
                                     }
                                 } catch (Exception ignore) {}
-                            } else {
-                                String mmrKey = key + "_mmr"; String rankKey = key + "_rank"; String divKey = key + "_division"; String worldKey = key + "_world_rank";
-                                try {
-                                    if ("overall".equals(key) && stats.has("mmr") && !stats.get("mmr").isJsonNull()) {
-                                        double mmr = stats.get("mmr").getAsDouble();
-                                        RankInfo ri = rankLabelAndProgressFromMMR(mmr);
-                                        if (ri != null) { rankLabel = ri.rank; division = ri.division; pct = ri.progress; }
-                                    } else if (stats.has(mmrKey) && !stats.get(mmrKey).isJsonNull()) {
-                                        double mmr = stats.get(mmrKey).getAsDouble();
-                                        RankInfo ri = rankLabelAndProgressFromMMR(mmr);
-                                        if (ri != null) { rankLabel = ri.rank; division = ri.division; pct = ri.progress; }
-                                    }
-                                    if (rankLabel == null && stats.has(rankKey) && !stats.get(rankKey).isJsonNull()) {
-                                        String formatted = formatTierLabel(stats.get(rankKey).getAsString());
-                                        String[] parts = formatted.split(" ");
-                                        rankLabel = parts.length > 0 ? parts[0] : formatted;
-                                        if (parts.length > 1) { try { division = Integer.parseInt(parts[1]); } catch (Exception ignore) {} }
-                                    }
-                                    if (stats.has(divKey) && !stats.get(divKey).isJsonNull()) {
-                                        try { division = stats.get(divKey).getAsInt(); } catch (Exception ignore) {}
-                                    }
-                                    if (stats.has(worldKey) && !stats.get(worldKey).isJsonNull()) {
-                                        try { worldRankNum = stats.get(worldKey).getAsInt(); } catch (Exception ignore) {}
-                                    }
-                                } catch (Exception ignore) {}
                             }
-                            if (worldRankNum < 0 && "overall".equals(key)) {
-                                try {
-                                    if (stats.has("world_rank") && !stats.get("world_rank").isJsonNull()) {
-                                        worldRankNum = stats.get("world_rank").getAsInt();
-                                    }
-                                } catch (Exception ignore) {}
-                            }
+                            // World rank number is legacy; do not use. Display only rank/division/progress.
                             if (rankLabel != null) {
-                                final String fKey = key; final String fRank = rankLabel; final int fDiv = division; final double fPct = pct; final int fRankNum = worldRankNum;
-                                SwingUtilities.invokeLater(() -> setBucketBarWithRank(fKey, fRank, fDiv, fPct, fRankNum));
+                                final String fKey = key; final String fRank = rankLabel; final int fDiv = division; final double fPct = pct;
+                                // Synchronously derive Rank # from shard for this bucket
+                                int rankNum = -1;
+                                try { rankNum = getRankNumberFromLeaderboard(playerName, fKey); } catch (Exception ignore) {}
+                                final int fRankNum = rankNum;
+                                SwingUtilities.invokeLater(() -> {
+                                    if (fRankNum > 0) setBucketBarWithRank(fKey, fRank, fDiv, fPct, fRankNum);
+                                    else setBucketBar(fKey, fRank, fDiv, fPct);
+                                });
                             } else {
                                 final String fKey = key;
                                 SwingUtilities.invokeLater(() -> setBucketBar(fKey, "—", 0, 0));
