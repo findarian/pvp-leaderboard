@@ -328,7 +328,8 @@ private volatile long suppressFightStartUntilMs = 0L;
 			{
 				if (client.getLocalPlayer() != null && dashboardPanel != null)
 				{
-                    String self = client.getLocalPlayer().getName();
+					String self = client.getLocalPlayer().getName();
+					try { log.debug("[Login] Logged in as '{}' world={}", self, client.getWorld()); } catch (Exception ignore) {}
 					dashboardPanel.lookupPlayerFromRightClick(self);
                     // Preload account hash linkage for self so overall lookups use account shard immediately
                     try { dashboardPanel.preloadSelfRankNumbers(self); } catch (Exception ignore) {}
@@ -385,7 +386,13 @@ private volatile long suppressFightStartUntilMs = 0L;
 			{
 				String opponentName = null;
 				boolean startNow = false;
-                int amt = 0; try { net.runelite.api.Hitsplat hs = hitsplatApplied.getHitsplat(); amt = (hs != null ? hs.getAmount() : 0); } catch (Exception ignore) {}
+				int amt = 0; try { net.runelite.api.Hitsplat hs = hitsplatApplied.getHitsplat(); amt = (hs != null ? hs.getAmount() : 0); } catch (Exception ignore) {}
+				try {
+					String actorName = null; try { actorName = player != null ? player.getName() : null; } catch (Exception ignore) {}
+					String lpInteracting = null; try { lpInteracting = (localPlayer.getInteracting() instanceof Player) ? ((Player)localPlayer.getInteracting()).getName() : null; } catch (Exception ignore) {}
+					String actorInteracting = null; try { actorInteracting = (player != null && player.getInteracting() instanceof Player) ? ((Player)player.getInteracting()).getName() : null; } catch (Exception ignore) {}
+					log.debug("[Hitsplat] actor='{}' amt={} actorIsLocal={} lp->={} actor->={}", actorName, amt, (player == localPlayer), lpInteracting, actorInteracting);
+				} catch (Exception ignore) {}
 				if (player == localPlayer)
 				{
 					// Inbound damage: attribute to attacker and start a fight when attacker is known
@@ -406,6 +413,7 @@ private volatile long suppressFightStartUntilMs = 0L;
 					try { if (opponentName != null) { damageFromOpponent.merge(opponentName, (long) amt, Long::sum); } } catch (Exception ignore) {}
 					// Start on inbound when we have a concrete opponent
 					startNow = (opponentName != null);
+					try { log.debug("[Hitsplat] inbound dmg={} opp='{}' startNow={} dmgFromOpp={}", amt, opponentName, startNow, damageFromOpponent); } catch (Exception ignore) {}
 				}
 				else
 				{
@@ -413,15 +421,17 @@ private volatile long suppressFightStartUntilMs = 0L;
 					boolean weAreAttacking = false; try { weAreAttacking = (localPlayer.getInteracting() == player); } catch (Exception ignore) {}
 					if (weAreAttacking)
 					{
-						opponentName = player.getName();
+						opponentName = (player != null ? player.getName() : null);
 						if (opponentName != null) lastEngagedOpponentName = opponentName;
 						try { damageToOpponent.merge(opponentName, (long) amt, Long::sum); } catch (Exception ignore) {}
 						startNow = true;
 					}
+					try { log.debug("[Hitsplat] outbound dmg={} weAreAttacking={} opp='{}' dmgToOpp={} ", amt, weAreAttacking, opponentName, damageToOpponent.get(opponentName)); } catch (Exception ignore) {}
 				}
 
 				// Start/update fights if this hitsplat indicates combat (inbound from attacker or outbound while we are attacking)
-				if (startNow && opponentName != null && isPlayerOpponent(opponentName))
+				boolean validOpp = (opponentName != null && isPlayerOpponent(opponentName));
+				if (startNow && opponentName != null && validOpp)
 				{
 					int tickNow = 0; try { tickNow = client.getTickCount(); } catch (Exception ignore) {}
 					if (tickNow - lastCombatActivityTick > OUT_OF_COMBAT_TICKS)
@@ -460,6 +470,17 @@ private volatile long suppressFightStartUntilMs = 0L;
 						wasInMulti = true;
 					}
 				}
+				else if (startNow)
+				{
+					try {
+						StringBuilder sb = new StringBuilder();
+						java.util.List<Player> players = client.getPlayers();
+						if (players != null) {
+							for (Player p : players) { String pn = null; try { pn = p != null ? p.getName() : null; } catch (Exception ignore) {} if (pn != null) { if (sb.length() > 0) sb.append(", "); sb.append(pn); } }
+						}
+						log.debug("[Fight] start rejected opp='{}' validOpp={} playersNow=[{}]", opponentName, validOpp, sb.toString());
+					} catch (Exception ignore) {}
+				}
 			}
 		}
 		
@@ -475,6 +496,13 @@ private volatile long suppressFightStartUntilMs = 0L;
 		{
 			Player player = (Player) actorDeath.getActor();
 			Player localPlayer = client.getLocalPlayer();
+			try {
+				String nameDbg = null; try { nameDbg = player != null ? player.getName() : null; } catch (Exception ignore) {}
+				boolean engagedA = false; boolean engagedB = false;
+				try { engagedA = (player != null && player.getInteracting() == localPlayer); } catch (Exception ignore) {}
+				try { engagedB = (localPlayer != null && localPlayer.getInteracting() == player); } catch (Exception ignore) {}
+				log.debug("[Death] actor='{}' isLocal={} actor->local={} local->actor={}", nameDbg, (player == localPlayer), engagedA, engagedB);
+			} catch (Exception ignore) {}
 			
             // try { log.info("[Fight] onActorDeath actor={}, inFight={}, opponent={} ", player != null ? player.getName() : "null", inFight, opponent); } catch (Exception ignore) {}
 
@@ -499,9 +527,11 @@ private volatile long suppressFightStartUntilMs = 0L;
                 } catch (Exception ignore) {}
                 if (killer == null) killer = opponent;
                 if (killer == null) killer = mostRecentActiveOpponent();
+				try { log.debug("[Death] self died; resolvedKiller='{}' dmgFromOpp={} activeFights={} lastEngaged='{}'", killer, damageFromOpponent, activeFights.keySet(), lastEngagedOpponentName); } catch (Exception ignore) {}
                 if (killer != null) endFightFor(killer, "loss");
                 else {
                     // No known opponent; clear all fights
+					try { log.debug("[Death] no opponent resolved on self death; clearing fights (no submit)"); } catch (Exception ignore) {}
                     activeFights.clear(); inFight = false;
                 }
             }
@@ -520,11 +550,16 @@ private volatile long suppressFightStartUntilMs = 0L;
                     } catch (Exception ignore) {}
                     if (activeFights.containsKey(name) || isEngagedWithLocal)
                     {
+						try { log.debug("[Death] opponent died name='{}' activeFight={} engagedWithLocal={}", name, activeFights.containsKey(name), isEngagedWithLocal); } catch (Exception ignore) {}
                         opponentDeathMs = System.currentTimeMillis();
                         // try { log.info("[Fight] opponent death at {} ms; opponent={}", opponentDeathMs, opponent); } catch (Exception ignore) {}
                         // try { log.info("[Fight] end snapshot: opponent={} world={} startTs={} spellStart={} spellEnd={} multi={}", opponent, client.getWorld(), fightStartTime, fightStartSpellbook, client.getVarbitValue(Varbits.SPELLBOOK), wasInMulti); } catch (Exception ignore) {}
                         endFightFor(name, "win");
                     }
+					else
+					{
+						try { log.debug("[Death] ignoring other player's death name='{}' (no active fight, not engaged)"); } catch (Exception ignore) {}
+					}
                 }
             }
 		}
@@ -548,7 +583,7 @@ private void startFight(String opponentName)
         fightFinalized = false;
         selfDeathMs = 0L;
         opponentDeathMs = 0L;
-        // try { log.info("[Fight] start snapshot: opponent={} world={} spellbook={} multi={}", opponentName, client.getWorld(), fightStartSpellbook, wasInMulti); } catch (Exception ignore) {}
+		try { log.debug("[Fight] startFight opp='{}' world={} startSpell={} multi={}", opponentName, client.getWorld(), fightStartSpellbook, wasInMulti); } catch (Exception ignore) {}
 	}
 
 	public String getCurrentOpponent()
@@ -700,6 +735,8 @@ private void startFight(String opponentName)
     {
         try
         {
+			try { log.debug("[Submit] snapshot outcome={} self='{}' opp='{}' world={} startTs={} endTs={} startSpell={} endSpell={} multi={} acctHash={} idTokenPresent={} dmgOut={}",
+				result, playerId, opponentId, world, fightStartTs, fightEndTime, getSpellbookName(fightStartSpellbookLocal), getSpellbookName(fightEndSpellbookLocal), wasInMultiLocal, accountHashLocal, (idTokenLocal != null && !idTokenLocal.isEmpty()), damageToOpponentLocal); } catch (Exception ignore) {}
             matchResultService.submitMatchResult(
                 playerId,
                 opponentId,
@@ -816,6 +853,7 @@ private void startFight(String opponentName)
         activeFights.clear();
         damageFromOpponent.clear();
         lastCombatActivityTick = 0;
+		try { log.debug("[Fight] state reset; suppressUntilMs={} activeFightsCleared" , suppressFightStartUntilMs); } catch (Exception ignore) {}
 	}
 
 	private String getPlayerAttacker()
@@ -883,6 +921,7 @@ private void startFight(String opponentName)
                 return new FightEntry(opponentName, ts, sb, multi, world);
             }
             v.lastActivityMs = System.currentTimeMillis();
+			try { log.debug("[Fight] touch vs={} lastActivityMs={} activeCount={}", opponentName, v.lastActivityMs, activeFights.size()); } catch (Exception ignore) {}
             return v;
         });
         // Probe shard presence once per opponent during combat
@@ -891,9 +930,11 @@ private void startFight(String opponentName)
             String tier = resolvePlayerRank(opponentName, bucket);
             if (tier != null && !tier.isEmpty()) {
                 shardPresence.put(opponentName, Boolean.TRUE);
+				try { log.debug("[Fight] shard presence hit for {} bucket={} tier={}", opponentName, bucket, tier); } catch (Exception ignore) {}
             } else {
                 // No shard hit; mark as absent for now
                 shardPresence.putIfAbsent(opponentName, Boolean.FALSE);
+				try { log.debug("[Fight] shard presence miss for {} bucket={}", opponentName, bucket); } catch (Exception ignore) {}
             }
         } catch (Exception ignore) {}
     }
@@ -925,6 +966,8 @@ private void startFight(String opponentName)
         final String idTokenSafe = dashboardPanel != null ? dashboardPanel.getIdToken() : null;
         final int worldSafe = client.getWorld();
 		final long damageToOpponentSafe; { Long v = damageToOpponent.get(opponentSafe); damageToOpponentSafe = v != null ? v : 0L; }
+		try { log.debug("[Fight] endFightFor outcome={} opp='{}' world={} startTs={} endTs={} startSpell={} endSpell={} multi={} dmgOut={} idTokenPresent={}",
+			result, opponentSafe, worldSafe, startTimeSafe, endTimeSafe, startSpellbookSafe, endSpellbookSafe, wasInMultiSafe, damageToOpponentSafe, (idTokenSafe != null && !idTokenSafe.isEmpty())); } catch (Exception ignore) {}
 
         java.util.concurrent.CompletableFuture.runAsync(() -> {
             try
@@ -1236,6 +1279,13 @@ private void submitMatchResult(String result, long fightEndTime)
 				return true;
 			}
 		}
+		try {
+			StringBuilder sb = new StringBuilder();
+			if (players != null) {
+				for (Player p : players) { String s = null; try { s = p != null ? p.getName() : null; } catch (Exception ignore) {} if (s != null) { if (sb.length() > 0) sb.append(", "); sb.append(s); } }
+			}
+			log.debug("[Fight] isPlayerOpponent: '{}' not found in players=[{}]", name, sb.toString());
+		} catch (Exception ignore) {}
 		return false;
 	}
 	

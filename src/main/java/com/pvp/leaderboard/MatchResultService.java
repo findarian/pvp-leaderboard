@@ -63,8 +63,25 @@ public class MatchResultService
         CompletableFuture<Boolean> overall = new CompletableFuture<>();
         try
         {
+            // Preflight diagnostics to understand why server might reject
+            try {
+                boolean namesOk = (playerId != null && !playerId.trim().isEmpty()) && (opponentId != null && !opponentId.trim().isEmpty());
+                String pLower = (playerId != null) ? playerId.toLowerCase(java.util.Locale.ROOT) : null;
+                String oLower = (opponentId != null) ? opponentId.toLowerCase(java.util.Locale.ROOT) : null;
+                boolean notSelf = (pLower != null && oLower != null) && !pLower.equals(oLower);
+                boolean timeOk = fightStartTs > 0 && fightEndTs > 0 && fightEndTs >= fightStartTs;
+                boolean worldOk = world > 0;
+                log.debug("[Submit] preflight namesOk={} notSelf={} timeOk={} worldOk={} player='{}' opponent='{}' startTs={} endTs={} world={} multi={} dmgOut={}",
+                    namesOk, notSelf, timeOk, worldOk, playerId, opponentId, fightStartTs, fightEndTs, world, wasInMulti, damageToOpponent);
+                if (!namesOk) { log.debug("[Submit][why] Missing player/opponent name"); }
+                else if (!notSelf) { log.debug("[Submit][why] Opponent equals self; likely mis-attribution"); }
+                if (!timeOk) { log.debug("[Submit][why] Invalid timestamps startTs={} endTs={}", fightStartTs, fightEndTs); }
+                if (!worldOk) { log.debug("[Submit][why] Invalid world={}", world); }
+            } catch (Exception ignore) {}
+            String dbgPlayer = (playerId != null ? playerId : "<null>");
+            String dbgOpponent = (opponentId != null ? opponentId : "<null>");
             log.debug("[Submit] begin playerId={} opponentId={} result={} world={} startTs={} endTs={} startSpell={} endSpell={} multi={} acctHash={} authed={}",
-                playerId, opponentId, result, world, fightStartTs, fightEndTs, fightStartSpellbook, fightEndSpellbook, wasInMulti, accountHash, (idToken != null && !idToken.isEmpty()));
+                dbgPlayer, dbgOpponent, result, world, fightStartTs, fightEndTs, fightStartSpellbook, fightEndSpellbook, wasInMulti, accountHash, (idToken != null && !idToken.isEmpty()));
 
             JsonObject body = new JsonObject();
             body.addProperty("player_id", playerId);
