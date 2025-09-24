@@ -112,6 +112,7 @@ private volatile long suppressFightStartUntilMs = 0L;
     private final java.util.concurrent.ConcurrentHashMap<String, Boolean> apiFallbackActive = new java.util.concurrent.ConcurrentHashMap<>();
 	// Damage dealt by the local player to each opponent during the current combat window
 	private final java.util.concurrent.ConcurrentHashMap<String, Long> damageToOpponent = new java.util.concurrent.ConcurrentHashMap<>();
+	private static final boolean DEBUG_HIT_SPLAT_LOGS = false;
 
 	@Override
 	protected void startUp() throws Exception
@@ -388,10 +389,12 @@ private volatile long suppressFightStartUntilMs = 0L;
 				boolean startNow = false;
 				int amt = 0; try { net.runelite.api.Hitsplat hs = hitsplatApplied.getHitsplat(); amt = (hs != null ? hs.getAmount() : 0); } catch (Exception ignore) {}
 				try {
-					String actorName = null; try { actorName = player != null ? player.getName() : null; } catch (Exception ignore) {}
-					String lpInteracting = null; try { lpInteracting = (localPlayer.getInteracting() instanceof Player) ? ((Player)localPlayer.getInteracting()).getName() : null; } catch (Exception ignore) {}
-					String actorInteracting = null; try { actorInteracting = (player != null && player.getInteracting() instanceof Player) ? ((Player)player.getInteracting()).getName() : null; } catch (Exception ignore) {}
-					log.debug("[Hitsplat] actor='{}' amt={} actorIsLocal={} lp->={} actor->={}", actorName, amt, (player == localPlayer), lpInteracting, actorInteracting);
+					if (DEBUG_HIT_SPLAT_LOGS) {
+						String actorName = null; try { actorName = player != null ? player.getName() : null; } catch (Exception ignore) {}
+						String lpInteracting = null; try { lpInteracting = (localPlayer.getInteracting() instanceof Player) ? ((Player)localPlayer.getInteracting()).getName() : null; } catch (Exception ignore) {}
+						String actorInteracting = null; try { actorInteracting = (player != null && player.getInteracting() instanceof Player) ? ((Player)player.getInteracting()).getName() : null; } catch (Exception ignore) {}
+						log.debug("[Hitsplat] actor='{}' amt={} actorIsLocal={} lp->={} actor->={}", actorName, amt, (player == localPlayer), lpInteracting, actorInteracting);
+					}
 				} catch (Exception ignore) {}
 				if (player == localPlayer)
 				{
@@ -413,7 +416,7 @@ private volatile long suppressFightStartUntilMs = 0L;
 					try { if (opponentName != null) { damageFromOpponent.merge(opponentName, (long) amt, Long::sum); } } catch (Exception ignore) {}
 					// Start on inbound when we have a concrete opponent
 					startNow = (opponentName != null);
-					try { log.debug("[Hitsplat] inbound dmg={} opp='{}' startNow={} dmgFromOpp={}", amt, opponentName, startNow, damageFromOpponent); } catch (Exception ignore) {}
+					try { if (DEBUG_HIT_SPLAT_LOGS) { log.debug("[Hitsplat] inbound dmg={} opp='{}' startNow={} dmgFromOpp={}", amt, opponentName, startNow, damageFromOpponent); } } catch (Exception ignore) {}
 				}
 				else
 				{
@@ -426,7 +429,7 @@ private volatile long suppressFightStartUntilMs = 0L;
 						try { damageToOpponent.merge(opponentName, (long) amt, Long::sum); } catch (Exception ignore) {}
 						startNow = true;
 					}
-					try { log.debug("[Hitsplat] outbound dmg={} weAreAttacking={} opp='{}' dmgToOpp={} ", amt, weAreAttacking, opponentName, damageToOpponent.get(opponentName)); } catch (Exception ignore) {}
+					try { if (DEBUG_HIT_SPLAT_LOGS) { log.debug("[Hitsplat] outbound dmg={} weAreAttacking={} opp='{}' dmgToOpp={} ", amt, weAreAttacking, opponentName, damageToOpponent.get(opponentName)); } } catch (Exception ignore) {}
 				}
 
 				// Start/update fights if this hitsplat indicates combat (inbound from attacker or outbound while we are attacking)
@@ -473,12 +476,14 @@ private volatile long suppressFightStartUntilMs = 0L;
 				else if (startNow)
 				{
 					try {
-						StringBuilder sb = new StringBuilder();
-						java.util.List<Player> players = client.getPlayers();
-						if (players != null) {
-							for (Player p : players) { String pn = null; try { pn = p != null ? p.getName() : null; } catch (Exception ignore) {} if (pn != null) { if (sb.length() > 0) sb.append(", "); sb.append(pn); } }
+						if (DEBUG_HIT_SPLAT_LOGS) {
+							StringBuilder sb = new StringBuilder();
+							java.util.List<Player> players = client.getPlayers();
+							if (players != null) {
+								for (Player p : players) { String pn = null; try { pn = p != null ? p.getName() : null; } catch (Exception ignore) {} if (pn != null) { if (sb.length() > 0) sb.append(", "); sb.append(pn); } }
+							}
+							log.debug("[Fight] start rejected opp='{}' validOpp={} playersNow=[{}]", opponentName, validOpp, sb.toString());
 						}
-						log.debug("[Fight] start rejected opp='{}' validOpp={} playersNow=[{}]", opponentName, validOpp, sb.toString());
 					} catch (Exception ignore) {}
 				}
 			}
@@ -921,7 +926,7 @@ private void startFight(String opponentName)
                 return new FightEntry(opponentName, ts, sb, multi, world);
             }
             v.lastActivityMs = System.currentTimeMillis();
-			try { log.debug("[Fight] touch vs={} lastActivityMs={} activeCount={}", opponentName, v.lastActivityMs, activeFights.size()); } catch (Exception ignore) {}
+			try { if (DEBUG_HIT_SPLAT_LOGS) { log.debug("[Fight] touch vs={} lastActivityMs={} activeCount={}", opponentName, v.lastActivityMs, activeFights.size()); } } catch (Exception ignore) {}
             return v;
         });
         // Probe shard presence once per opponent during combat
