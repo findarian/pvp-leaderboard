@@ -1545,18 +1545,20 @@ public class DashboardPanel extends PluginPanel
     {
         try
         {
-            if (useAccount && obj.has("account_rank_index_map"))
+            // New schema: account_rank_info_map { account_hash_sha256: { tier, rank, division, index } }
+            if (useAccount && obj.has("account_rank_info_map"))
             {
-                JsonObject m = obj.getAsJsonObject("account_rank_index_map");
+                JsonObject m = obj.getAsJsonObject("account_rank_info_map");
                 if (m.has(accountHash))
                 {
                     com.google.gson.JsonElement v = m.get(accountHash);
                     return parseShardValue(v);
                 }
             }
-            if (obj.has("name_rank_index_map"))
+            // New schema: name_rank_info_map { canon_name: { tier, rank, division, index } }
+            if (obj.has("name_rank_info_map"))
             {
-                JsonObject m = obj.getAsJsonObject("name_rank_index_map");
+                JsonObject m = obj.getAsJsonObject("name_rank_info_map");
                 if (m.has(canon))
                 {
                     com.google.gson.JsonElement v = m.get(canon);
@@ -1584,6 +1586,26 @@ public class DashboardPanel extends PluginPanel
             {
                 int idx = v.getAsInt();
                 if (idx > 0) return new ShardRank(null, idx);
+            }
+            else if (v.isJsonObject())
+            {
+                JsonObject o = v.getAsJsonObject();
+                int idx = o.has("index") && !o.get("index").isJsonNull() ? o.get("index").getAsInt() : -1;
+                String tier = null;
+                if (o.has("tier") && !o.get("tier").isJsonNull())
+                {
+                    tier = formatTierLabel(o.get("tier").getAsString());
+                }
+                if ((tier == null || tier.isEmpty()))
+                {
+                    String r = o.has("rank") && !o.get("rank").isJsonNull() ? o.get("rank").getAsString() : null;
+                    int d = o.has("division") && !o.get("division").isJsonNull() ? o.get("division").getAsInt() : 0;
+                    if (r != null && !r.isEmpty())
+                    {
+                        tier = r + (d > 0 ? (" " + d) : "");
+                    }
+                }
+                if (idx > 0) return new ShardRank(tier, idx);
             }
         }
         catch (Exception ignore) {}
@@ -2535,6 +2557,7 @@ public class DashboardPanel extends PluginPanel
             // Popup disabled per requirement
         }
     }
+
 
     public void setStatsBucketFromConfig(PvPLeaderboardConfig.RankBucket b)
     {

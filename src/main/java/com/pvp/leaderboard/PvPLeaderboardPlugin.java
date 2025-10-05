@@ -259,15 +259,15 @@ private volatile long suppressFightStartUntilMs = 0L;
     @Subscribe
     public void onMenuOptionClicked(MenuOptionClicked event)
     {
-        if (!config.enablePvpLookupMenu()) {
-            return;
-        }
-        if (event.getMenuAction() != MenuAction.RUNELITE_PLAYER) {
-            return;
-        }
-        if (!"pvp lookup".equals(event.getMenuOption())) {
-            return;
-        }
+		if (!config.enablePvpLookupMenu()) {
+			return;
+		}
+		if (event.getMenuAction() != MenuAction.RUNELITE_PLAYER) {
+			return;
+		}
+		if (!"pvp lookup".equals(event.getMenuOption())) {
+			return;
+		}
 
         String target = event.getMenuTarget();
         if (target == null) {
@@ -301,7 +301,7 @@ private volatile long suppressFightStartUntilMs = 0L;
             }
         } catch (Exception ignore) {}
 
-        // Force overlay to fetch and display the player's rank via shards
+		// Force overlay to fetch and display the player's rank via shards
         try {
             if (rankOverlay != null && playerName != null && !playerName.isEmpty())
             {
@@ -309,7 +309,7 @@ private volatile long suppressFightStartUntilMs = 0L;
             }
         } catch (Exception ignore) {}
 
-        // Open plugin side panel
+		// Open plugin side panel
         if (clientToolbar != null && navButton != null) {
             SwingUtilities.invokeLater(() -> clientToolbar.openPanel(navButton));
         }
@@ -330,12 +330,31 @@ private volatile long suppressFightStartUntilMs = 0L;
 				if (client.getLocalPlayer() != null && dashboardPanel != null)
 				{
 					String self = client.getLocalPlayer().getName();
-					try { log.debug("[Login] Logged in as '{}' world={}", self, client.getWorld()); } catch (Exception ignore) {}
-					dashboardPanel.lookupPlayerFromRightClick(self);
+					// try { log.debug("[Login] Logged in as '{}' world={}", (self != null ? self : "Unknown"), client.getWorld()); } catch (Exception ignore) {}
+					if (self != null && !self.trim().isEmpty()) {
+						dashboardPanel.lookupPlayerFromRightClick(self);
+					}
                     // Preload account hash linkage for self so overall lookups use account shard immediately
                     try { dashboardPanel.preloadSelfRankNumbers(self); } catch (Exception ignore) {}
-                    // Ensure overlay fetches self rank immediately for the currently selected bucket
-                    try { if (rankOverlay != null) rankOverlay.scheduleSelfRankRefresh(0L); } catch (Exception ignore) {}
+					// Schedule a slight delay to avoid null-name timing on rapid hops
+					try { if (rankOverlay != null) rankOverlay.scheduleSelfRankRefresh(250L); } catch (Exception ignore) {}
+				}
+				else
+				{
+					// LocalPlayer not ready yet; defer initialization slightly
+					try {
+						scheduler.schedule(() -> {
+							try {
+								if (client != null && client.getLocalPlayer() != null) {
+									String selfLater = client.getLocalPlayer().getName();
+									if (selfLater != null && !selfLater.trim().isEmpty()) {
+										try { if (dashboardPanel != null) dashboardPanel.lookupPlayerFromRightClick(selfLater); } catch (Exception ignore2) {}
+										try { if (rankOverlay != null) rankOverlay.scheduleSelfRankRefresh(0L); } catch (Exception ignore2) {}
+									}
+								}
+							} catch (Exception ignore2) {}
+						}, 500L, java.util.concurrent.TimeUnit.MILLISECONDS);
+					} catch (Exception ignore) {}
 				}
 			}
 			catch (Exception ignore) {}
@@ -352,7 +371,15 @@ private volatile long suppressFightStartUntilMs = 0L;
 				if (rankOverlay != null) {
 					rankOverlay.resetLookupStateOnWorldHop();
 				}
-				try { log.debug("[Fight] scene change: {} (fight preserved)", gameStateChanged.getGameState()); } catch (Exception ignore) {}
+				// try { log.debug("[Fight] scene change: {} (fight preserved)", gameStateChanged.getGameState()); } catch (Exception ignore) {}
+				// Nudge self rank refresh after a short delay so overlay repopulates post-hop
+				try {
+					if (rankOverlay != null) {
+						scheduler.schedule(() -> {
+							try { rankOverlay.scheduleSelfRankRefresh(0L); } catch (Exception ignore) {}
+						}, 600L, java.util.concurrent.TimeUnit.MILLISECONDS);
+					}
+				} catch (Exception ignore) {}
 			} catch (Exception ignore) {}
 		}
 	}

@@ -44,6 +44,7 @@ public class RankOverlay extends Overlay
     private long lastScheduleMs = 0L;
     private volatile boolean selfRankAttempted = false;
     private volatile long nextSelfRankAllowedAtMs = 0L;
+    // private long lastSelfLogMs = 0L; // debug disabled
     private static final long RANK_CACHE_TTL_MS = 60L * 60L * 1000L;
     private static final long NAME_RETRY_BACKOFF_MS = 60L * 60L * 1000L;
     private final Map<String, CacheEntry> nameRankCache = Collections.synchronizedMap(
@@ -87,6 +88,7 @@ public class RankOverlay extends Overlay
         long now = System.currentTimeMillis();
         nextSelfRankAllowedAtMs = now + Math.max(0L, delayMs);
         selfRankAttempted = false;
+        // try { log.debug("[Overlay] scheduleSelfRankRefresh delayMs={} nextAllowedAtMs={}", delayMs, nextSelfRankAllowedAtMs); } catch (Exception ignore) {}
         // Do not clear the currently displayed self rank; keep it while the refresh happens
         // to avoid visual flicker during combat or after submissions.
         try
@@ -121,6 +123,7 @@ public class RankOverlay extends Overlay
             lastScheduleMs = 0L;
             selfRankAttempted = false;
             nextSelfRankAllowedAtMs = 0L;
+            // try { log.debug("[Overlay] reset on world hop; preservedSelf={} hasRank={}", selfName, (selfRank != null)); } catch (Exception ignore) {}
         }
         catch (Exception ignore) {}
     }
@@ -283,9 +286,10 @@ public class RankOverlay extends Overlay
         }
 
         // Always prioritize fetching the local player's rank first, but only once until explicitly refreshed
-        if (config.showOwnRank() && client.getLocalPlayer() != null && client.getLocalPlayer().getName() != null)
+        String localName = null; try { localName = client.getLocalPlayer() != null ? client.getLocalPlayer().getName() : null; } catch (Exception ignore) {}
+        if (config.showOwnRank() && localName != null)
         {
-            String selfName = client.getLocalPlayer().getName();
+            String selfName = localName;
             long now = System.currentTimeMillis();
             if (!selfRankAttempted && now >= nextSelfRankAllowedAtMs)
             {
@@ -327,6 +331,24 @@ public class RankOverlay extends Overlay
                     });
                 }
             }
+            else
+            {
+                // debug disabled: self fetch gated logs
+                // long nowMs = System.currentTimeMillis();
+                // if (nowMs - lastSelfLogMs >= 1000L) {
+                //     try { log.debug("[Overlay] self fetch gated attempted={} waitMs={}", selfRankAttempted, Math.max(0L, nextSelfRankAllowedAtMs - nowMs)); } catch (Exception ignore) {}
+                //     lastSelfLogMs = nowMs;
+                // }
+            }
+        }
+        else
+        {
+            // debug disabled: local name null logs
+            // long nowMs = System.currentTimeMillis();
+            // if (nowMs - lastSelfLogMs >= 1000L) {
+            //     try { log.debug("[Overlay] local player name null; skipping self schedule"); } catch (Exception ignore) {}
+            //     lastSelfLogMs = nowMs;
+            // }
         }
 
         java.util.HashSet<String> present = new java.util.HashSet<>();
