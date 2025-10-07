@@ -1399,6 +1399,17 @@ public class DashboardPanel extends PluginPanel
         {
             String canon = canonName(playerName);
             boolean useAccount = accountHash != null && !accountHash.isEmpty();
+            String accountKey = null;
+            if (useAccount)
+            {
+                try {
+                    java.security.MessageDigest md = java.security.MessageDigest.getInstance("SHA-256");
+                    byte[] digest = md.digest(String.valueOf(accountHash).getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                    StringBuilder sb = new StringBuilder();
+                    for (byte b : digest) { String hx = Integer.toHexString(b & 0xFF); if (hx.length() == 1) sb.append('0'); sb.append(hx); }
+                    accountKey = sb.toString();
+                } catch (Exception ignore) { accountKey = accountHash; }
+            }
             // Negative cache check for name-only lookups. Bypass when using account hash (self),
             // so self lookups are not blocked by name-level negative cache.
             if (!useAccount)
@@ -1427,7 +1438,7 @@ public class DashboardPanel extends PluginPanel
             ShardEntry cached = shardCache.get(cacheKey);
             if (cached != null && now - cached.timestamp < SHARD_CACHE_EXPIRY_MS)
             {
-                ShardRank sr = extractShardRank(cached.payload, useAccount, accountHash, canon);
+                ShardRank sr = extractShardRank(cached.payload, useAccount, accountKey, canon);
                 if (sr != null) return sr;
                 // Fresh shard cached and name not present → do not refetch until TTL expiry
                 // try { log.info("[ShardCache] fresh no_fetch key={} ageMs={} name={}", cacheKey, (now - cached.timestamp), canon); } catch (Exception ignore) {}
@@ -1451,7 +1462,7 @@ public class DashboardPanel extends PluginPanel
                 cached = shardCache.get(cacheKey);
                 if (cached != null && now - cached.timestamp < SHARD_CACHE_EXPIRY_MS)
                 {
-                    ShardRank sr = extractShardRank(cached.payload, useAccount, accountHash, canon);
+                    ShardRank sr = extractShardRank(cached.payload, useAccount, accountKey, canon);
                     if (sr != null) return sr;
                     // try { log.info("[ShardCache] fresh no_fetch (lock) key={} ageMs={} name={}", cacheKey, (now - cached.timestamp), canon); } catch (Exception ignore) {}
                     return null;
@@ -1492,7 +1503,7 @@ public class DashboardPanel extends PluginPanel
             shardCache.put(cacheKey, new ShardEntry(obj, now));
             shardThrottle.put(cacheKey, now);
                 shardFailUntil.remove(cacheKey);
-                ShardRank out = extractShardRank(obj, useAccount, accountHash, canon);
+                ShardRank out = extractShardRank(obj, useAccount, accountKey, canon);
                 // long dtMs = (System.nanoTime() - t0) / 1_000_000L;
                 // try { log.info("[ShardFetch] url={} status={} dtMs={} found={} ", urlStr, status, dtMs, (out != null)); } catch (Exception ignore) {}
                 if (out == null)

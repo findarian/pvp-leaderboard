@@ -45,6 +45,10 @@ public class RankOverlay extends Overlay
     private volatile boolean selfRankAttempted = false;
     private volatile long nextSelfRankAllowedAtMs = 0L;
     // private long lastSelfLogMs = 0L; // debug disabled
+    private static final boolean DEBUG_OVERLAY_LOGS = false;
+    private long lastSelfStateLogMs = 0L;
+    // Event-driven self refresh: only attempt when explicitly requested (login/hop/bucket/manual)
+    private volatile long selfRefreshRequestedAtMs = 0L;
     private static final long RANK_CACHE_TTL_MS = 60L * 60L * 1000L;
     private static final long NAME_RETRY_BACKOFF_MS = 60L * 60L * 1000L;
     private final Map<String, CacheEntry> nameRankCache = Collections.synchronizedMap(
@@ -88,7 +92,8 @@ public class RankOverlay extends Overlay
         long now = System.currentTimeMillis();
         nextSelfRankAllowedAtMs = now + Math.max(0L, delayMs);
         selfRankAttempted = false;
-        // try { log.debug("[Overlay] scheduleSelfRankRefresh delayMs={} nextAllowedAtMs={}", delayMs, nextSelfRankAllowedAtMs); } catch (Exception ignore) {}
+        selfRefreshRequestedAtMs = nextSelfRankAllowedAtMs;
+        try { if (DEBUG_OVERLAY_LOGS) log.debug("[Overlay] scheduleSelfRankRefresh delayMs={} nextAllowedAtMs={}", delayMs, nextSelfRankAllowedAtMs); } catch (Exception ignore) {}
         // Do not clear the currently displayed self rank; keep it while the refresh happens
         // to avoid visual flicker during combat or after submissions.
         try
@@ -110,7 +115,22 @@ public class RankOverlay extends Overlay
             String selfName = null; String selfRank = null;
             try {
                 selfName = (client != null && client.getLocalPlayer() != null) ? client.getLocalPlayer().getName() : null;
-                if (selfName != null) selfRank = displayedRanks.get(selfName);
+                if (selfName != null)
+                {
+                    selfRank = displayedRanks.get(selfName);
+                    if (selfRank == null)
+                    {
+                        // Also try restoring from the 1h cache if available
+                        try {
+                            String ck = cacheKeyFor(selfName);
+                            CacheEntry ce = nameRankCache.get(ck);
+                            if (ce != null && (System.currentTimeMillis() - ce.ts) < RANK_CACHE_TTL_MS)
+                            {
+                                selfRank = ce.rank;
+                            }
+                        } catch (Exception ignore) {}
+                    }
+                }
             } catch (Exception ignore) {}
             displayedRanks.clear();
             if (selfName != null && selfRank != null) {
@@ -123,7 +143,7 @@ public class RankOverlay extends Overlay
             lastScheduleMs = 0L;
             selfRankAttempted = false;
             nextSelfRankAllowedAtMs = 0L;
-            // try { log.debug("[Overlay] reset on world hop; preservedSelf={} hasRank={}", selfName, (selfRank != null)); } catch (Exception ignore) {}
+            try { if (DEBUG_OVERLAY_LOGS) log.debug("[Overlay] reset on world hop; preservedSelf={} hasRank={}", selfName, (selfRank != null)); } catch (Exception ignore) {}
         }
         catch (Exception ignore) {}
     }
@@ -279,24 +299,32 @@ public class RankOverlay extends Overlay
             attemptedLookup.clear();
             attemptedAtMs.clear();
             lastBucketKey = currentBucket;
+            try { if (DEBUG_OVERLAY_LOGS) log.debug("[Overlay] bucket changed to {} → clear transient state", currentBucket); } catch (Exception ignore) {}
             // Allow self lookup again immediately on bucket change and clear cached overlay values for self
             selfRankAttempted = false;
             nextSelfRankAllowedAtMs = 0L;
             // Keep nameRankCache (1h TTL per bucket); do not purge here
         }
 
-        // Always prioritize fetching the local player's rank first, but only once until explicitly refreshed
+        // Always prioritize fetching the local player's rank first, but only when explicitly requested
         String localName = null; try { localName = client.getLocalPlayer() != null ? client.getLocalPlayer().getName() : null; } catch (Exception ignore) {}
-        if (config.showOwnRank() && localName != null)
+        if (config.showOwnRank() && localName != null && selfRefreshRequestedAtMs > 0L)
         {
             String selfName = localName;
             long now = System.currentTimeMillis();
-            if (!selfRankAttempted && now >= nextSelfRankAllowedAtMs)
+            // Wait until the requested time to avoid per-frame checks
+            if (now < selfRefreshRequestedAtMs)
+            {
+                // defer until request time
+            }
+            else if (!selfRankAttempted && now >= nextSelfRankAllowedAtMs)
             {
                 if (fetchInFlight.putIfAbsent(selfName, Boolean.TRUE) == null)
                 {
                     selfRankAttempted = true;
                     log.debug("[Overlay] fetch self first name={} bucket={}", selfName, bucketKey(config.rankBucket()));
+                    // consume request so we do this only once until next explicit schedule
+                    selfRefreshRequestedAtMs = 0L;
                     java.util.concurrent.CompletableFuture.supplyAsync(() -> {
                         try {
                             return plugin != null ? plugin.resolvePlayerRankNoClient(selfName, bucketKey(config.rankBucket()), true) : null;
@@ -312,16 +340,17 @@ public class RankOverlay extends Overlay
                                 {
                                     displayedRanks.put(selfName, rank);
                                     try { nameRankCache.put(cacheKeyFor(selfName), new CacheEntry(rank, System.currentTimeMillis())); } catch (Exception ignore) {}
-                                    if (loggedFetch.putIfAbsent(selfName, Boolean.TRUE) == null)
-                                    {
-                                        log.debug("Fetched rank for {}: {}", selfName, rank);
-                                    }
+                                    if (loggedFetch.putIfAbsent(selfName, Boolean.TRUE) == null) { log.debug("Fetched rank for {}: {}", selfName, rank); }
                                 }
                                 // If override is active, keep API-derived value; do not clear the override here
+                                // Set long cooldown so self fetch doesn't re-run until cache TTL (1h)
+                                nextSelfRankAllowedAtMs = System.currentTimeMillis() + RANK_CACHE_TTL_MS;
                             }
                             else if (loggedFetch.putIfAbsent(selfName, Boolean.TRUE) == null)
                             {
                                 log.info("No rank found for {} (no retry)", selfName);
+                                // Short cooldown to avoid tight loop on temporary shard miss
+                                nextSelfRankAllowedAtMs = System.currentTimeMillis() + 10_000L;
                             }
                         }
                         finally
@@ -333,22 +362,24 @@ public class RankOverlay extends Overlay
             }
             else
             {
-                // debug disabled: self fetch gated logs
-                // long nowMs = System.currentTimeMillis();
-                // if (nowMs - lastSelfLogMs >= 1000L) {
-                //     try { log.debug("[Overlay] self fetch gated attempted={} waitMs={}", selfRankAttempted, Math.max(0L, nextSelfRankAllowedAtMs - nowMs)); } catch (Exception ignore) {}
-                //     lastSelfLogMs = nowMs;
-                // }
+                long nowMs = System.currentTimeMillis();
+                long waitMs = Math.max(0L, nextSelfRankAllowedAtMs - nowMs);
+                // Only log when there is an actual wait; suppress noisy logs when waitMs == 0
+                if (DEBUG_OVERLAY_LOGS && waitMs > 0 && nowMs - lastSelfStateLogMs >= 1000L)
+                {
+                    try { log.debug("[Overlay] self fetch gated attempted={} waitMs={}", selfRankAttempted, waitMs); } catch (Exception ignore) {}
+                    lastSelfStateLogMs = nowMs;
+                }
             }
         }
         else
         {
-            // debug disabled: local name null logs
-            // long nowMs = System.currentTimeMillis();
-            // if (nowMs - lastSelfLogMs >= 1000L) {
-            //     try { log.debug("[Overlay] local player name null; skipping self schedule"); } catch (Exception ignore) {}
-            //     lastSelfLogMs = nowMs;
-            // }
+            long nowMs = System.currentTimeMillis();
+            if (DEBUG_OVERLAY_LOGS && nowMs - lastSelfStateLogMs >= 1000L)
+            {
+                try { log.debug("[Overlay] local player name null; skipping self schedule"); } catch (Exception ignore) {}
+                lastSelfStateLogMs = nowMs;
+            }
         }
 
         java.util.HashSet<String> present = new java.util.HashSet<>();
@@ -375,7 +406,7 @@ public class RankOverlay extends Overlay
             String playerName = player.getName();
             present.add(playerName);
             String cachedRank = displayedRanks.get(playerName);
-            // Serve from 1-hour cache if available
+            // Serve from 1-hour cache if available (avoid null rank flicker)
             try
             {
                 String ck = cacheKeyFor(playerName);
@@ -393,6 +424,10 @@ public class RankOverlay extends Overlay
             boolean apiActive = apiUntil != null && System.currentTimeMillis() < apiUntil;
             if (cachedRank == null && !apiActive)
             {
+                if (player == client.getLocalPlayer() && DEBUG_OVERLAY_LOGS)
+                {
+                    try { log.debug("[Overlay] self missing rank; inFlight={} attempted={} cacheHit={} apiActive={}", fetchInFlight.containsKey(playerName), attemptedLookup.containsKey(playerName), nameRankCache.containsKey(cacheKeyFor(playerName)), apiActive); } catch (Exception ignore) {}
+                }
                 Long firstAttempt = attemptedAtMs.get(playerName);
                 long now = System.currentTimeMillis();
                 if (firstAttempt != null && now - firstAttempt < NAME_RETRY_BACKOFF_MS) {
@@ -432,6 +467,14 @@ public class RankOverlay extends Overlay
                 {
                     attemptedLookup.put(playerName, Boolean.TRUE);
                     attemptedAtMs.put(playerName, now);
+                    // Keep last known rank visible during fetch to avoid disappearing text/icon
+                    try {
+                        String ck = cacheKeyFor(playerName);
+                        CacheEntry ce = nameRankCache.get(ck);
+                        if (ce != null && (System.currentTimeMillis() - ce.ts) < RANK_CACHE_TTL_MS) {
+                            displayedRanks.put(playerName, ce.rank);
+                        }
+                    } catch (Exception ignore) {}
                     // Only log once per name per bucket to avoid spam in crowded areas
                     if (loggedFetch.putIfAbsent(playerName, Boolean.TRUE) == null)
                     {
@@ -465,6 +508,14 @@ public class RankOverlay extends Overlay
                             else if (loggedFetch.putIfAbsent(playerName, Boolean.TRUE) == null)
                             {
                                 log.info("No rank found for {} (no retry)", playerName);
+                                // Preserve last known rank on miss to avoid disappearing overlay in crowded areas
+                                try {
+                                    String ck = cacheKeyFor(playerName);
+                                    CacheEntry ce = nameRankCache.get(ck);
+                                    if (ce != null && (System.currentTimeMillis() - ce.ts) < RANK_CACHE_TTL_MS) {
+                                        displayedRanks.put(playerName, ce.rank);
+                                    }
+                                } catch (Exception ignore) {}
                             }
                         }
                         finally

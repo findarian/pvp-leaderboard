@@ -371,7 +371,7 @@ private volatile long suppressFightStartUntilMs = 0L;
 				if (rankOverlay != null) {
 					rankOverlay.resetLookupStateOnWorldHop();
 				}
-				// try { log.debug("[Fight] scene change: {} (fight preserved)", gameStateChanged.getGameState()); } catch (Exception ignore) {}
+				try { log.debug("[Fight] scene change: {} (fight preserved)", gameStateChanged.getGameState()); } catch (Exception ignore) {}
 				// Nudge self rank refresh after a short delay so overlay repopulates post-hop
 				try {
 					if (rankOverlay != null) {
