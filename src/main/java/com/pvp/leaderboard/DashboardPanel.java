@@ -155,6 +155,15 @@ public class DashboardPanel extends PluginPanel
     private PvPLeaderboardPlugin plugin; 
     // Prevent repeated API attempts when network/DNS is down
     private volatile long apiDownUntilMs = 0L;
+    // Cache for per-(player,bucket) rank number lookups (API/shard fast-path)
+    private static final long RANK_NUMBER_CACHE_TTL_MS = 10L * 60L * 1000L; // 10 minutes
+    private static class RankNumberCache { final int rank; final long ts; RankNumberCache(int r, long t) { this.rank = r; this.ts = t; } }
+    private final ConcurrentHashMap<String, RankNumberCache> rankNumberCache = new ConcurrentHashMap<>();
+    // Cache for overall world rank (can be cached longer; backend TTL ~24h)
+    private static final long WORLD_RANK_CACHE_TTL_MS = 12L * 60L * 60L * 1000L; // 12 hours
+    private static class WorldRankCache { final int worldRank; final long ts; WorldRankCache(int r, long t) { this.worldRank = r; this.ts = t; } }
+    private final ConcurrentHashMap<String, WorldRankCache> worldRankCache = new ConcurrentHashMap<>();
+    private static final String API_BASE = "https://kekh0x6kfk.execute-api.us-east-1.amazonaws.com/prod";
     
     private String canonName(String name) {
         return String.valueOf(name != null ? name : "").trim().replaceAll("\\s+", " ").toLowerCase();
@@ -187,6 +196,13 @@ public class DashboardPanel extends PluginPanel
     {
         String display = normalizeDisplayName(name);
         return display; // keep spaces intact for player_id; URL-encoding will handle safely
+    }
+
+    private static String toApiBucket(String bucket)
+    {
+        if (bucket == null || bucket.trim().isEmpty()) return "overall.weighted";
+        String b = bucket.toLowerCase();
+        return "overall".equals(b) ? "overall.weighted" : b;
     }
     
     public DashboardPanel(PvPLeaderboardConfig config, ConfigManager configManager, PvPLeaderboardPlugin plugin, OkHttpClient httpClient, Gson gson)
@@ -1180,6 +1196,27 @@ public class DashboardPanel extends PluginPanel
                     }.execute();
                 }
                 
+                JsonObject bucketsObj = null;
+                try {
+                    if (stats.has("buckets") && stats.get("buckets").isJsonObject())
+                    {
+                        bucketsObj = stats.getAsJsonObject("buckets");
+                    }
+                } catch (Exception ignore) {}
+
+                String[] bucketKeys = {"nh", "veng", "multi", "dmm"};
+                for (String bucketKey : bucketKeys)
+                {
+                    JsonObject bucketObj = null;
+                    try {
+                        if (bucketsObj != null && bucketsObj.has(bucketKey) && bucketsObj.get(bucketKey).isJsonObject())
+                        {
+                            bucketObj = bucketsObj.getAsJsonObject(bucketKey);
+                        }
+                    } catch (Exception ignore) {}
+                    applyBucketStatsFromUser(playerName, bucketKey, bucketObj);
+                }
+
                 return null;
             }
         };
@@ -1193,7 +1230,7 @@ public class DashboardPanel extends PluginPanel
         String playerName = playerNameLabel.getText();
         if (playerName == null || playerName.equals("Player Name")) return;
         
-        String[] buckets = {"nh", "veng", "multi", "dmm"};
+                String[] buckets = {"overall", "nh", "veng", "multi", "dmm"};
         for (String bucket : buckets)
         {
             JsonArray items = new JsonArray();
@@ -1272,14 +1309,158 @@ public class DashboardPanel extends PluginPanel
     
     public int getRankNumberFromLeaderboard(String playerName, String bucket)
     {
-        ShardRank sr = getRankTupleFromShard(playerName, (lastLoadedAccountHash != null ? lastLoadedAccountHash : null), bucket);
-        return sr != null ? sr.rank : -1;
+        try
+        {
+            String canonBucket = bucket == null ? "overall" : bucket.toLowerCase();
+            String playerKey = normalizeDisplayName(playerName);
+            String cacheKey = (canonBucket + "|" + playerKey);
+            // For overall, prefer world rank via /user; do not use shards
+            if ("overall".equals(canonBucket))
+            {
+                // Use acct_sha when available for self; else use player name
+                String acctSha = null;
+                try {
+                    if (lastLoadedAccountHash != null && !lastLoadedAccountHash.isEmpty()) {
+                        acctSha = generateAccountSha(lastLoadedAccountHash);
+                    }
+                } catch (Exception ignore) {}
+                int wr = getWorldRank(playerKey, acctSha);
+                return wr > 0 ? wr : -1;
+            }
+            // For per-bucket, try shard via account when available
+            int cached = getCachedRankNumber(cacheKey);
+            if (cached > 0) return cached;
+            ShardRank sr = getRankTupleFromShard(playerName, (lastLoadedAccountHash != null ? lastLoadedAccountHash : null), canonBucket);
+            if (sr != null && sr.rank > 0)
+            {
+                putCachedRankNumber(cacheKey, sr.rank);
+                return sr.rank;
+            }
+            // Fallback to API rank endpoint
+            int apiRank = fetchRankIndexFromApi(playerKey, canonBucket);
+            if (apiRank > 0) {
+                putCachedRankNumber(cacheKey, apiRank);
+                return apiRank;
+            }
+        }
+        catch (Exception ignore) {}
+        return -1;
     }
 
     public int getRankNumberByName(String playerName, String bucket)
     {
-        ShardRank sr = getRankTupleFromShard(playerName, null, bucket);
-        return sr != null ? sr.rank : -1;
+        try
+        {
+            String canonBucket = bucket == null ? "overall" : bucket.toLowerCase();
+            String playerKey = normalizeDisplayName(playerName);
+            String cacheKey = (canonBucket + "|" + playerKey);
+            // For overall, prefer world rank via /user; do not use shards
+            if ("overall".equals(canonBucket))
+            {
+                int wr = getWorldRank(playerKey, null);
+                return wr > 0 ? wr : -1;
+            }
+            // Name-only lookups: skip shard (no acct_sha) and use API directly
+            int cached = getCachedRankNumber(cacheKey);
+            if (cached > 0) return cached;
+            int apiRank = fetchRankIndexFromApi(playerKey, canonBucket);
+            if (apiRank > 0) {
+                putCachedRankNumber(cacheKey, apiRank);
+                return apiRank;
+            }
+        }
+        catch (Exception ignore) {}
+        return -1;
+    }
+
+    private void applyBucketStatsFromUser(String playerName, String bucketKey, JsonObject bucketObj)
+    {
+        try
+        {
+            if (bucketObj == null)
+            {
+                SwingUtilities.invokeLater(() -> setBucketBar(bucketKey, "—", 0, 0));
+                return;
+            }
+
+            String rankLabel = null;
+            int division = 0;
+            double pct = 0.0;
+
+            if (bucketObj.has("mmr") && !bucketObj.get("mmr").isJsonNull())
+            {
+                double mmr = bucketObj.get("mmr").getAsDouble();
+                RankInfo ri = rankLabelAndProgressFromMMR(mmr);
+                if (ri != null)
+                {
+                    rankLabel = ri.rank;
+                    division = ri.division;
+                    pct = ri.progress;
+                }
+            }
+
+            if (bucketObj.has("rank_progress") && bucketObj.get("rank_progress").isJsonObject())
+            {
+                try
+                {
+                    JsonObject rp = bucketObj.getAsJsonObject("rank_progress");
+                    if (rp.has("progress_to_next_rank_pct") && !rp.get("progress_to_next_rank_pct").isJsonNull())
+                    {
+                        pct = Math.max(0.0, Math.min(100.0, rp.get("progress_to_next_rank_pct").getAsDouble()));
+                    }
+                }
+                catch (Exception ignore) {}
+            }
+
+            if ((rankLabel == null || rankLabel.isEmpty()) && bucketObj.has("rank") && !bucketObj.get("rank").isJsonNull())
+            {
+                String formatted = formatTierLabel(bucketObj.get("rank").getAsString());
+                String[] parts = formatted.split(" ");
+                rankLabel = parts.length > 0 ? parts[0] : formatted;
+                if (parts.length > 1)
+                {
+                    try { division = Integer.parseInt(parts[1]); } catch (Exception ignore) {}
+                }
+            }
+
+            if (bucketObj.has("division") && !bucketObj.get("division").isJsonNull())
+            {
+                try { division = bucketObj.get("division").getAsInt(); } catch (Exception ignore) {}
+            }
+
+            final String resolvedRank = (rankLabel != null && !rankLabel.isEmpty()) ? rankLabel : "—";
+            final int resolvedDivision = division;
+            final double resolvedPct = Math.max(0.0, Math.min(100.0, pct));
+
+            SwingUtilities.invokeLater(() -> setBucketBar(bucketKey, resolvedRank, resolvedDivision, resolvedPct));
+
+            if (!"—".equals(resolvedRank))
+            {
+                new SwingWorker<Integer, Void>()
+                {
+                    @Override
+                    protected Integer doInBackground() throws Exception
+                    {
+                        return getRankNumberFromLeaderboard(playerName, bucketKey);
+                    }
+
+                    @Override
+                    protected void done()
+                    {
+                        try
+                        {
+                            int rankNumber = get();
+                            if (rankNumber > 0)
+                            {
+                                setBucketBarWithRank(bucketKey, resolvedRank, resolvedDivision, resolvedPct, rankNumber);
+                            }
+                        }
+                        catch (Exception ignore) {}
+                    }
+                }.execute();
+            }
+        }
+        catch (Exception ignore) {}
     }
 
     public String getTierLabelFromLeaderboard(String playerName, String bucket)
@@ -1290,8 +1471,17 @@ public class DashboardPanel extends PluginPanel
 
     public String getTierLabelByName(String playerName, String bucket)
     {
+        // Name-only: shard is skipped; attempt API when needed
+        String canonBucket = bucket == null ? "overall" : bucket.toLowerCase();
+        if ("overall".equals(canonBucket))
+        {
+            // For overall, tier/division still computed from MMR via profile fetch when needed
+            // Fallback to existing API calls elsewhere
+        }
         ShardRank sr = getRankTupleFromShard(playerName, null, bucket);
-        return sr != null ? sr.tier : null;
+        if (sr != null && sr.tier != null) return sr.tier;
+        // Fallback to API for tier/rank name when shard miss
+        try { return fetchSelfTierFromApi(playerName, bucket); } catch (Exception ignore) { return null; }
     }
 
     // Fallback for self: fetch tier via API when shard rank is missing
@@ -1397,40 +1587,23 @@ public class DashboardPanel extends PluginPanel
         // long t0 = System.nanoTime();
         try
         {
-            String canon = canonName(playerName);
             boolean useAccount = accountHash != null && !accountHash.isEmpty();
-            String accountKey = null;
-            if (useAccount)
-            {
-                try {
-                    java.security.MessageDigest md = java.security.MessageDigest.getInstance("SHA-256");
-                    byte[] digest = md.digest(String.valueOf(accountHash).getBytes(java.nio.charset.StandardCharsets.UTF_8));
-                    StringBuilder sb = new StringBuilder();
-                    for (byte b : digest) { String hx = Integer.toHexString(b & 0xFF); if (hx.length() == 1) sb.append('0'); sb.append(hx); }
-                    accountKey = sb.toString();
-                } catch (Exception ignore) { accountKey = accountHash; }
-            }
-            // Negative cache check for name-only lookups. Bypass when using account hash (self),
-            // so self lookups are not blocked by name-level negative cache.
             if (!useAccount)
             {
-                try
-                {
-                    String missKey = (bucket == null ? "overall" : bucket.toLowerCase()) + "|" + canon;
-                    Long until = missingPlayerUntilMs.get(missKey);
-                    if (until != null && System.currentTimeMillis() < until)
-                    {
-                        return null;
-                    }
-                }
-                catch (Exception ignore) {}
+                // Name-based shards are not reliable; skip shard and use API instead
+                return null;
             }
-            // Always shard by player name prefix for file selection, even when using account lookups
-            if (canon == null || canon.isEmpty()) return null;
-            String shard = canon.substring(0, Math.min(2, canon.length())).toLowerCase();
+            String accountKey;
+            try {
+                accountKey = generateAccountSha(accountHash);
+            } catch (Exception e) {
+                accountKey = accountHash; // fallback
+            }
+            if (accountKey == null || accountKey.length() < 2) return null;
             String dir = (bucket == null || bucket.trim().isEmpty() || "overall".equalsIgnoreCase(bucket))
                 ? "overall"
                 : bucket.toLowerCase();
+            String shard = accountKey.substring(0, 2).toLowerCase();
             String urlStr = "https://devsecopsautomated.com/rank_idx/" + dir + "/" + shard + ".json";
 
             String cacheKey = dir + "/" + shard;
@@ -1438,10 +1611,9 @@ public class DashboardPanel extends PluginPanel
             ShardEntry cached = shardCache.get(cacheKey);
             if (cached != null && now - cached.timestamp < SHARD_CACHE_EXPIRY_MS)
             {
-                ShardRank sr = extractShardRank(cached.payload, useAccount, accountKey, canon);
+                ShardRank sr = extractShardRank(cached.payload, useAccount, accountKey, null);
                 if (sr != null) return sr;
-                // Fresh shard cached and name not present → do not refetch until TTL expiry
-                // try { log.info("[ShardCache] fresh no_fetch key={} ageMs={} name={}", cacheKey, (now - cached.timestamp), canon); } catch (Exception ignore) {}
+                // Fresh shard cached and account not present → do not refetch until TTL expiry
                 return null;
             }
 
@@ -1462,9 +1634,8 @@ public class DashboardPanel extends PluginPanel
                 cached = shardCache.get(cacheKey);
                 if (cached != null && now - cached.timestamp < SHARD_CACHE_EXPIRY_MS)
                 {
-                    ShardRank sr = extractShardRank(cached.payload, useAccount, accountKey, canon);
+                    ShardRank sr = extractShardRank(cached.payload, useAccount, accountKey, null);
                     if (sr != null) return sr;
-                    // try { log.info("[ShardCache] fresh no_fetch (lock) key={} ageMs={} name={}", cacheKey, (now - cached.timestamp), canon); } catch (Exception ignore) {}
                     return null;
                 }
 
@@ -1503,12 +1674,12 @@ public class DashboardPanel extends PluginPanel
             shardCache.put(cacheKey, new ShardEntry(obj, now));
             shardThrottle.put(cacheKey, now);
                 shardFailUntil.remove(cacheKey);
-                ShardRank out = extractShardRank(obj, useAccount, accountKey, canon);
+                ShardRank out = extractShardRank(obj, useAccount, accountKey, null);
                 // long dtMs = (System.nanoTime() - t0) / 1_000_000L;
                 // try { log.info("[ShardFetch] url={} status={} dtMs={} found={} ", urlStr, status, dtMs, (out != null)); } catch (Exception ignore) {}
                 if (out == null)
                 {
-                    try { missingPlayerUntilMs.put((dir + "|" + canon), System.currentTimeMillis() + MISSING_PLAYER_BACKOFF_MS); } catch (Exception ignore) {}
+                    try { missingPlayerUntilMs.put((dir + "|" + accountKey), System.currentTimeMillis() + MISSING_PLAYER_BACKOFF_MS); } catch (Exception ignore) {}
                 }
                 return out;
             }
@@ -1517,9 +1688,9 @@ public class DashboardPanel extends PluginPanel
         {
             try {
                 long nowEx = System.currentTimeMillis();
-                String canon = canonName(playerName);
                 String dir = (bucket == null || bucket.trim().isEmpty() || "overall".equalsIgnoreCase(bucket)) ? "overall" : bucket.toLowerCase();
-                String shard = canon != null && !canon.isEmpty() ? canon.substring(0, Math.min(2, canon.length())).toLowerCase() : "";
+                String shard = null;
+                try { String k = generateAccountSha(accountHash); shard = (k != null && k.length() >= 2) ? k.substring(0,2).toLowerCase() : ""; } catch (Exception ignore) { shard = ""; }
                 String cacheKey = dir + "/" + shard;
                 shardThrottle.put(cacheKey, nowEx);
                 shardFailUntil.put(cacheKey, nowEx + 60_000L);
@@ -1529,24 +1700,24 @@ public class DashboardPanel extends PluginPanel
         {
             try {
                 long nowEx = System.currentTimeMillis();
-                String canon = canonName(playerName);
                 String dir = (bucket == null || bucket.trim().isEmpty() || "overall".equalsIgnoreCase(bucket)) ? "overall" : bucket.toLowerCase();
-                String shard = canon != null && !canon.isEmpty() ? canon.substring(0, Math.min(2, canon.length())).toLowerCase() : "";
+                String shard = null;
+                try { String k = generateAccountSha(accountHash); shard = (k != null && k.length() >= 2) ? k.substring(0,2).toLowerCase() : ""; } catch (Exception ignore) { shard = ""; }
                 String cacheKey = dir + "/" + shard;
                 shardThrottle.put(cacheKey, nowEx);
                 shardFailUntil.put(cacheKey, nowEx + 30_000L);
             } catch (Exception ignore) {}
         }
-        catch (Exception ignore)
+        catch (Exception ex)
         {
             try {
                 long nowEx = System.currentTimeMillis();
-                String canon = canonName(playerName);
                 String dir = (bucket == null || bucket.trim().isEmpty() || "overall".equalsIgnoreCase(bucket)) ? "overall" : bucket.toLowerCase();
-                String shard = canon != null && !canon.isEmpty() ? canon.substring(0, Math.min(2, canon.length())).toLowerCase() : "";
+                String shard = null;
+                try { String k = generateAccountSha(accountHash); shard = (k != null && k.length() >= 2) ? k.substring(0,2).toLowerCase() : ""; } catch (Exception ex2) { shard = ""; }
                 String cacheKey = dir + "/" + shard;
                 shardThrottle.put(cacheKey, nowEx);
-            } catch (Exception ignored) {}
+            } catch (Exception ex3) {}
             // Swallow and return null – overlay handles absence gracefully
         }
         return null;
@@ -1556,7 +1727,7 @@ public class DashboardPanel extends PluginPanel
     {
         try
         {
-            // New schema: account_rank_info_map { account_hash_sha256: { tier, rank, division, index } }
+            // Only trust account-based map; name-based is optional/non-authoritative
             if (useAccount && obj.has("account_rank_info_map"))
             {
                 JsonObject m = obj.getAsJsonObject("account_rank_info_map");
@@ -1566,18 +1737,8 @@ public class DashboardPanel extends PluginPanel
                     return parseShardValue(v);
                 }
             }
-            // New schema: name_rank_info_map { canon_name: { tier, rank, division, index } }
-            if (obj.has("name_rank_info_map"))
-            {
-                JsonObject m = obj.getAsJsonObject("name_rank_info_map");
-                if (m.has(canon))
-                {
-                    com.google.gson.JsonElement v = m.get(canon);
-                    return parseShardValue(v);
-                }
-            }
         }
-        catch (Exception ignore) {}
+        catch (Exception ex) {}
         return null;
     }
 
@@ -1629,6 +1790,105 @@ public class DashboardPanel extends PluginPanel
         String s = raw.trim();
         if (s.equalsIgnoreCase("3rdAge")) return "3rd Age";
         return s.replaceAll("([A-Za-z]+)(\\d+)$", "$1 $2");
+    }
+
+    private int getCachedRankNumber(String cacheKey)
+    {
+        try {
+            RankNumberCache c = rankNumberCache.get(cacheKey);
+            if (c == null) return -1;
+            if (System.currentTimeMillis() - c.ts > RANK_NUMBER_CACHE_TTL_MS) return -1;
+            return c.rank;
+        } catch (Exception ignore) { return -1; }
+    }
+
+    private void putCachedRankNumber(String cacheKey, int rank)
+    {
+        try {
+            rankNumberCache.put(cacheKey, new RankNumberCache(rank, System.currentTimeMillis()));
+        } catch (Exception ignore) {}
+    }
+
+    private int getWorldRank(String playerName, String acctSha)
+    {
+        try
+        {
+            String key;
+            String url;
+            if (acctSha != null && !acctSha.isEmpty())
+            {
+                key = "acct:" + acctSha;
+                WorldRankCache c = worldRankCache.get(key);
+                if (c != null && (System.currentTimeMillis() - c.ts) <= WORLD_RANK_CACHE_TTL_MS) {
+                    return c.worldRank;
+                }
+                url = API_BASE + "/user?acct=" + acctSha + "&include_world_rank=1";
+            }
+            else
+            {
+                String pid = URLEncoder.encode(normalizePlayerId(playerName), "UTF-8");
+                key = "name:" + normalizeDisplayName(playerName);
+                WorldRankCache c = worldRankCache.get(key);
+                if (c != null && (System.currentTimeMillis() - c.ts) <= WORLD_RANK_CACHE_TTL_MS) {
+                    return c.worldRank;
+                }
+                // New API: user?player=NAME
+                url = API_BASE + "/user?player=" + pid + "&include_world_rank=1";
+            }
+
+            Request req = new Request.Builder().url(url).get().build();
+            try (Response res = httpClient.newCall(req).execute())
+            {
+                if (res.code() != 200 || res.body() == null) return -1;
+                okhttp3.ResponseBody rb = res.body();
+                String body = rb != null ? rb.string() : "";
+                if (body.isEmpty()) return -1;
+                JsonObject obj = gson.fromJson(body, JsonObject.class);
+                int wr = -1;
+                if (obj != null && obj.has("world_rank") && !obj.get("world_rank").isJsonNull())
+                {
+                    try { wr = obj.get("world_rank").getAsInt(); } catch (Exception ignore) { wr = -1; }
+                }
+                if (wr > 0)
+                {
+                    worldRankCache.put(key, new WorldRankCache(wr, System.currentTimeMillis()));
+                }
+                return wr;
+            }
+        }
+        catch (Exception ignore) {}
+        return -1;
+    }
+
+    private int fetchRankIndexFromApi(String playerName, String bucket)
+    {
+        try
+        {
+            String pid = URLEncoder.encode(normalizePlayerId(playerName), "UTF-8");
+            String apiBucket = URLEncoder.encode(toApiBucket(bucket), "UTF-8");
+            String url = API_BASE + "/rank?player_id=" + pid + "&bucket=" + apiBucket;
+            Request req = new Request.Builder().url(url).get().build();
+            try (Response res = httpClient.newCall(req).execute())
+            {
+                if (res.code() != 200 || res.body() == null) return -1;
+                okhttp3.ResponseBody rb = res.body();
+                String body = rb != null ? rb.string() : "";
+                if (body.isEmpty()) return -1;
+                JsonObject obj = gson.fromJson(body, JsonObject.class);
+                if (obj == null) return -1;
+                // Accept either 'rank' or 'index' field
+                if (obj.has("rank") && !obj.get("rank").isJsonNull())
+                {
+                    try { int r = obj.get("rank").getAsInt(); return r > 0 ? r : -1; } catch (Exception ignore) {}
+                }
+                if (obj.has("index") && !obj.get("index").isJsonNull())
+                {
+                    try { int r = obj.get("index").getAsInt(); return r > 0 ? r : -1; } catch (Exception ignore) {}
+                }
+            }
+        }
+        catch (Exception ignore) {}
+        return -1;
     }
 
     private static class ShardRank

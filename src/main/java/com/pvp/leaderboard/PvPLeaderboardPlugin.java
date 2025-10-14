@@ -29,9 +29,16 @@ import java.awt.image.BufferedImage;
 import javax.swing.SwingUtilities;
 import net.runelite.client.menus.MenuManager;
 import net.runelite.client.callback.ClientThread;
+import java.util.ArrayDeque;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Set;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ThreadLocalRandom;
 
 @Slf4j
 @PluginDescriptor(
@@ -403,7 +410,7 @@ private volatile long suppressFightStartUntilMs = 0L;
 	public void onHitsplatApplied(HitsplatApplied hitsplatApplied)
 	{
 		// Only process Player vs Player combat
-        if (hitsplatApplied.getActor() instanceof Player)
+		if (hitsplatApplied.getActor() instanceof Player)
 		{
             if (client == null || config == null) return;
             Player player = (Player) hitsplatApplied.getActor();
@@ -425,25 +432,16 @@ private volatile long suppressFightStartUntilMs = 0L;
 				} catch (Exception ignore) {}
 				if (player == localPlayer)
 				{
-					// Inbound damage: attribute to attacker and start a fight when attacker is known
-					opponentName = getPlayerAttacker();
-					if (opponentName == null)
+					// Inbound damage: resolve attacker across multiple simultaneous hitsplats
+					opponentName = resolveInboundAttacker(localPlayer);
+					if (opponentName != null)
 					{
-						try {
-							if (localPlayer.getInteracting() instanceof Player) {
-								opponentName = ((Player) localPlayer.getInteracting()).getName();
-							}
-						} catch (Exception ignore) {}
+						lastEngagedOpponentName = opponentName;
+						lastExactOpponentName = opponentName;
+						try { damageFromOpponent.merge(opponentName, (long) amt, Long::sum); } catch (Exception ignore) {}
+						startNow = true;
+						try { if (DEBUG_HIT_SPLAT_LOGS) { log.debug("[Hitsplat] inbound dmg={} opp='{}' dmgFromOpp={}", amt, opponentName, damageFromOpponent); } } catch (Exception ignore) {}
 					}
-					if (opponentName == null && lastEngagedOpponentName != null)
-					{
-						opponentName = lastEngagedOpponentName;
-					}
-					if (opponentName != null) lastEngagedOpponentName = opponentName;
-					try { if (opponentName != null) { damageFromOpponent.merge(opponentName, (long) amt, Long::sum); } } catch (Exception ignore) {}
-					// Start on inbound when we have a concrete opponent
-					startNow = (opponentName != null);
-					try { if (DEBUG_HIT_SPLAT_LOGS) { log.debug("[Hitsplat] inbound dmg={} opp='{}' startNow={} dmgFromOpp={}", amt, opponentName, startNow, damageFromOpponent); } } catch (Exception ignore) {}
 				}
 				else
 				{
@@ -888,19 +886,96 @@ private void startFight(String opponentName)
 		try { log.debug("[Fight] state reset; suppressUntilMs={} activeFightsCleared" , suppressFightStartUntilMs); } catch (Exception ignore) {}
 	}
 
-	private String getPlayerAttacker()
+	private String resolveInboundAttacker(Player localPlayer)
 	{
-		// Find a player who is attacking the local player
-        java.util.List<Player> players = client.getPlayers();
-        if (players == null) return null;
-        for (Player player : players)
+		try
 		{
-			if (player != client.getLocalPlayer() && player.getInteracting() == client.getLocalPlayer())
+			Set<String> candidates = new LinkedHashSet<>();
+			java.util.List<Player> players = client.getPlayers();
+			if (players != null)
 			{
-				return player.getName();
+				for (Player other : players)
+				{
+					if (other == null || other == localPlayer) continue;
+					String name = null;
+					try { if (other.getInteracting() == localPlayer) { name = other.getName(); } } catch (Exception ignore) {}
+					if (name != null && !name.trim().isEmpty())
+					{
+						candidates.add(name);
+					}
+				}
+			}
+
+			// Prefer the most recently engaged opponents when available
+			if (lastExactOpponentName != null && candidates.contains(lastExactOpponentName))
+			{
+				return lastExactOpponentName;
+			}
+			if (lastEngagedOpponentName != null && candidates.contains(lastEngagedOpponentName))
+			{
+				return lastEngagedOpponentName;
+			}
+
+			String mostRecent = pickMostRecentlyActive(new ArrayList<>(candidates));
+			if (mostRecent != null)
+			{
+				return mostRecent;
+			}
+
+			if (!candidates.isEmpty())
+			{
+				return pickRandom(new ArrayList<>(candidates));
+			}
+
+			// Fallback: use active fights even if not currently interacting
+			List<String> active = new ArrayList<>(activeFights.keySet());
+			if (!active.isEmpty())
+			{
+				if (lastEngagedOpponentName != null && active.contains(lastEngagedOpponentName))
+				{
+					return lastEngagedOpponentName;
+				}
+				String recent = pickMostRecentlyActive(active);
+				if (recent != null)
+				{
+					return recent;
+				}
+				return pickRandom(active);
+			}
+
+			// Final fallback: nothing known
+			return null;
+		}
+		catch (Exception ignored)
+		{
+			return null;
+		}
+	}
+
+	private String pickMostRecentlyActive(List<String> names)
+	{
+		if (names == null || names.isEmpty()) return null;
+		long best = Long.MIN_VALUE;
+		String bestName = null;
+		for (String name : names)
+		{
+			FightEntry entry = activeFights.get(name);
+			long last = entry != null ? entry.lastActivityMs : Long.MIN_VALUE;
+			if (last > best)
+			{
+				best = last;
+				bestName = name;
 			}
 		}
-		return null;
+		return bestName;
+	}
+
+	private String pickRandom(List<String> names)
+	{
+		if (names == null || names.isEmpty()) return null;
+		if (names.size() == 1) return names.get(0);
+		int idx = ThreadLocalRandom.current().nextInt(names.size());
+		return names.get(idx);
 	}
 	
 	private String findActualKiller()
@@ -1097,7 +1172,18 @@ private void startFight(String opponentName)
                         : null;
                 } catch (Exception ignore) {}
                 if (tier != null && !tier.isEmpty()) return tier;
-                return "Rank " + rankIndex;
+                if (!isSelf)
+                {
+                    try {
+                        String selfName = client != null && client.getLocalPlayer() != null ? client.getLocalPlayer().getName() : null;
+                        if (selfName != null && dashboardPanel != null)
+                        {
+                            String fallbackTier = dashboardPanel.getTierLabelByName(playerName, bucket);
+                            if (fallbackTier != null && !fallbackTier.isEmpty()) return fallbackTier;
+                        }
+                    } catch (Exception ignore) {}
+                }
+                return null;
             }
 
             // Fallback for self only when shard misses: derive tier from API

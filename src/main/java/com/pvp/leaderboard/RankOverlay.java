@@ -182,7 +182,7 @@ public class RankOverlay extends Overlay
                         }
                         else if (loggedFetch.putIfAbsent(playerName, Boolean.TRUE) == null)
                         {
-                            log.info("No rank found for {} (no retry)", playerName);
+                            log.debug("No rank found for {} (no retry)", playerName);
                         }
                     }
                     finally
@@ -298,6 +298,7 @@ public class RankOverlay extends Overlay
             loggedFetch.clear();
             attemptedLookup.clear();
             attemptedAtMs.clear();
+            apiOverrideUntilMs.clear();
             lastBucketKey = currentBucket;
             try { if (DEBUG_OVERLAY_LOGS) log.debug("[Overlay] bucket changed to {} → clear transient state", currentBucket); } catch (Exception ignore) {}
             // Allow self lookup again immediately on bucket change and clear cached overlay values for self
@@ -348,7 +349,7 @@ public class RankOverlay extends Overlay
                             }
                             else if (loggedFetch.putIfAbsent(selfName, Boolean.TRUE) == null)
                             {
-                                log.info("No rank found for {} (no retry)", selfName);
+                                log.debug("No rank found for {} (no retry)", selfName);
                                 // Short cooldown to avoid tight loop on temporary shard miss
                                 nextSelfRankAllowedAtMs = System.currentTimeMillis() + 10_000L;
                             }
@@ -476,10 +477,7 @@ public class RankOverlay extends Overlay
                         }
                     } catch (Exception ignore) {}
                     // Only log once per name per bucket to avoid spam in crowded areas
-                    if (loggedFetch.putIfAbsent(playerName, Boolean.TRUE) == null)
-                    {
-                        log.debug("[Overlay] fetch once for player={} bucket={}", playerName, bucketKey(config.rankBucket()));
-                    }
+                    log.debug("[Overlay] fetch once for player={} bucket={}", playerName, bucketKey(config.rankBucket()));
                     scheduledThisTick++;
                     java.util.concurrent.CompletableFuture.supplyAsync(() -> {
                         try {
@@ -507,7 +505,7 @@ public class RankOverlay extends Overlay
                             }
                             else if (loggedFetch.putIfAbsent(playerName, Boolean.TRUE) == null)
                             {
-                                log.info("No rank found for {} (no retry)", playerName);
+                                log.debug("No rank found for {} (no retry)", playerName);
                                 // Preserve last known rank on miss to avoid disappearing overlay in crowded areas
                                 try {
                                     String ck = cacheKeyFor(playerName);
@@ -559,18 +557,14 @@ public class RankOverlay extends Overlay
                 if (mode == PvPLeaderboardConfig.RankDisplayMode.RANK_NUMBER)
                 {
                     int centerX = x + iconSize / 2;
-                    // Force display as Rank N
-                    String text = cachedRank;
+                    String text = null;
                     try
                     {
-                        if (text != null && !text.startsWith("Rank"))
-                        {
-                            // Attempt to derive world rank index from plugin using name+bucket
-                            int idx = plugin != null ? plugin.getWorldRankIndex(playerName, bucketKey(config.rankBucket())) : -1;
-                            if (idx > 0) text = "Rank " + idx;
-                        }
+                        int idx = plugin != null ? plugin.getWorldRankIndex(playerName, bucketKey(config.rankBucket())) : -1;
+                        if (idx > 0) text = "Rank " + idx;
                     }
                     catch (Exception ignore) {}
+                    // Only render when we have a numeric rank; otherwise omit per spec
                     renderRankText(graphics, text, centerX, y, Math.max(10, config.rankTextSize()));
                 }
                 else if (mode == PvPLeaderboardConfig.RankDisplayMode.ICON)
