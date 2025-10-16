@@ -165,10 +165,6 @@ public class DashboardPanel extends PluginPanel
     private final ConcurrentHashMap<String, WorldRankCache> worldRankCache = new ConcurrentHashMap<>();
     private static final String API_BASE = "https://kekh0x6kfk.execute-api.us-east-1.amazonaws.com/prod";
     
-    private String canonName(String name) {
-        return String.valueOf(name != null ? name : "").trim().replaceAll("\\s+", " ").toLowerCase();
-    }
-
     private Client getClientSafe()
     {
         try { return plugin != null ? plugin.getClient() : null; } catch (Exception ignore) { return null; }

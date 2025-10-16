@@ -162,7 +162,7 @@ public class RankOverlay extends Overlay
             displayedRanks.remove(playerName);
             if (fetchInFlight.putIfAbsent(playerName, Boolean.TRUE) == null)
             {
-                log.info("[Overlay] forced fetch for player={} bucket={}", playerName, bucketKey(config.rankBucket()));
+                log.debug("[Overlay] forced fetch for player={} bucket={}", playerName, bucketKey(config.rankBucket()));
                 final String ln; try { ln = client != null && client.getLocalPlayer() != null ? client.getLocalPlayer().getName() : null; } catch (Exception ex) { /* fallback */ return; }
                 final boolean isSelf = (ln != null && ln.equals(playerName));
                 java.util.concurrent.CompletableFuture.supplyAsync(() -> {

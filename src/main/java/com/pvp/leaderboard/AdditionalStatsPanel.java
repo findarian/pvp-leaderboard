@@ -25,7 +25,6 @@ public class AdditionalStatsPanel extends JPanel {
 
     private final SimpleDateFormat fmt = new SimpleDateFormat("M/d/yyyy, h:mm:ss a");
     private String selectedBucket = "overall";
-    private java.util.List<Double> tierSeries = new ArrayList<>();
     private JsonArray matches = new JsonArray();
 
     public AdditionalStatsPanel() {
@@ -253,7 +252,6 @@ public class AdditionalStatsPanel extends JPanel {
             double norm = Math.max(0.0, Math.min(100.0, ((y - low) / span) * 100.0));
             series.add(norm);
         }
-        tierSeries = series;
         graphPlot.setSeries(series);
         graphLabels.repaint();
     }
