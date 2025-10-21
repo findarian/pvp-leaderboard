@@ -38,7 +38,7 @@ public interface PvPLeaderboardConfig extends Config
 	)
 	default boolean enablePvpLookupMenu()
 	{
-		return true; // ON by default
+		return false; // OFF by default
 	}
 
     enum RankDisplayMode { TEXT { public String toString(){return "Text";} }, RANK_NUMBER { public String toString(){return "Rank";} }, ICON { public String toString(){return "Icon";} } }

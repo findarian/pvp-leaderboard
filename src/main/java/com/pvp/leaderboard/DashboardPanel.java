@@ -387,6 +387,16 @@ public class DashboardPanel extends PluginPanel
         JPanel section = new JPanel();
         section.setLayout(new BoxLayout(section, BoxLayout.Y_AXIS));
         section.setBorder(BorderFactory.createTitledBorder("Rank Progress"));
+
+        JLabel seasonLabel = new JLabel("Season 0");
+        seasonLabel.setAlignmentX(Component.LEFT_ALIGNMENT);
+        Font baseFont = seasonLabel.getFont();
+        if (baseFont != null)
+        {
+            seasonLabel.setFont(baseFont.deriveFont(Font.BOLD, Math.max(12f, baseFont.getSize2D())));
+        }
+        section.add(seasonLabel);
+        section.add(Box.createVerticalStrut(6));
         
         String[] buckets = {"Overall", "NH", "Veng", "Multi", "DMM"};
         
