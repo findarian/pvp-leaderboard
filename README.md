@@ -56,5 +56,8 @@ Open RuneLite configuration for the plugin:
 ```
 Jar output is written to `build/libs/`.
 
+todo:
+- damage_to_opponent is incorrect and needs to be looked at again, but it doesn't break any functionality now
+
 ## Credits
 Author: Toyco / Ryan McCusker
