@@ -45,6 +45,11 @@ import java.util.concurrent.ThreadLocalRandom;
 @SuppressWarnings("deprecation")
 public class PvPLeaderboardPlugin extends Plugin
 {
+    // Expose lightweight debug bridge so other classes can log via the same sink without extra deps
+    public static void debug(String fmt, Object... args)
+    {
+        try { log.debug(fmt, args); } catch (Exception ignore) {}
+    }
 	@Inject
 	private Client client;
 
@@ -1217,6 +1222,19 @@ private void startFight(String opponentName)
                           : dashboardPanel.getRankNumberByName(playerName, bucket);
         }
         catch (Exception ignore) { return -1; }
+    }
+
+    // Allow DashboardPanel to update above-head overlay directly from API-derived tier
+    public void setOverlayRankFromApi(String playerName, String tier)
+    {
+        try
+        {
+            if (rankOverlay != null && playerName != null && !playerName.trim().isEmpty() && tier != null && !tier.trim().isEmpty())
+            {
+                rankOverlay.setRankFromApi(playerName, tier);
+            }
+        }
+        catch (Exception ignore) {}
     }
 
     @SuppressWarnings("unused")
