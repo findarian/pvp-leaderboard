@@ -1342,6 +1342,12 @@ public class DashboardPanel extends PluginPanel
                 putCachedRankNumber(cacheKey, sr.rank);
                 return sr.rank;
             }
+            // Fallback to API rank endpoint
+            int apiRank = fetchRankIndexFromApi(playerKey, canonBucket);
+            if (apiRank > 0) {
+                putCachedRankNumber(cacheKey, apiRank);
+                return apiRank;
+            }
         }
         catch (Exception ignore) {}
         return -1;
@@ -1363,6 +1369,11 @@ public class DashboardPanel extends PluginPanel
             // Name-only lookups: skip shard (no acct_sha) and use API directly
             int cached = getCachedRankNumber(cacheKey);
             if (cached > 0) return cached;
+            int apiRank = fetchRankIndexFromApi(playerKey, canonBucket);
+            if (apiRank > 0) {
+                putCachedRankNumber(cacheKey, apiRank);
+                return apiRank;
+            }
         }
         catch (Exception ignore) {}
         return -1;
@@ -2217,8 +2228,6 @@ public class DashboardPanel extends PluginPanel
                             try { lastLoadedAccountHash = stats.get("account_hash").getAsString(); } catch (Exception ignore) {}
                         }
                         String[] buckets = new String[]{"overall","nh","veng","multi","dmm"};
-                        final String currentBucket = bucketKey(config != null ? config.rankBucket() : null);
-                        boolean overlaySet = false;
                         JsonObject bucketsObj = null;
                         try { if (stats.has("buckets") && stats.get("buckets").isJsonObject()) bucketsObj = stats.getAsJsonObject("buckets"); } catch (Exception ignore) {}
                         for (String key : buckets) {
@@ -2251,16 +2260,6 @@ public class DashboardPanel extends PluginPanel
                                     }
                                 } catch (Exception ignore) {}
                             }
-                            // Update above-head overlay with the tier for the currently selected bucket
-                            if (!overlaySet && key.equals(currentBucket) && rankLabel != null) {
-                                try {
-                                    String tierStr = rankLabel + (division > 0 ? " " + division : "");
-                                    if (plugin != null) {
-                                        plugin.setOverlayRankFromApi(playerName, tierStr);
-                                        overlaySet = true;
-                                    }
-                                } catch (Exception ignore) {}
-                            }
                             // World rank number is legacy; do not use. Display only rank/division/progress.
                             if (rankLabel != null) {
                                 final String fKey = key; final String fRank = rankLabel; final int fDiv = division; final double fPct = pct;
@@ -2276,22 +2275,6 @@ public class DashboardPanel extends PluginPanel
                                 final String fKey = key;
                                 SwingUtilities.invokeLater(() -> setBucketBar(fKey, "—", 0, 0));
                             }
-                        }
-                        // Fallback for overall when not present in buckets: derive from top-level MMR
-                        if (!overlaySet && "overall".equals(currentBucket)) {
-                            try {
-                                if (stats.has("mmr") && !stats.get("mmr").isJsonNull()) {
-                                    double mmr = stats.get("mmr").getAsDouble();
-                                    RankInfo ri = rankLabelAndProgressFromMMR(mmr);
-                                    if (ri != null) {
-                                        String tierStr = ri.rank + (ri.division > 0 ? " " + ri.division : "");
-                                        if (plugin != null) {
-                                            plugin.setOverlayRankFromApi(playerName, tierStr);
-                                            overlaySet = true;
-                                        }
-                                    }
-                                }
-                            } catch (Exception ignore) {}
                         }
                     }
                     // keep behavior: load match history and show extra stats if logged in
