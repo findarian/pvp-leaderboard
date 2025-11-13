@@ -1,3 +1,25 @@
+# Build artifacts
+/build/
+/bin/
+/out/
+/.gradle/
+/tmp/
+*.class
+
+# IDE files
+.idea/
+*.iml
+*.ipr
+*.iws
+.vscode/
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
 .gradle
 build
 .idea/
