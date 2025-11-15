@@ -124,7 +124,7 @@ public class DashboardPanel extends PluginPanel
     }
 
     // In-memory cache for /user profile responses to avoid blank UI when backend throttles or fails
-    private static final long USER_CACHE_TTL_MS = 60L * 1000L; // 60 seconds
+    private static final long USER_CACHE_TTL_MS = 60L * 60L * 1000L; // 1 hour
     private static class UserStatsCache { final JsonObject stats; final long ts; UserStatsCache(JsonObject s, long t) { this.stats = s; this.ts = t; } }
     private final ConcurrentHashMap<String, UserStatsCache> userStatsCache = new ConcurrentHashMap<>();
 
@@ -156,11 +156,11 @@ public class DashboardPanel extends PluginPanel
     // Prevent repeated API attempts when network/DNS is down
     private volatile long apiDownUntilMs = 0L;
     // Cache for per-(player,bucket) rank number lookups (API/shard fast-path)
-    private static final long RANK_NUMBER_CACHE_TTL_MS = 10L * 60L * 1000L; // 10 minutes
+    private static final long RANK_NUMBER_CACHE_TTL_MS = 60L * 60L * 1000L; // 1 hour
     private static class RankNumberCache { final int rank; final long ts; RankNumberCache(int r, long t) { this.rank = r; this.ts = t; } }
     private final ConcurrentHashMap<String, RankNumberCache> rankNumberCache = new ConcurrentHashMap<>();
     // Cache for overall world rank (can be cached longer; backend TTL ~24h)
-    private static final long WORLD_RANK_CACHE_TTL_MS = 12L * 60L * 60L * 1000L; // 12 hours
+    private static final long WORLD_RANK_CACHE_TTL_MS = 60L * 60L * 1000L; // 1 hour
     private static class WorldRankCache { final int worldRank; final long ts; WorldRankCache(int r, long t) { this.worldRank = r; this.ts = t; } }
     private final ConcurrentHashMap<String, WorldRankCache> worldRankCache = new ConcurrentHashMap<>();
     private static final String API_BASE = "https://kekh0x6kfk.execute-api.us-east-1.amazonaws.com/prod";

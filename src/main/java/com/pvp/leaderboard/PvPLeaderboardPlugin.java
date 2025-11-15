@@ -117,7 +117,7 @@ private volatile long suppressFightStartUntilMs = 0L;
     private final java.util.concurrent.ConcurrentHashMap<String, Boolean> apiFallbackActive = new java.util.concurrent.ConcurrentHashMap<>();
 	// Damage dealt by the local player to each opponent during the current combat window
 	private final java.util.concurrent.ConcurrentHashMap<String, Long> damageToOpponent = new java.util.concurrent.ConcurrentHashMap<>();
-	private static final boolean DEBUG_HIT_SPLAT_LOGS = false;
+	private static boolean DEBUG_HIT_SPLAT_LOGS = false;
 
 	@Override
 	protected void startUp() throws Exception
@@ -341,8 +341,8 @@ private volatile long suppressFightStartUntilMs = 0L;
 					}
                     // Preload account hash linkage for self so overall lookups use account shard immediately
                     try { dashboardPanel.preloadSelfRankNumbers(self); } catch (Exception ignore) {}
-					// Schedule a slight delay to avoid null-name timing on rapid hops
-					try { if (rankOverlay != null) rankOverlay.scheduleSelfRankRefresh(250L); } catch (Exception ignore) {}
+					// Immediately refresh self rank (overlay + API fast-follow) for reliable above-head text
+					try { refreshSelfRankNow(); } catch (Exception ignore) {}
 				}
 				else
 				{
@@ -354,7 +354,7 @@ private volatile long suppressFightStartUntilMs = 0L;
 									String selfLater = client.getLocalPlayer().getName();
 									if (selfLater != null && !selfLater.trim().isEmpty()) {
 										try { if (dashboardPanel != null) dashboardPanel.lookupPlayerFromRightClick(selfLater); } catch (Exception ignore2) {}
-										try { if (rankOverlay != null) rankOverlay.scheduleSelfRankRefresh(0L); } catch (Exception ignore2) {}
+										try { refreshSelfRankNow(); } catch (Exception ignore2) {}
 									}
 								}
 							} catch (Exception ignore2) {}
@@ -377,14 +377,6 @@ private volatile long suppressFightStartUntilMs = 0L;
 					rankOverlay.resetLookupStateOnWorldHop();
 				}
 				try { log.debug("[Fight] scene change: {} (fight preserved)", gameStateChanged.getGameState()); } catch (Exception ignore) {}
-				// Nudge self rank refresh after a short delay so overlay repopulates post-hop
-				try {
-					if (rankOverlay != null) {
-						scheduler.schedule(() -> {
-							try { rankOverlay.scheduleSelfRankRefresh(0L); } catch (Exception ignore) {}
-						}, 600L, java.util.concurrent.TimeUnit.MILLISECONDS);
-					}
-				} catch (Exception ignore) {}
 			} catch (Exception ignore) {}
 		}
 	}
@@ -436,7 +428,13 @@ private volatile long suppressFightStartUntilMs = 0L;
 					{
 						lastEngagedOpponentName = opponentName;
 						lastExactOpponentName = opponentName;
-						try { damageFromOpponent.merge(opponentName, (long) amt, Long::sum); } catch (Exception ignore) {}
+						try {
+							damageFromOpponent.merge(opponentName, (long) amt, (a, b) -> {
+								long av = (a == null ? 0L : a);
+								long bv = (b == null ? 0L : b);
+								return av + bv;
+							});
+						} catch (Exception ignore) {}
 						startNow = true;
 						try { if (DEBUG_HIT_SPLAT_LOGS) { log.debug("[Hitsplat] inbound dmg={} opp='{}' dmgFromOpp={}", amt, opponentName, damageFromOpponent); } } catch (Exception ignore) {}
 					}
@@ -449,7 +447,13 @@ private volatile long suppressFightStartUntilMs = 0L;
 					{
 						opponentName = (player != null ? player.getName() : null);
 						if (opponentName != null) lastEngagedOpponentName = opponentName;
-						try { damageToOpponent.merge(opponentName, (long) amt, Long::sum); } catch (Exception ignore) {}
+						try {
+							damageToOpponent.merge(opponentName, (long) amt, (a, b) -> {
+								long av = (a == null ? 0L : a);
+								long bv = (b == null ? 0L : b);
+								return av + bv;
+							});
+						} catch (Exception ignore) {}
 						startNow = true;
 					}
 					try { if (DEBUG_HIT_SPLAT_LOGS) { log.debug("[Hitsplat] outbound dmg={} weAreAttacking={} opp='{}' dmgToOpp={} ", amt, weAreAttacking, opponentName, damageToOpponent.get(opponentName)); } } catch (Exception ignore) {}
@@ -1203,7 +1207,6 @@ private void startFight(String opponentName)
         return null;
     }
 
-    @SuppressWarnings("unused")
     public int getWorldRankIndex(String playerName, String bucket)
     {
         try
@@ -1219,7 +1222,6 @@ private void startFight(String opponentName)
         catch (Exception ignore) { return -1; }
     }
 
-    @SuppressWarnings("unused")
     private static String bucketKey(PvPLeaderboardConfig.RankBucket bucket)
     {
         if (bucket == null) return "overall";
@@ -1436,4 +1438,5 @@ private void submitMatchResult(String result, long fightEndTime)
     {
         return shardReady;
     }
+
 }
