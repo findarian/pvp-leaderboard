@@ -889,6 +889,4 @@ public class RankOverlay extends Overlay
             default: return Color.GRAY;
         }
     }
-
-    // Removed unused abbreviation helper
 }
