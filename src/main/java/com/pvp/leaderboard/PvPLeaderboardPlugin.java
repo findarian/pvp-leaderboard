@@ -603,11 +603,15 @@ private volatile long suppressFightStartUntilMs = 0L;
 				boolean startNow = false;
 				int amt = 0;
 				boolean startFromThisHit = false;
+				boolean isMine = false;
+				int hitsplatType = -1;
 				try {
 					net.runelite.api.Hitsplat hs = hitsplatApplied.getHitsplat();
 					if (hs != null)
 					{
-						int t = hs.getHitsplatType();
+						isMine = hs.isMine();
+						hitsplatType = hs.getHitsplatType();
+						int t = hitsplatType;
 						int a = hs.getAmount();
 						// Only consider true player-damage hitsplats; ignore poison/venom/heal/block/etc.
 						if (t == HitsplatID.DAMAGE_ME || t == HitsplatID.DAMAGE_OTHER)
@@ -657,7 +661,12 @@ private volatile long suppressFightStartUntilMs = 0L;
 				else
 				{
 					// Outbound damage: only start when we are actually attacking this player
-					boolean weAreAttacking = false; try { weAreAttacking = (localPlayer.getInteracting() == player); } catch (Exception ignore) {}
+					boolean weAreAttacking = isMine;
+					// Fallback if isMine is false but it is poison/venom (ownership not tracked on hitsplat)
+					if (!weAreAttacking && (hitsplatType == HitsplatID.POISON || hitsplatType == HitsplatID.VENOM)) {
+						try { weAreAttacking = (localPlayer.getInteracting() == player); } catch (Exception ignore) {}
+					}
+
 					if (weAreAttacking)
 					{
 						opponentName = (player != null ? player.getName() : null);
