@@ -980,6 +980,7 @@ public class DashboardPanel extends PluginPanel
     
     private double calculateProgressFromMMR(double mmr)
     {
+        // 0 MMR is valid. Do not short-circuit.
         String[][] thresholds = {
             {"Bronze", "3", "0"}, {"Bronze", "2", "170"}, {"Bronze", "1", "240"},
             {"Iron", "3", "310"}, {"Iron", "2", "380"}, {"Iron", "1", "450"},
@@ -1178,7 +1179,7 @@ public class DashboardPanel extends PluginPanel
             protected Void doInBackground() throws Exception
             {
                 // Overall from top-level profile stats (MMR) - like website
-                if (stats.has("mmr"))
+                if (stats.has("mmr") && !stats.get("mmr").isJsonNull())
                 {
                     double mmr = stats.get("mmr").getAsDouble();
                     RankInfo overall = rankLabelAndProgressFromMMR(mmr);
@@ -1210,6 +1211,8 @@ public class DashboardPanel extends PluginPanel
                             catch (Exception ignore) {}
                         }
                     }.execute();
+                } else {
+                    SwingUtilities.invokeLater(() -> setBucketBar("overall", "—", 0, 0));
                 }
                 
                 JsonObject bucketsObj = null;
@@ -1283,9 +1286,9 @@ public class DashboardPanel extends PluginPanel
                 double mmr = latest.get("player_mmr").getAsDouble();
                 RankInfo est = rankLabelAndProgressFromMMR(mmr);
                 
-                String finalRank = latest.has("player_rank") ? latest.get("player_rank").getAsString() : est.rank;
-                int finalDiv = latest.has("player_division") ? latest.get("player_division").getAsInt() : est.division;
-                double pct = est.progress;
+                String finalRank = latest.has("player_rank") ? latest.get("player_rank").getAsString() : (est != null ? est.rank : "—");
+                int finalDiv = latest.has("player_division") ? latest.get("player_division").getAsInt() : (est != null ? est.division : 0);
+                double pct = (est != null ? est.progress : 0.0);
                 
                 // Only fetch rank number for currently selected rank bucket to avoid multi-bucket shard loads
                 String currentBucket = bucketKey(config != null ? config.rankBucket() : null);
@@ -1431,6 +1434,7 @@ public class DashboardPanel extends PluginPanel
             if (bucketObj.has("mmr") && !bucketObj.get("mmr").isJsonNull())
             {
                 double mmr = bucketObj.get("mmr").getAsDouble();
+                // Ensure MMR was actually present in response, not just 0.0 default
                 RankInfo ri = rankLabelAndProgressFromMMR(mmr);
                 if (ri != null)
                 {
@@ -1538,7 +1542,13 @@ public class DashboardPanel extends PluginPanel
             // Use 'player' parameter which supports name lookup (player_id seemed flaky in tests)
             String apiUrl = API_BASE + "/user?player=" + URLEncoder.encode(pid, "UTF-8");
             
-            Request req = new Request.Builder().url(apiUrl).get().build();
+            // Use plugin's client unique ID if available
+            Request.Builder rbBuilder = new Request.Builder().url(apiUrl).get();
+            if (plugin != null && plugin.getClientUniqueId() != null) {
+                rbBuilder.header("X-Client-Unique-Id", plugin.getClientUniqueId());
+            }
+            Request req = rbBuilder.build();
+
             final java.util.concurrent.CompletableFuture<String> fut = new java.util.concurrent.CompletableFuture<>();
             httpClient.newCall(req).enqueue(new Callback() {
                 @Override public void onFailure(Call call, java.io.IOException e) { fut.complete(null); }
@@ -1582,6 +1592,9 @@ public class DashboardPanel extends PluginPanel
                  }
             }
             
+            // Check if this is a default/unranked placeholder (Bronze 3 + 0 MMR)
+            if (isUnrankedOrDefault(targetObj)) return null;
+            
             // Extract rank and division
             String rank = targetObj.has("rank") && !targetObj.get("rank").isJsonNull() ? targetObj.get("rank").getAsString() : null;
             int div = targetObj.has("division") && !targetObj.get("division").isJsonNull() ? targetObj.get("division").getAsInt() : 0;
@@ -1612,6 +1625,32 @@ public class DashboardPanel extends PluginPanel
     public String fetchTierFromApi(String playerName, String bucket)
     {
         return fetchSelfTierFromApi(playerName, bucket);
+    }
+
+    private boolean isUnrankedOrDefault(JsonObject obj) {
+        if (obj == null) return true;
+        // Check for 0 MMR
+        double mmr = 0.0;
+        if (obj.has("mmr") && !obj.get("mmr").isJsonNull()) {
+            mmr = obj.get("mmr").getAsDouble();
+        }
+        
+        // Check for Bronze 3 rank
+        String rank = "";
+        int div = 0;
+        if (obj.has("rank") && !obj.get("rank").isJsonNull()) {
+            rank = obj.get("rank").getAsString();
+        }
+        if (obj.has("division") && !obj.get("division").isJsonNull()) {
+            div = obj.get("division").getAsInt();
+        }
+        
+        // If it looks like default initialization (Bronze 3, 0 MMR), treat as unranked
+        if (Math.abs(mmr) < 0.001 && "Bronze".equalsIgnoreCase(rank) && div == 3) {
+            return true;
+        }
+        
+        return false;
     }
 
     private String lastLoadedAccountHash = null;
@@ -1648,6 +1687,7 @@ public class DashboardPanel extends PluginPanel
                 ShardRank sr = extractShardRank(cached.payload, useAccount, accountKey, null);
                 if (sr != null) return sr;
                 // Fresh shard cached and account not present → do not refetch until TTL expiry
+                // Note: If extractShardRank returned null because of isUnrankedOrDefault, we correctly return null here too.
                 return null;
             }
 
@@ -1796,6 +1836,9 @@ public class DashboardPanel extends PluginPanel
             else if (v.isJsonObject())
             {
                 JsonObject o = v.getAsJsonObject();
+                // Check for default entry (Bronze 3, 0 MMR implied if not present or 0)
+                if (isUnrankedOrDefault(o)) return null;
+                
                 int idx = o.has("index") && !o.get("index").isJsonNull() ? o.get("index").getAsInt() : -1;
                 String tier = null;
                 if (o.has("tier") && !o.get("tier").isJsonNull())
@@ -1958,6 +2001,9 @@ public class DashboardPanel extends PluginPanel
     
     private RankInfo rankLabelAndProgressFromMMR(double mmrVal)
     {
+        // Do not arbitrarily treat 0 as null; 0 is a valid MMR (Bronze 3).
+        // The caller is responsible for determining if data is missing (e.g. JSON missing "mmr" field).
+        
         String[][] thresholds = {
             {"Bronze", "3", "0"}, {"Bronze", "2", "170"}, {"Bronze", "1", "240"},
             {"Iron", "3", "310"}, {"Iron", "2", "380"}, {"Iron", "1", "450"},
@@ -2628,6 +2674,7 @@ public class DashboardPanel extends PluginPanel
     
     private double calculateTierValue(double mmr)
     {
+        // 0 MMR is valid (bottom of Bronze 3). Do not short-circuit.
         String[][] thresholds = {
             {"Bronze", "3", "0"}, {"Bronze", "2", "170"}, {"Bronze", "1", "240"},
             {"Iron", "3", "310"}, {"Iron", "2", "380"}, {"Iron", "1", "450"},

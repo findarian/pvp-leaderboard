@@ -95,22 +95,10 @@ public class RankOverlay extends Overlay
         selfRankAttempted = false;
         selfRefreshRequestedAtMs = nextSelfRankAllowedAtMs;
         try { if (DEBUG_OVERLAY_LOGS) log.debug("[Overlay] scheduleSelfRankRefresh delayMs={} nextAllowedAtMs={}", delayMs, nextSelfRankAllowedAtMs); } catch (Exception ignore) {}
-        // Do not clear the currently displayed self rank; keep it while the refresh happens
-        // to avoid visual flicker during combat or after submissions.
-        if (clientThread != null)
-        {
-            clientThread.invokeLater(() -> {
-                try
-                {
-                    if (client != null && client.getLocalPlayer() != null && client.getLocalPlayer().getName() != null)
-                    {
-                        String self = client.getLocalPlayer().getName();
-                        try { nameRankCache.remove(cacheKeyFor(self)); } catch (Exception ignore) {}
-                    }
-                }
-                catch (Exception ignore) {}
-            });
-        }
+        
+        // Do NOT remove from nameRankCache here. Keeping the old value ensures the overlay remains visible
+        // until the refresh completes and updates it with a new value (or confirms removal).
+        // Removing it here causes a flash/disappearance if the refresh is delayed or throttled.
     }
 
     public void resetLookupStateOnWorldHop()
@@ -158,7 +146,7 @@ public class RankOverlay extends Overlay
                         }, scheduler).thenAccept(rank -> {
                             try
                             {
-                                if (rank != null)
+                                if (rank != null && !rank.isEmpty())
                                 {
                                     displayedRanks.put(key, rank);
                                     if (loggedFetch.putIfAbsent(key, Boolean.TRUE) == null)
@@ -340,11 +328,14 @@ public class RankOverlay extends Overlay
                                 // Cooldown so self fetch doesn't re-run until cache TTL
                                 nextSelfRankAllowedAtMs = System.currentTimeMillis() + RANK_CACHE_TTL_MS;
                             }
-                            else if (loggedFetch.putIfAbsent(NameUtils.canonicalKey(selfName), Boolean.TRUE) == null)
+                            else
                             {
-                                log.debug("No rank found for {} (no retry)", selfName);
-                                // Short cooldown to avoid tight loop on temporary shard miss
-                                nextSelfRankAllowedAtMs = System.currentTimeMillis() + 10_000L;
+                                if (loggedFetch.putIfAbsent(NameUtils.canonicalKey(selfName), Boolean.TRUE) == null)
+                                {
+                                    log.debug("No rank found for {} (no retry)", selfName);
+                                }
+                                // Standard backoff to prevent loops
+                                nextSelfRankAllowedAtMs = System.currentTimeMillis() + RANK_CACHE_TTL_MS;
                             }
                         }
                         finally
@@ -423,13 +414,10 @@ public class RankOverlay extends Overlay
                 {
                     try { log.debug("[Overlay] self missing rank; inFlight={} attempted={} cacheHit={} apiActive={}", fetchInFlight.containsKey(nameKey), attemptedLookup.containsKey(nameKey), nameRankCache.containsKey(cacheKeyFor(playerName)), apiActive); } catch (Exception ignore) {}
                 }
-                Long firstAttempt = attemptedAtMs.get(nameKey);
-                long now = System.currentTimeMillis();
-                if (firstAttempt != null && now - firstAttempt < NAME_RETRY_BACKOFF_MS) {
-                    continue; // skip re-attempts for 60s
-                }
                 // Skip scheduling if name is within TTL window of a previous miss
                 // This mirrors DashboardPanel's negative cache but avoids any network
+                Long firstAttempt = attemptedAtMs.get(nameKey);
+                long now = System.currentTimeMillis();
                 if (firstAttempt != null && now - firstAttempt < NAME_RETRY_BACKOFF_MS)
                 {
                     continue;
@@ -487,8 +475,10 @@ public class RankOverlay extends Overlay
                                 boolean overrideActive = until != null && System.currentTimeMillis() < until;
                                 if (!overrideActive)
                                 {
-                                    displayedRanks.put(nameKey, rank);
-                                    try { nameRankCache.put(cacheKeyFor(playerName), new CacheEntry(rank, System.currentTimeMillis())); } catch (Exception ignore) {}
+                                    if (rank != null && !rank.isEmpty()) {
+                                        displayedRanks.put(nameKey, rank);
+                                        try { nameRankCache.put(cacheKeyFor(playerName), new CacheEntry(rank, System.currentTimeMillis())); } catch (Exception ignore) {}
+                                    }
                                 }
                                 // If override is active, keep API-derived value; do not clear the override early
                                 try { nameRankCache.put(cacheKeyFor(playerName), new CacheEntry(rank, System.currentTimeMillis())); } catch (Exception ignore) {}

@@ -108,7 +108,9 @@ public class PvPLeaderboardPlugin extends Plugin
 private volatile boolean shardReady = false;
     // Guard to prevent immediate false restarts caused by post-death hitsplats
 private volatile long suppressFightStartUntilMs = 0L;
-    // Per-opponent suppression after ending a fight with them; allows multi-combat with others
+    // Per-opponent suppression after ending a fight with them; allows multi-combat with others (using ticks)
+    private final ConcurrentHashMap<String, Integer> perOpponentSuppressUntilTicks = new ConcurrentHashMap<>();
+    // Legacy field removed
     private final ConcurrentHashMap<String, Long> perOpponentSuppressUntilMs = new ConcurrentHashMap<>();
     // Damage accounting since last out-of-combat window
     private final java.util.concurrent.ConcurrentHashMap<String, Long> damageFromOpponent = new java.util.concurrent.ConcurrentHashMap<>();
@@ -124,6 +126,12 @@ private volatile long suppressFightStartUntilMs = 0L;
     public String getClientUniqueId()
     {
         return clientUniqueId;
+    }
+    
+    // Accessor for DashboardPanel to get local player name for debug logs
+    public String getLocalPlayerName()
+    {
+        try { return client != null && client.getLocalPlayer() != null ? client.getLocalPlayer().getName() : null; } catch (Exception ignore) { return null; }
     }
 
 	@Override
@@ -169,28 +177,9 @@ private volatile long suppressFightStartUntilMs = 0L;
         
         this.clientUniqueId = finalId;
 
-        // Schedule GC task on injected scheduler
-        try {
-            fightGcTask = scheduler.scheduleAtFixedRate(() -> {
-                try {
-                    long now = System.currentTimeMillis();
-                    for (java.util.Map.Entry<String, FightEntry> e : activeFights.entrySet())
-                    {
-                        FightEntry fe = e.getValue();
-                        if (fe == null) continue;
-                        if (!fe.finalized && now - fe.lastActivityMs > 10_000L)
-                        {
-                            // Expire inactive fights without submission (combat lock ends after 10s)
-                            activeFights.remove(e.getKey());
-                            try { log.debug("[Fight] expire inactive vs={} lastActivity={}msAgo", e.getKey(), now - fe.lastActivityMs); } catch (Exception ignore) {}
-                        }
-                    }
-                    // Update global flag for compatibility
-                    inFight = !activeFights.isEmpty();
-                } catch (Exception ignore) {}
-            }, 1L, 1L, java.util.concurrent.TimeUnit.SECONDS);
-        } catch (Exception ignore) {}
-
+        // GC task is now handled in onGameTick; no separate scheduler required
+        // fightGcTask logic moved to onGameTick with 33-tick interval
+        
         // Add right-click player menu item based on config (default ON)
         try {
             if (config.enablePvpLookupMenu()) {
@@ -362,6 +351,9 @@ private volatile long suppressFightStartUntilMs = 0L;
     }
 
 
+    // State for pending self-rank lookups using tick timing instead of system clock
+    private int pendingSelfRankLookupTicks = -1;
+
 	@Subscribe
 	public void onGameStateChanged(GameStateChanged gameStateChanged)
 	{
@@ -383,7 +375,8 @@ private volatile long suppressFightStartUntilMs = 0L;
                     // Preload account hash linkage for self so overall lookups use account shard immediately
                     try { dashboardPanel.preloadSelfRankNumbers(self); } catch (Exception ignore) {}
 					// Schedule a slight delay to avoid null-name timing on rapid hops
-					try { if (rankOverlay != null) rankOverlay.scheduleSelfRankRefresh(250L); } catch (Exception ignore) {}
+                    // Use tick-based scheduling: wait 10 ticks (approx 6.0s) for login
+					pendingSelfRankLookupTicks = 10;
 				}
 				else
 				{
@@ -395,7 +388,8 @@ private volatile long suppressFightStartUntilMs = 0L;
 									String selfLater = client.getLocalPlayer().getName();
 									if (selfLater != null && !selfLater.trim().isEmpty()) {
 										try { if (dashboardPanel != null) dashboardPanel.lookupPlayerFromRightClick(selfLater); } catch (Exception ignore2) {}
-										try { if (rankOverlay != null) rankOverlay.scheduleSelfRankRefresh(0L); } catch (Exception ignore2) {}
+                                        // Defer logic triggers tick countdown
+                                        pendingSelfRankLookupTicks = 10;
 									}
 								}
 							} catch (Exception ignore2) {}
@@ -419,13 +413,8 @@ private volatile long suppressFightStartUntilMs = 0L;
 				}
 				try { log.debug("[Fight] scene change: {} (fight preserved)", gameStateChanged.getGameState()); } catch (Exception ignore) {}
 				// Nudge self rank refresh after a short delay so overlay repopulates post-hop
-				try {
-					if (rankOverlay != null) {
-						scheduler.schedule(() -> {
-							try { rankOverlay.scheduleSelfRankRefresh(0L); } catch (Exception ignore) {}
-						}, 600L, java.util.concurrent.TimeUnit.MILLISECONDS);
-					}
-				} catch (Exception ignore) {}
+                // Use tick-based scheduling: wait 3 ticks (approx 1.8s)
+                pendingSelfRankLookupTicks = 3;
 			} catch (Exception ignore) {}
 		}
 	}
@@ -435,6 +424,158 @@ private volatile long suppressFightStartUntilMs = 0L;
     @Subscribe
     public void onGameTick(GameTick tick)
     {
+        // Handle pending self-rank lookups (3-tick delay logic)
+        if (pendingSelfRankLookupTicks > 0)
+        {
+            pendingSelfRankLookupTicks--;
+            if (pendingSelfRankLookupTicks == 0)
+            {
+                pendingSelfRankLookupTicks = -1;
+                try { if (rankOverlay != null) rankOverlay.scheduleSelfRankRefresh(0L); } catch (Exception ignore) {}
+                try { log.debug("[Plugin] executing delayed self-rank lookup (10-tick delay)"); } catch (Exception ignore) {}
+            }
+        }
+        
+        // Handle pending finalizations (3-tick delay)
+        if (pendingFinalizeTicks > 0)
+        {
+            pendingFinalizeTicks--;
+            if (pendingFinalizeTicks == 0)
+            {
+                pendingFinalizeTicks = -1;
+                try
+                {
+                    String fallbackResult = pendingFinalizeFallback;
+                    try { log.info("[Fight] finalize task fired (tick); fightFinalized={} a={} b={} inFight={}", fightFinalized, selfDeathMs, opponentDeathMs, inFight); } catch (Exception ignore) {}
+                    if (fightFinalized) { try { log.info("[Fight] finalize task exit: already finalized"); } catch (Exception ignore) {} }
+                    else
+                    {
+                        long a = selfDeathMs;
+                        long b = opponentDeathMs;
+                        if (a > 0L && b > 0L && Math.abs(a - b) <= 1500L)
+                        {
+                            fightFinalized = true;
+                            try { log.info("[Fight] finalize tie (Δ={} ms)", Math.abs(a - b)); } catch (Exception ignore) {}
+                            Runnable fin = () -> { try { endFight("tie"); } catch (Exception e) { try { log.error("[Fight] endFight(tie) error", e); } catch (Exception ignore) {} } };
+                            try { if (clientThread != null) clientThread.invokeLater(fin); else fin.run(); } catch (Exception e) { fin.run(); }
+                        }
+                        else if (fallbackResult != null)
+                        {
+                            fightFinalized = true;
+                            try { log.info("[Fight] finalize {} after wait; a={}, b={}", fallbackResult, a, b); } catch (Exception ignore) {}
+                            final String outcome = fallbackResult;
+                            Runnable fin = () -> {
+                                try {
+                                    // Guard opponent presence; if lost due to relog, keep last known
+                                    if (opponent == null || opponent.isEmpty()) {
+                                        try { log.warn("[Fight] opponent missing at finalize; outcome={}, a={}, b={}", outcome, a, b); } catch (Exception ignore) {}
+                                    }
+                                    
+                                    endFight(outcome);
+                                } catch (Exception e) {
+                                    try { log.error("[Fight] endFight({}) error", outcome, e); } catch (Exception ignore) {}
+                                }
+                            };
+                            try { if (clientThread != null) clientThread.invokeLater(fin); else fin.run(); } catch (Exception e) { fin.run(); }
+                        }
+                    }
+                }
+                catch (Exception ignore) {}
+            }
+        }
+        
+        // Handle post-match refresh (25 ticks = 15s)
+        if (postMatchRefreshTicks > 0)
+        {
+            postMatchRefreshTicks--;
+            if (postMatchRefreshTicks == 0)
+            {
+                postMatchRefreshTicks = -1;
+                final String sName = postMatchRefreshSelf;
+                final String oName = postMatchRefreshOpp;
+                final String res = postMatchRefreshRes;
+                final String oRank = postMatchRefreshOppRank;
+                
+                // Self refresh
+                if (sName != null && !sName.isEmpty())
+                {
+                    java.util.concurrent.CompletableFuture.runAsync(() -> {
+                        try {
+                            String bucketLater = bucketKey(config.rankBucket());
+                            String selfTier = dashboardPanel.fetchSelfTierFromApi(sName, bucketLater);
+                            if (selfTier != null && !selfTier.isEmpty() && rankOverlay != null) {
+                                rankOverlay.setRankFromApi(sName, selfTier);
+                                // Force a shard lookup as in pvp lookup; override prevents clobbering
+                                try { rankOverlay.forceLookupAndDisplay(sName); } catch (Exception ignore) {}
+                            }
+                        } catch (Exception ignore) {}
+                    }, scheduler);
+                    try { dashboardPanel.preloadSelfRankNumbers(sName); } catch (Exception ignore) {}
+                }
+                
+                // Opponent refresh
+                if (oName != null && !oName.isEmpty())
+                {
+                    java.util.concurrent.CompletableFuture.runAsync(() -> {
+                        try {
+                            String bucketLater = bucketKey(config.rankBucket());
+                            String oppTier = dashboardPanel.fetchTierFromApi(oName, bucketLater);
+                            if (oppTier != null && !oppTier.isEmpty() && rankOverlay != null) {
+                                rankOverlay.setRankFromApi(oName, oppTier);
+                                try { rankOverlay.forceLookupAndDisplay(oName); } catch (Exception ignore) {}
+                            }
+                        } catch (Exception ignore) {}
+                    }, scheduler);
+                }
+                
+                try { dashboardPanel.updateAdditionalStatsFromPlugin("win".equals(res) ? oRank : null,
+                            "loss".equals(res) ? oRank : null); } catch (Exception ignore) {}
+            }
+        }
+        
+        // Handle fight suppression ticks
+        if (suppressFightStartTicks > 0)
+        {
+            suppressFightStartTicks--;
+        }
+        
+        // Handle per-opponent suppression ticks
+        if (!perOpponentSuppressUntilTicks.isEmpty())
+        {
+            java.util.Iterator<java.util.Map.Entry<String, Integer>> it = perOpponentSuppressUntilTicks.entrySet().iterator();
+            while (it.hasNext())
+            {
+                java.util.Map.Entry<String, Integer> e = it.next();
+                int val = e.getValue();
+                if (val <= 1) it.remove();
+                else e.setValue(val - 1);
+            }
+        }
+        
+        // Handle GC (every 33 ticks approx 20s)
+        gcTicksCounter++;
+        if (gcTicksCounter >= 33)
+        {
+            gcTicksCounter = 0;
+            try {
+                long now = System.currentTimeMillis();
+                for (java.util.Map.Entry<String, FightEntry> e : activeFights.entrySet())
+                {
+                    FightEntry fe = e.getValue();
+                    if (fe == null) continue;
+                    // Keep existing 10s logic for now, but check on tick cycle
+                    if (!fe.finalized && now - fe.lastActivityMs > 10_000L)
+                    {
+                        // Expire inactive fights without submission (combat lock ends after 10s)
+                        activeFights.remove(e.getKey());
+                        try { log.debug("[Fight] expire inactive vs={} lastActivity={}msAgo", e.getKey(), now - fe.lastActivityMs); } catch (Exception ignore) {}
+                    }
+                }
+                // Update global flag for compatibility
+                inFight = !activeFights.isEmpty();
+            } catch (Exception ignore) {}
+        }
+
         // If idle beyond the combat window, clear damage and active fights window cleanly
         int tickNow = 0; try { tickNow = client.getTickCount(); } catch (Exception ignore) {}
 		if (tickNow - lastCombatActivityTick > OUT_OF_COMBAT_TICKS && (!damageFromOpponent.isEmpty() || !damageToOpponent.isEmpty()))
@@ -551,16 +692,16 @@ private volatile long suppressFightStartUntilMs = 0L;
 							return;
 						}
 					} catch (Exception ignore) {}
-					long nowMsCheck = System.currentTimeMillis();
-					if (nowMsCheck < suppressFightStartUntilMs)
+					// Check global suppression
+					if (suppressFightStartTicks > 0)
 					{
-						try { log.info("[Fight] start suppressed at {}ms (until {}ms)", nowMsCheck, suppressFightStartUntilMs); } catch (Exception ignore) {}
+						try { log.info("[Fight] start suppressed ({} ticks remaining)", suppressFightStartTicks); } catch (Exception ignore) {}
 						return;
 					}
-					Long untilMs = perOpponentSuppressUntilMs.get(opponentName);
-					if (untilMs != null && System.currentTimeMillis() < untilMs)
+					// Check per-opponent suppression
+					if (perOpponentSuppressUntilTicks.containsKey(opponentName))
 					{
-						try { log.info("[Fight] start suppressed for opponent={} until {}ms", opponentName, untilMs); } catch (Exception ignore) {}
+						try { log.info("[Fight] start suppressed for opponent={} ({} ticks remaining)", opponentName, perOpponentSuppressUntilTicks.get(opponentName)); } catch (Exception ignore) {}
 						return;
 					}
 					touchFight(opponentName);
@@ -785,35 +926,17 @@ private void startFight(String opponentName)
                     }
                     try { dashboardPanel.updateTierGraphRealTime(bucket, currentMMR); } catch (Exception ignore) {}
                     try {
-                        // Schedule a single self refresh via API at +15s to capture backend-updated rating
-                        scheduler.schedule(() -> {
-                            try {
-                                String bucketLater = bucketKey(config.rankBucket());
-                                String selfTier = dashboardPanel.fetchSelfTierFromApi(selfNameSafe, bucketLater);
-                                if (selfTier != null && !selfTier.isEmpty() && rankOverlay != null) {
-                                    rankOverlay.setRankFromApi(selfNameSafe, selfTier);
-                                    // Force a shard lookup as in pvp lookup; override prevents clobbering
-                                    try { rankOverlay.forceLookupAndDisplay(selfNameSafe); } catch (Exception ignore) {}
-                                }
-                            } catch (Exception ignore) {}
-                        }, 15L, java.util.concurrent.TimeUnit.SECONDS);
+                        // Set post-match refresh countdown (15s = 25 ticks)
+                        postMatchRefreshTicks = 25;
+                        postMatchRefreshSelf = selfNameSafe;
+                        postMatchRefreshOpp = opponentSafe;
+                        postMatchRefreshRes = result;
+                        postMatchRefreshOppRank = opponentRank;
+                        
                         try { dashboardPanel.preloadSelfRankNumbers(selfNameSafe); } catch (Exception ignore) {}
                     } catch (Exception ignore) {}
                     try { dashboardPanel.updateAdditionalStatsFromPlugin("win".equals(result) ? opponentRank : null,
                             "loss".equals(result) ? opponentRank : null); } catch (Exception ignore) {}
-                    // Also refresh opponent via API at +15s and force a shard lookup
-                    if (opponentSafe != null && !opponentSafe.isEmpty()) {
-                        scheduler.schedule(() -> {
-                            try {
-                                String bucketLater = bucketKey(config.rankBucket());
-                                String oppTier = dashboardPanel.fetchTierFromApi(opponentSafe, bucketLater);
-                                if (oppTier != null && !oppTier.isEmpty() && rankOverlay != null) {
-                                    rankOverlay.setRankFromApi(opponentSafe, oppTier);
-                                    try { rankOverlay.forceLookupAndDisplay(opponentSafe); } catch (Exception ignore) {}
-                                }
-                            } catch (Exception ignore) {}
-                        }, 15L, java.util.concurrent.TimeUnit.SECONDS);
-                    }
                 }
             }
             catch (Exception e)
@@ -823,11 +946,11 @@ private void startFight(String opponentName)
         }, scheduler);
 
         log.info("Fight ended with result: " + result + ", Multi during fight: " + wasInMulti + ", Start spellbook: " + startSpellbookSafe + ", End spellbook: " + endSpellbookSafe);
-        // Add per-opponent suppression for 3 seconds so trailing hitsplats from that opponent don't re-start a fight,
+        // Add per-opponent suppression for 5 ticks (3 seconds) so trailing hitsplats from that opponent don't re-start a fight,
         // but allow combat with other players to start immediately.
         try {
             if (opponentSafe != null && !opponentSafe.isEmpty()) {
-                perOpponentSuppressUntilMs.put(opponentSafe, System.currentTimeMillis() + 3000L);
+                perOpponentSuppressUntilTicks.put(opponentSafe, 5);
             }
         } catch (Exception ignore) {}
         resetFightState();
@@ -883,65 +1006,32 @@ private void startFight(String opponentName)
         resetFightState();
     }
 
+    // State for pending finalizations using tick timing
+    private int pendingFinalizeTicks = -1;
+    private String pendingFinalizeFallback = null;
+    
+    // State for post-match refresh ticks
+    private int postMatchRefreshTicks = -1;
+    private String postMatchRefreshSelf = null;
+    private String postMatchRefreshOpp = null;
+    private String postMatchRefreshRes = null;
+    private String postMatchRefreshOppRank = null;
+    
+    // State for fight suppression using ticks
+    private int suppressFightStartTicks = 0;
+    
+    // State for GC ticks
+    private int gcTicksCounter = 0;
+
     @SuppressWarnings("unused")
     private void scheduleDoubleKoCheck(String fallbackResult)
 	{
 		try
 		{
-            // Use injected scheduler for finalize checks
-            final long scheduledAt = System.currentTimeMillis();
-            try { log.info("[Fight] scheduling finalize in 1500ms (fallback={}), a={}, b={}", fallbackResult, selfDeathMs, opponentDeathMs); } catch (Exception ignore) {}
-            scheduler.schedule(() -> {
-				try
-				{
-                    try { log.info("[Fight] finalize task fired; fightFinalized={} a={} b={} inFight={}", fightFinalized, selfDeathMs, opponentDeathMs, inFight); } catch (Exception ignore) {}
-                    if (fightFinalized) { try { log.info("[Fight] finalize task exit: already finalized"); } catch (Exception ignore) {} return; }
-					long a = selfDeathMs;
-					long b = opponentDeathMs;
-                    if (a > 0L && b > 0L && Math.abs(a - b) <= 1500L)
-					{
-						fightFinalized = true;
-                        try { log.info("[Fight] finalize tie (Δ={} ms)", Math.abs(a - b)); } catch (Exception ignore) {}
-                        Runnable fin = () -> { try { endFight("tie"); } catch (Exception e) { try { log.error("[Fight] endFight(tie) error", e); } catch (Exception ignore) {} } };
-                        try { if (clientThread != null) clientThread.invokeLater(fin); else fin.run(); } catch (Exception e) { fin.run(); }
-						return;
-					}
-					if (fallbackResult != null && !fightFinalized)
-					{
-						fightFinalized = true;
-                        try { log.info("[Fight] finalize {} after wait; a={}, b={}, scheduledAt={}", fallbackResult, a, b, scheduledAt); } catch (Exception ignore) {}
-                        final String outcome = fallbackResult;
-                        Runnable fin = () -> {
-                            try {
-                                // Guard opponent presence; if lost due to relog, keep last known
-                                if (opponent == null || opponent.isEmpty()) {
-                                    try { log.warn("[Fight] opponent missing at finalize; outcome={}, a={}, b={}", outcome, a, b); } catch (Exception ignore) {}
-                                }
-                                
-                                endFight(outcome);
-                            } catch (Exception e) {
-                                try { log.error("[Fight] endFight({}) error", outcome, e); } catch (Exception ignore) {}
-                            }
-                        };
-                        try { if (clientThread != null) clientThread.invokeLater(fin); else fin.run(); } catch (Exception e) { fin.run(); }
-					}
-				}
-				catch (Exception ignore) {}
-            }, 1500L, java.util.concurrent.TimeUnit.MILLISECONDS);
-
-            // Watchdog: force finalize shortly after guard if still not finalized
-            scheduler.schedule(() -> {
-                try
-                {
-                    if (fightFinalized) { try { log.info("[Fight] watchdog exit: already finalized"); } catch (Exception ignore) {} return; }
-                    fightFinalized = true;
-                    final String outcome = (fallbackResult != null ? fallbackResult : "loss");
-                    try { log.warn("[Fight] watchdog finalize {}; a={} b={} scheduledAt={}", outcome, selfDeathMs, opponentDeathMs, scheduledAt); } catch (Exception ignore) {}
-                    Runnable fin = () -> { try { endFight(outcome); } catch (Exception e) { try { log.error("[Fight] watchdog endFight({}) error", outcome, e); } catch (Exception ignore) {} } };
-                    try { if (clientThread != null) clientThread.invokeLater(fin); else fin.run(); } catch (Exception e) { fin.run(); }
-                }
-                catch (Exception ignore) {}
-            }, 2000L, java.util.concurrent.TimeUnit.MILLISECONDS);
+            try { log.info("[Fight] scheduling finalize in 3 ticks (fallback={}), a={}, b={}", fallbackResult, selfDeathMs, opponentDeathMs); } catch (Exception ignore) {}
+            // Use tick-based scheduling: wait 3 ticks (approx 1.8s)
+            pendingFinalizeTicks = 3;
+            pendingFinalizeFallback = fallbackResult;
 		}
 		catch (Exception ignore) {}
 	}
@@ -954,12 +1044,13 @@ private void startFight(String opponentName)
 		fightEndSpellbook = -1;
 		opponent = null;
         fightStartTime = 0;
-        // After finishing a fight, briefly suppress new starts to ignore trailing hitsplats
-        try { suppressFightStartUntilMs = System.currentTimeMillis() + 800L; } catch (Exception ignore) { suppressFightStartUntilMs = 0L; }
+        // After finishing a fight, briefly suppress new starts to ignore trailing hitsplats (approx 1.3 ticks -> 2 ticks)
+        suppressFightStartTicks = 2;
+        try { suppressFightStartUntilMs = 0L; } catch (Exception ignore) {} // Clear legacy ms field
         activeFights.clear();
         damageFromOpponent.clear();
         lastCombatActivityTick = 0;
-		try { log.debug("[Fight] state reset; suppressUntilMs={} activeFightsCleared" , suppressFightStartUntilMs); } catch (Exception ignore) {}
+        try { log.debug("[Fight] state reset; suppressTicks={} activeFightsCleared" , suppressFightStartTicks); } catch (Exception ignore) {}
 	}
 
 	private String resolveInboundAttacker(Player localPlayer)
