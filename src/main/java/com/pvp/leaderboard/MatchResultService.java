@@ -58,7 +58,8 @@ public class MatchResultService
         boolean wasInMulti,
         long accountHash,
         String idToken,
-        long damageToOpponent)
+        long damageToOpponent,
+        String clientUniqueId)
     {
         CompletableFuture<Boolean> overall = new CompletableFuture<>();
         try
@@ -101,11 +102,11 @@ public class MatchResultService
 
             if (idToken != null && !idToken.isEmpty())
             {
-                submitAuthenticatedFightAsync(bodyJson, accountHash, idToken).whenComplete((ok, ex) -> {
+                submitAuthenticatedFightAsync(bodyJson, accountHash, idToken, clientUniqueId).whenComplete((ok, ex) -> {
                     if (ex != null)
                     {
                         log.debug("[Submit] authenticated exception; fallback to unauth path", ex);
-                        submitUnauthenticatedFightAsync(bodyJson, accountHash).whenComplete((ok2, ex2) -> {
+                        submitUnauthenticatedFightAsync(bodyJson, accountHash, clientUniqueId).whenComplete((ok2, ex2) -> {
                             if (ex2 != null) overall.complete(false); else overall.complete(ok2);
                         });
                         return;
@@ -118,7 +119,7 @@ public class MatchResultService
                     else
                     {
                         log.debug("[Submit] authenticated failed; fallback to unauth path");
-                        submitUnauthenticatedFightAsync(bodyJson, accountHash).whenComplete((ok2, ex2) -> {
+                        submitUnauthenticatedFightAsync(bodyJson, accountHash, clientUniqueId).whenComplete((ok2, ex2) -> {
                             if (ex2 != null) overall.complete(false); else overall.complete(ok2);
                         });
                     }
@@ -126,7 +127,7 @@ public class MatchResultService
             }
             else
             {
-                submitUnauthenticatedFightAsync(bodyJson, accountHash).whenComplete((ok, ex) -> {
+                submitUnauthenticatedFightAsync(bodyJson, accountHash, clientUniqueId).whenComplete((ok, ex) -> {
                     if (ex != null) overall.complete(false); else overall.complete(ok);
                 });
             }
@@ -139,7 +140,7 @@ public class MatchResultService
         return overall;
     }
 
-    private CompletableFuture<Boolean> submitAuthenticatedFightAsync(String body, long accountHash, String idToken)
+    private CompletableFuture<Boolean> submitAuthenticatedFightAsync(String body, long accountHash, String idToken, String clientUniqueId)
     {
         CompletableFuture<Boolean> future = new CompletableFuture<>();
 
@@ -148,6 +149,7 @@ public class MatchResultService
             .post(RequestBody.create(JSON, body))
             .addHeader("Authorization", "Bearer " + idToken)
             .addHeader("x-account-hash", String.valueOf(accountHash))
+            .addHeader("X-Client-Unique-Id", clientUniqueId)
             .build();
 
         // Detailed client-side logging to validate final request shape
@@ -196,7 +198,7 @@ public class MatchResultService
         return future;
     }
 
-    private CompletableFuture<Boolean> submitUnauthenticatedFightAsync(String body, long accountHash)
+    private CompletableFuture<Boolean> submitUnauthenticatedFightAsync(String body, long accountHash, String clientUniqueId)
     {
         CompletableFuture<Boolean> future = new CompletableFuture<>();
         long timestamp = System.currentTimeMillis() / 1000;
@@ -218,6 +220,7 @@ public class MatchResultService
             .addHeader("x-client-id", CLIENT_ID)
             .addHeader("x-timestamp", String.valueOf(timestamp))
             .addHeader("x-signature", signature)
+            .addHeader("X-Client-Unique-Id", clientUniqueId)
             .build();
 
         // Detailed client-side logging to validate final request shape

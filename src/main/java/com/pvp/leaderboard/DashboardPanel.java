@@ -109,7 +109,7 @@ public class DashboardPanel extends PluginPanel
         put("Bronze", new Color(184, 115, 51));
         put("Iron", new Color(192, 192, 192));
         put("Steel", new Color(154, 162, 166));
-        put("Black", new Color(106, 106, 106));
+        put("Black", Color.GRAY);
         put("Mithril", new Color(59, 167, 214));
         put("Adamant", new Color(26, 139, 111));
         put("Rune", new Color(78, 159, 227));
@@ -123,8 +123,13 @@ public class DashboardPanel extends PluginPanel
         return RANK_COLORS.getOrDefault(baseName, new Color(102, 102, 102));
     }
 
+    private Color getRankTextColor(String rankName) {
+        if (config != null && config.colorblindMode()) return Color.WHITE;
+        return getRankColor(rankName);
+    }
+
     // In-memory cache for /user profile responses to avoid blank UI when backend throttles or fails
-    private static final long USER_CACHE_TTL_MS = 60L * 60L * 1000L; // 1 hour
+    private static final long USER_CACHE_TTL_MS = 60L * 1000L; // 60 seconds
     private static class UserStatsCache { final JsonObject stats; final long ts; UserStatsCache(JsonObject s, long t) { this.stats = s; this.ts = t; } }
     private final ConcurrentHashMap<String, UserStatsCache> userStatsCache = new ConcurrentHashMap<>();
 
@@ -156,11 +161,11 @@ public class DashboardPanel extends PluginPanel
     // Prevent repeated API attempts when network/DNS is down
     private volatile long apiDownUntilMs = 0L;
     // Cache for per-(player,bucket) rank number lookups (API/shard fast-path)
-    private static final long RANK_NUMBER_CACHE_TTL_MS = 60L * 60L * 1000L; // 1 hour
+    private static final long RANK_NUMBER_CACHE_TTL_MS = 10L * 60L * 1000L; // 10 minutes
     private static class RankNumberCache { final int rank; final long ts; RankNumberCache(int r, long t) { this.rank = r; this.ts = t; } }
     private final ConcurrentHashMap<String, RankNumberCache> rankNumberCache = new ConcurrentHashMap<>();
     // Cache for overall world rank (can be cached longer; backend TTL ~24h)
-    private static final long WORLD_RANK_CACHE_TTL_MS = 60L * 60L * 1000L; // 1 hour
+    private static final long WORLD_RANK_CACHE_TTL_MS = 12L * 60L * 60L * 1000L; // 12 hours
     private static class WorldRankCache { final int worldRank; final long ts; WorldRankCache(int r, long t) { this.worldRank = r; this.ts = t; } }
     private final ConcurrentHashMap<String, WorldRankCache> worldRankCache = new ConcurrentHashMap<>();
     private static final String API_BASE = "https://kekh0x6kfk.execute-api.us-east-1.amazonaws.com/prod";
@@ -1085,7 +1090,12 @@ public class DashboardPanel extends PluginPanel
             }
 			// Use user endpoint by player_id like website does (OkHttp + Gson)
             String apiUrl = "https://kekh0x6kfk.execute-api.us-east-1.amazonaws.com/prod/user?player_id=" + URLEncoder.encode(normalizePlayerId(playerId), "UTF-8");
-            Request req = new Request.Builder().url(apiUrl).get().header("Cache-Control","no-store").build();
+            Request.Builder reqBuilder = new Request.Builder().url(apiUrl).get().header("Cache-Control","no-store");
+            if (plugin != null && plugin.getClientUniqueId() != null)
+            {
+                reqBuilder.header("X-Client-Unique-Id", plugin.getClientUniqueId());
+            }
+            Request req = reqBuilder.build();
             httpClient.newCall(req).enqueue(new Callback() {
                 @Override
                 public void onFailure(Call call, java.io.IOException e) {
@@ -1353,6 +1363,31 @@ public class DashboardPanel extends PluginPanel
         return -1;
     }
 
+    public int getCachedRankNumberByName(String playerName, String bucket)
+    {
+        try
+        {
+            String canonBucket = bucket == null ? "overall" : bucket.toLowerCase();
+            String playerKey = normalizeDisplayName(playerName);
+            String cacheKey = (canonBucket + "|" + playerKey);
+            
+            if ("overall".equals(canonBucket))
+            {
+                // Check world rank cache
+                String key = "name:" + playerKey;
+                WorldRankCache c = worldRankCache.get(key);
+                if (c != null && (System.currentTimeMillis() - c.ts) <= WORLD_RANK_CACHE_TTL_MS) {
+                    return c.worldRank;
+                }
+                return -1;
+            }
+            
+            return getCachedRankNumber(cacheKey);
+        }
+        catch (Exception ignore) {}
+        return -1;
+    }
+
     public int getRankNumberByName(String playerName, String bucket)
     {
         try
@@ -1498,81 +1533,74 @@ public class DashboardPanel extends PluginPanel
             String canonBucket = bucket == null ? "overall" : bucket.toLowerCase();
             String pid = normalizePlayerId(playerName);
             if (pid == null || pid.isEmpty()) return null;
-			if ("overall".equals(canonBucket))
-            {
-                String apiUrl = "https://kekh0x6kfk.execute-api.us-east-1.amazonaws.com/prod/user?player_id=" + URLEncoder.encode(pid, "UTF-8");
-                Request req = new Request.Builder().url(apiUrl).get().build();
-                final java.util.concurrent.CompletableFuture<String> fut = new java.util.concurrent.CompletableFuture<>();
-                httpClient.newCall(req).enqueue(new Callback() {
-                    @Override public void onFailure(Call call, java.io.IOException e) { fut.complete(null); }
-                    @Override public void onResponse(Call call, Response response) throws java.io.IOException {
-                        try (Response res = response) {
-                            if (!res.isSuccessful() || res.body() == null) { fut.complete(null); return; }
-                            okhttp3.ResponseBody rb = res.body();
-                            String body = rb != null ? rb.string() : "";
-                            fut.complete(body);
-                        }
+
+            // Use /user endpoint for all buckets as it contains the full breakdown
+            // Use 'player' parameter which supports name lookup (player_id seemed flaky in tests)
+            String apiUrl = API_BASE + "/user?player=" + URLEncoder.encode(pid, "UTF-8");
+            
+            Request req = new Request.Builder().url(apiUrl).get().build();
+            final java.util.concurrent.CompletableFuture<String> fut = new java.util.concurrent.CompletableFuture<>();
+            httpClient.newCall(req).enqueue(new Callback() {
+                @Override public void onFailure(Call call, java.io.IOException e) { fut.complete(null); }
+                @Override public void onResponse(Call call, Response response) throws java.io.IOException {
+                    try (Response res = response) {
+                        if (!res.isSuccessful() || res.body() == null) { fut.complete(null); return; }
+                        okhttp3.ResponseBody rb = res.body();
+                        String body = rb != null ? rb.string() : "";
+                        fut.complete(body);
                     }
-                });
-                String response = fut.get(5, java.util.concurrent.TimeUnit.SECONDS);
-                if (response == null || response.isEmpty()) return null;
-                JsonObject stats = gson.fromJson(response, JsonObject.class);
-                if (stats.has("mmr") && !stats.get("mmr").isJsonNull())
-                {
-                    double mmr = stats.get("mmr").getAsDouble();
+                }
+            });
+            String response = fut.get(5, java.util.concurrent.TimeUnit.SECONDS);
+            if (response == null || response.isEmpty()) return null;
+            
+            JsonObject stats = gson.fromJson(response, JsonObject.class);
+            if (stats == null) return null;
+
+            JsonObject targetObj = stats; // Default to root (mirrors overall)
+            
+            // If specific bucket requested, look in 'buckets' map
+            if (!"overall".equals(canonBucket)) {
+                 if (stats.has("buckets") && !stats.get("buckets").isJsonNull()) {
+                     JsonObject bucketsObj = stats.getAsJsonObject("buckets");
+                     if (bucketsObj.has(canonBucket) && !bucketsObj.get(canonBucket).isJsonNull()) {
+                         targetObj = bucketsObj.getAsJsonObject(canonBucket);
+                     } else {
+                         return null; // Bucket not found
+                     }
+                 } else {
+                     return null; // No buckets map
+                 }
+            } else {
+                // For overall, check if we should prefer root or buckets.overall
+                // Root properties usually mirror overall. Let's stick to root but if missing, check buckets.
+                 if ((!stats.has("rank") || stats.get("rank").isJsonNull()) && stats.has("buckets")) {
+                     JsonObject bucketsObj = stats.getAsJsonObject("buckets");
+                     if (bucketsObj.has("overall") && !bucketsObj.get("overall").isJsonNull()) {
+                         targetObj = bucketsObj.getAsJsonObject("overall");
+                     }
+                 }
+            }
+            
+            // Extract rank and division
+            String rank = targetObj.has("rank") && !targetObj.get("rank").isJsonNull() ? targetObj.get("rank").getAsString() : null;
+            int div = targetObj.has("division") && !targetObj.get("division").isJsonNull() ? targetObj.get("division").getAsInt() : 0;
+            
+            if (rank != null && !rank.isEmpty()) {
+                return rank + (div > 0 ? " " + div : "");
+            }
+            
+            // Fallback: if no explicit rank string, try MMR for overall/root
+            if (targetObj.has("mmr") && !targetObj.get("mmr").isJsonNull())
+            {
+                double mmr = targetObj.get("mmr").getAsDouble();
+                if (mmr > 0) {
                     RankInfo ri = rankLabelAndProgressFromMMR(mmr);
                     return ri != null ? (ri.rank + (ri.division > 0 ? " " + ri.division : "")) : null;
                 }
-                return null;
             }
-            else
-            {
-				// Pull recent matches and infer tier for the requested bucket from latest match
-                String apiUrl = "https://kekh0x6kfk.execute-api.us-east-1.amazonaws.com/prod/matches?player_id=" + URLEncoder.encode(pid, "UTF-8") + "&limit=50";
-                Request req = new Request.Builder().url(apiUrl).get().build();
-                final java.util.concurrent.CompletableFuture<String> fut2 = new java.util.concurrent.CompletableFuture<>();
-                httpClient.newCall(req).enqueue(new Callback() {
-                    @Override public void onFailure(Call call, java.io.IOException e) { fut2.complete(null); }
-                    @Override public void onResponse(Call call, Response response) throws java.io.IOException {
-                        try (Response res = response) {
-                            if (!res.isSuccessful() || res.body() == null) { fut2.complete(null); return; }
-                            okhttp3.ResponseBody rb = res.body();
-                            String body = rb != null ? rb.string() : "";
-                            fut2.complete(body);
-                        }
-                    }
-                });
-                String response = fut2.get(6, java.util.concurrent.TimeUnit.SECONDS);
-                if (response == null || response.isEmpty()) return null;
-                JsonObject obj = gson.fromJson(response, JsonObject.class);
-                JsonArray matches = obj.has("matches") ? obj.getAsJsonArray("matches") : null;
-                if (matches == null) return null;
-                JsonObject latest = null;
-                for (int i = 0; i < matches.size(); i++)
-                {
-                    JsonObject m = matches.get(i).getAsJsonObject();
-                    String b = m.has("bucket") && !m.get("bucket").isJsonNull() ? m.get("bucket").getAsString().toLowerCase() : "";
-                    if (!canonBucket.equals(b)) continue;
-                    if (latest == null || (m.has("when") && latest.has("when") && m.get("when").getAsLong() > latest.get("when").getAsLong()))
-                    {
-                        latest = m;
-                    }
-                }
-                if (latest == null) return null;
-                if (latest.has("player_mmr") && !latest.get("player_mmr").isJsonNull())
-                {
-                    double mmr = latest.get("player_mmr").getAsDouble();
-                    RankInfo ri = rankLabelAndProgressFromMMR(mmr);
-                    return ri != null ? (ri.rank + (ri.division > 0 ? " " + ri.division : "")) : null;
-                }
-                if (latest.has("player_rank") && !latest.get("player_rank").isJsonNull())
-                {
-                    String rank = latest.get("player_rank").getAsString();
-                    int div = latest.has("player_division") && !latest.get("player_division").isJsonNull() ? latest.get("player_division").getAsInt() : 0;
-                    return rank + (div > 0 ? " " + div : "");
-                }
-                return null;
-            }
+            
+            return null;
         }
         catch (Exception ignore)
         {
@@ -1991,7 +2019,7 @@ public class DashboardPanel extends PluginPanel
         }
         
         progressLabels[index].setText(labelText);
-        progressLabels[index].setForeground(getRankColor(rank));
+        progressLabels[index].setForeground(getRankTextColor(rank));
         
         int pctValue = (int) Math.round(Math.max(0.0, Math.min(100.0, pct)));
         if (pctValue >= 99) {
@@ -2148,6 +2176,14 @@ public class DashboardPanel extends PluginPanel
         String input = websiteSearchField.getText().trim();
         if (input.isEmpty()) return;
         String exact = normalizeDisplayName(input);
+
+        final String fallbackUrl;
+        try {
+            fallbackUrl = "https://devsecopsautomated.com/profile.html?player=" + URLEncoder.encode(exact, "UTF-8");
+        } catch (Exception e) {
+            return;
+        }
+
         // Async via OkHttp; UI updates on EDT
         try {
             String apiUrl = "https://kekh0x6kfk.execute-api.us-east-1.amazonaws.com/prod/user?player_id=" + URLEncoder.encode(exact, "UTF-8");
@@ -2155,36 +2191,51 @@ public class DashboardPanel extends PluginPanel
             httpClient.newCall(req).enqueue(new Callback() {
                 @Override
                 public void onFailure(Call call, java.io.IOException e) {
-                    // Popup disabled per requirement
+                    // API failed, fallback to player URL
+                    SwingUtilities.invokeLater(() -> {
+                        try { Desktop.getDesktop().browse(URI.create(fallbackUrl)); } catch (Exception ignore) {}
+                    });
                 }
 
                 @Override
                 public void onResponse(Call call, Response response) throws java.io.IOException {
                     try (Response res = response) {
-                        if (!res.isSuccessful() || res.body() == null) return;
+                        if (!res.isSuccessful() || res.body() == null) {
+                            SwingUtilities.invokeLater(() -> {
+                                try { Desktop.getDesktop().browse(URI.create(fallbackUrl)); } catch (Exception ignore) {}
+                            });
+                            return;
+                        }
                         okhttp3.ResponseBody rb = res.body();
                         String body;
                         try {
                             body = rb != null ? rb.string() : "";
                         } catch (Exception ex) {
-                            JsonObject fallback = getFreshUserStatsFromCache(exact);
-                            if (fallback != null) {
-                                SwingUtilities.invokeLater(() -> updateProgressBars(fallback));
-                            }
+                            SwingUtilities.invokeLater(() -> {
+                                try { Desktop.getDesktop().browse(URI.create(fallbackUrl)); } catch (Exception ignore) {}
+                            });
                             return;
                         }
-                        JsonObject data = gson.fromJson(body, JsonObject.class);
-                        if (data.has("account_hash") && !data.get("account_hash").isJsonNull()) {
-                            String accountHash = data.get("account_hash").getAsString();
-                            String accountSha;
-                            try {
-                                accountSha = generateAccountSha(accountHash);
-                            } catch (Exception ex) {
-                                return;
+                        
+                        try {
+                            JsonObject data = gson.fromJson(body, JsonObject.class);
+                            if (data.has("account_hash") && !data.get("account_hash").isJsonNull()) {
+                                String accountHash = data.get("account_hash").getAsString();
+                                String accountSha = generateAccountSha(accountHash);
+                                String profileUrl = "https://devsecopsautomated.com/profile.html?acct=" + accountSha;
+                                SwingUtilities.invokeLater(() -> {
+                                    try { Desktop.getDesktop().browse(URI.create(profileUrl)); } catch (Exception ignore) {}
+                                });
+                            } else {
+                                // No account hash, fallback
+                                SwingUtilities.invokeLater(() -> {
+                                    try { Desktop.getDesktop().browse(URI.create(fallbackUrl)); } catch (Exception ignore) {}
+                                });
                             }
-                            String profileUrl = "https://devsecopsautomated.com/profile.html?acct=" + accountSha;
+                        } catch (Exception e) {
+                            // JSON parse error or other error, fallback
                             SwingUtilities.invokeLater(() -> {
-                                try { Desktop.getDesktop().browse(URI.create(profileUrl)); } catch (Exception ignore) {}
+                                try { Desktop.getDesktop().browse(URI.create(fallbackUrl)); } catch (Exception ignore) {}
                             });
                         }
                     }
@@ -2473,7 +2524,7 @@ public class DashboardPanel extends PluginPanel
                 String[] tiers = {"Bronze", "Iron", "Steel", "Black", "Mithril", "Adamant", "Rune", "Dragon", "3rd Age"};
                 Color[] tierColors = {
                     new Color(184, 115, 51), new Color(192, 192, 192), new Color(154, 162, 166),
-                    new Color(46, 46, 46), new Color(59, 167, 214), new Color(26, 139, 111),
+                    Color.GRAY, new Color(59, 167, 214), new Color(26, 139, 111),
                     new Color(78, 159, 227), new Color(229, 57, 53), new Color(229, 193, 0)
                 };
                 
@@ -2482,6 +2533,9 @@ public class DashboardPanel extends PluginPanel
                     int y = 20 + (i * height / tiers.length);
                     g2.setColor(tierColors[i]);
                     g2.drawLine(20, y, width + 20, y);
+                    if (config != null && config.colorblindMode()) {
+                        g2.setColor(Color.WHITE);
+                    }
                     g2.drawString(tiers[tiers.length - 1 - i], 2, y + 5);
                 }
                 

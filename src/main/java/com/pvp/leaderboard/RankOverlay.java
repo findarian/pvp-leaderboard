@@ -5,6 +5,7 @@ import net.runelite.api.Client;
 import net.runelite.api.Player;
 import net.runelite.api.Point;
 import net.runelite.api.ItemID;
+import net.runelite.client.callback.ClientThread;
 import net.runelite.client.game.ItemManager;
 import net.runelite.client.ui.overlay.Overlay;
 import net.runelite.client.ui.overlay.OverlayLayer;
@@ -72,7 +73,7 @@ public class RankOverlay extends Overlay
 
     private String cacheKeyFor(String name)
     {
-        String normalized = (name == null ? "" : name.trim().replaceAll("\\s+"," "));
+        String normalized = NameUtils.canonicalKey(name);
         return bucketKey(config.rankBucket()) + "|" + normalized;
     }
     private static long computeThrottleDelayMs(int level)
@@ -96,15 +97,20 @@ public class RankOverlay extends Overlay
         try { if (DEBUG_OVERLAY_LOGS) log.debug("[Overlay] scheduleSelfRankRefresh delayMs={} nextAllowedAtMs={}", delayMs, nextSelfRankAllowedAtMs); } catch (Exception ignore) {}
         // Do not clear the currently displayed self rank; keep it while the refresh happens
         // to avoid visual flicker during combat or after submissions.
-        try
+        if (clientThread != null)
         {
-            if (client != null && client.getLocalPlayer() != null && client.getLocalPlayer().getName() != null)
-            {
-                String self = client.getLocalPlayer().getName();
-                try { nameRankCache.remove(cacheKeyFor(self)); } catch (Exception ignore) {}
-            }
+            clientThread.invokeLater(() -> {
+                try
+                {
+                    if (client != null && client.getLocalPlayer() != null && client.getLocalPlayer().getName() != null)
+                    {
+                        String self = client.getLocalPlayer().getName();
+                        try { nameRankCache.remove(cacheKeyFor(self)); } catch (Exception ignore) {}
+                    }
+                }
+                catch (Exception ignore) {}
+            });
         }
-        catch (Exception ignore) {}
     }
 
     public void resetLookupStateOnWorldHop()
@@ -127,48 +133,54 @@ public class RankOverlay extends Overlay
 
     public String getCachedRankFor(String playerName)
     {
-        return displayedRanks.get(playerName);
+        return displayedRanks.get(NameUtils.canonicalKey(playerName));
     }
 
     public void forceLookupAndDisplay(String playerName)
     {
         if (playerName == null || playerName.trim().isEmpty()) return;
-        try
+        if (clientThread != null)
         {
-            attemptedLookup.remove(playerName);
-            if (fetchInFlight.putIfAbsent(playerName, Boolean.TRUE) == null)
-            {
-                log.debug("[Overlay] forced fetch for player={} bucket={}", playerName, bucketKey(config.rankBucket()));
-                final String ln; try { ln = client != null && client.getLocalPlayer() != null ? client.getLocalPlayer().getName() : null; } catch (Exception ex) { /* fallback */ return; }
-                final boolean isSelf = (ln != null && ln.equals(playerName));
-                java.util.concurrent.CompletableFuture.supplyAsync(() -> {
-                    try {
-                        return plugin != null ? plugin.resolvePlayerRankNoClient(playerName, bucketKey(config.rankBucket()), isSelf) : null;
-                    } catch (Exception e) { return null; }
-                }, scheduler).thenAccept(rank -> {
-                    try
+            clientThread.invokeLater(() -> {
+                try
+                {
+                    String key = NameUtils.canonicalKey(playerName);
+                    attemptedLookup.remove(key);
+                    if (fetchInFlight.putIfAbsent(key, Boolean.TRUE) == null)
                     {
-                        if (rank != null)
-                        {
-                            displayedRanks.put(playerName, rank);
-                            if (loggedFetch.putIfAbsent(playerName, Boolean.TRUE) == null)
+                        log.debug("[Overlay] forced fetch for player={} bucket={}", playerName, bucketKey(config.rankBucket()));
+                        final String ln; try { ln = client != null && client.getLocalPlayer() != null ? client.getLocalPlayer().getName() : null; } catch (Exception ex) { /* fallback */ return; }
+                        final boolean isSelf = (ln != null && ln.equalsIgnoreCase(playerName));
+                        java.util.concurrent.CompletableFuture.supplyAsync(() -> {
+                            try {
+                                return plugin != null ? plugin.resolvePlayerRankNoClient(playerName, bucketKey(config.rankBucket()), isSelf) : null;
+                            } catch (Exception e) { return null; }
+                        }, scheduler).thenAccept(rank -> {
+                            try
                             {
-                                log.debug("Fetched rank for {}: {}", playerName, rank);
+                                if (rank != null)
+                                {
+                                    displayedRanks.put(key, rank);
+                                    if (loggedFetch.putIfAbsent(key, Boolean.TRUE) == null)
+                                    {
+                                        log.debug("Fetched rank for {}: {}", playerName, rank);
+                                    }
+                                }
+                                else if (loggedFetch.putIfAbsent(key, Boolean.TRUE) == null)
+                                {
+                                    log.debug("No rank found for {} (no retry)", playerName);
+                                }
                             }
-                        }
-                        else if (loggedFetch.putIfAbsent(playerName, Boolean.TRUE) == null)
-                        {
-                            log.debug("No rank found for {} (no retry)", playerName);
-                        }
+                            finally
+                            {
+                                fetchInFlight.remove(key);
+                            }
+                        });
                     }
-                    finally
-                    {
-                        fetchInFlight.remove(playerName);
-                    }
-                });
-            }
+                }
+                catch (Exception ignore) {}
+            });
         }
-        catch (Exception ignore) {}
     }
 
     public void setRankFromApi(String playerName, String rank)
@@ -177,20 +189,21 @@ public class RankOverlay extends Overlay
         if (rank == null || rank.trim().isEmpty()) return;
         try
         {
-            displayedRanks.put(playerName, rank);
+            String key = NameUtils.canonicalKey(playerName);
+            displayedRanks.put(key, rank);
             try { nameRankCache.put(cacheKeyFor(playerName), new CacheEntry(rank, System.currentTimeMillis())); } catch (Exception ignore) {}
             // Mark override: bounded window so TTL refresh can occur afterwards
             long until;
             try {
                 String self = (client != null && client.getLocalPlayer() != null) ? client.getLocalPlayer().getName() : null;
-                boolean isSelf = (self != null && self.equals(playerName));
+                boolean isSelf = (self != null && self.equalsIgnoreCase(playerName));
                 // Use the same TTL horizon for self; shorter window for others
                 until = isSelf ? (System.currentTimeMillis() + RANK_CACHE_TTL_MS)
                                : (System.currentTimeMillis() + 15_000L);
             } catch (Exception e) {
                 until = System.currentTimeMillis() + 15_000L;
             }
-            try { apiOverrideUntilMs.put(playerName, until); } catch (Exception ignore) {}
+            try { apiOverrideUntilMs.put(key, until); } catch (Exception ignore) {}
         }
         catch (Exception ignore) {}
     }
@@ -199,7 +212,7 @@ public class RankOverlay extends Overlay
     {
         if (playerName == null || playerName.trim().isEmpty()) return;
         long until = System.currentTimeMillis() + Math.max(0L, millis);
-        try { apiOverrideUntilMs.put(playerName, until); } catch (Exception ignore) {}
+        try { apiOverrideUntilMs.put(NameUtils.canonicalKey(playerName), until); } catch (Exception ignore) {}
     }
 
     public java.awt.image.BufferedImage resolveRankIcon(String fullRank)
@@ -231,15 +244,17 @@ public class RankOverlay extends Overlay
     private java.awt.Point dragStart = null;
 
     private final ScheduledExecutorService scheduler;
+    private final ClientThread clientThread;
 
     @Inject
-    public RankOverlay(Client client, PvPLeaderboardConfig config, ItemManager itemManager, PvPLeaderboardPlugin plugin, ScheduledExecutorService scheduler)
+    public RankOverlay(Client client, PvPLeaderboardConfig config, ItemManager itemManager, PvPLeaderboardPlugin plugin, ScheduledExecutorService scheduler, ClientThread clientThread)
     {
         this.client = client;
         this.config = config;
         this.itemManager = itemManager;
         this.plugin = plugin;
         this.scheduler = scheduler;
+        this.clientThread = clientThread;
         setPosition(OverlayPosition.DYNAMIC);
         // Draw over the 3D scene but under widgets/menus so menus cover the rank text
         setLayer(OverlayLayer.ABOVE_SCENE);
@@ -313,19 +328,19 @@ public class RankOverlay extends Overlay
                         {
                             if (rank != null)
                             {
-                                Long until = apiOverrideUntilMs.get(selfName);
+                                Long until = apiOverrideUntilMs.get(NameUtils.canonicalKey(selfName));
                                 boolean overrideActive = until != null && System.currentTimeMillis() < until;
                                 if (!overrideActive)
                                 {
-                                    displayedRanks.put(selfName, rank);
+                                    displayedRanks.put(NameUtils.canonicalKey(selfName), rank);
                                     try { nameRankCache.put(cacheKeyFor(selfName), new CacheEntry(rank, System.currentTimeMillis())); } catch (Exception ignore) {}
-                                    if (loggedFetch.putIfAbsent(selfName, Boolean.TRUE) == null) { log.debug("Fetched rank for {}: {}", selfName, rank); }
+                                    if (loggedFetch.putIfAbsent(NameUtils.canonicalKey(selfName), Boolean.TRUE) == null) { log.debug("Fetched rank for {}: {}", selfName, rank); }
                                 }
                                 // If override is active, keep API-derived value; do not clear the override here
                                 // Cooldown so self fetch doesn't re-run until cache TTL
                                 nextSelfRankAllowedAtMs = System.currentTimeMillis() + RANK_CACHE_TTL_MS;
                             }
-                            else if (loggedFetch.putIfAbsent(selfName, Boolean.TRUE) == null)
+                            else if (loggedFetch.putIfAbsent(NameUtils.canonicalKey(selfName), Boolean.TRUE) == null)
                             {
                                 log.debug("No rank found for {} (no retry)", selfName);
                                 // Short cooldown to avoid tight loop on temporary shard miss
@@ -334,7 +349,7 @@ public class RankOverlay extends Overlay
                         }
                         finally
                         {
-                            fetchInFlight.remove(selfName);
+                            fetchInFlight.remove(NameUtils.canonicalKey(selfName));
                         }
                     });
                 }
@@ -383,8 +398,9 @@ public class RankOverlay extends Overlay
             }
 
             String playerName = player.getName();
-            present.add(playerName);
-            String cachedRank = displayedRanks.get(playerName);
+            String nameKey = NameUtils.canonicalKey(playerName);
+            present.add(nameKey);
+            String cachedRank = displayedRanks.get(nameKey);
             // Serve from 1-hour cache if available (avoid null rank flicker)
             try
             {
@@ -392,22 +408,22 @@ public class RankOverlay extends Overlay
                 CacheEntry ce = nameRankCache.get(ck);
                 if (ce != null && (System.currentTimeMillis() - ce.ts) < RANK_CACHE_TTL_MS)
                 {
-                    displayedRanks.put(playerName, ce.rank);
+                    displayedRanks.put(nameKey, ce.rank);
                     cachedRank = ce.rank;
                 }
             }
             catch (Exception ignore) {}
 
             // If API override is active, use cached rank and skip fetch
-            Long apiUntil = apiOverrideUntilMs.get(playerName);
+            Long apiUntil = apiOverrideUntilMs.get(nameKey);
             boolean apiActive = apiUntil != null && System.currentTimeMillis() < apiUntil;
             if (cachedRank == null && !apiActive)
             {
                 if (player == client.getLocalPlayer() && DEBUG_OVERLAY_LOGS)
                 {
-                    try { log.debug("[Overlay] self missing rank; inFlight={} attempted={} cacheHit={} apiActive={}", fetchInFlight.containsKey(playerName), attemptedLookup.containsKey(playerName), nameRankCache.containsKey(cacheKeyFor(playerName)), apiActive); } catch (Exception ignore) {}
+                    try { log.debug("[Overlay] self missing rank; inFlight={} attempted={} cacheHit={} apiActive={}", fetchInFlight.containsKey(nameKey), attemptedLookup.containsKey(nameKey), nameRankCache.containsKey(cacheKeyFor(playerName)), apiActive); } catch (Exception ignore) {}
                 }
-                Long firstAttempt = attemptedAtMs.get(playerName);
+                Long firstAttempt = attemptedAtMs.get(nameKey);
                 long now = System.currentTimeMillis();
                 if (firstAttempt != null && now - firstAttempt < NAME_RETRY_BACKOFF_MS) {
                     continue; // skip re-attempts for 60s
@@ -442,16 +458,16 @@ public class RankOverlay extends Overlay
                 }
                 lastScheduleMs = nowMsFetch;
 
-                if (fetchInFlight.putIfAbsent(playerName, Boolean.TRUE) == null)
+                if (fetchInFlight.putIfAbsent(nameKey, Boolean.TRUE) == null)
                 {
-                    attemptedLookup.put(playerName, Boolean.TRUE);
-                    attemptedAtMs.put(playerName, now);
+                    attemptedLookup.put(nameKey, Boolean.TRUE);
+                    attemptedAtMs.put(nameKey, now);
                     // Keep last known rank visible during fetch to avoid disappearing text/icon
                     try {
                         String ck = cacheKeyFor(playerName);
                         CacheEntry ce = nameRankCache.get(ck);
                         if (ce != null && (System.currentTimeMillis() - ce.ts) < RANK_CACHE_TTL_MS) {
-                            displayedRanks.put(playerName, ce.rank);
+                            displayedRanks.put(nameKey, ce.rank);
                         }
                     } catch (Exception ignore) {}
                     // Only log once per name per bucket to avoid spam in crowded areas
@@ -467,21 +483,21 @@ public class RankOverlay extends Overlay
                             if (rank != null)
                             {
                                 // If API override exists, keep it and clear override only when shard confirms presence
-                                Long until = apiOverrideUntilMs.get(playerName);
+                                Long until = apiOverrideUntilMs.get(nameKey);
                                 boolean overrideActive = until != null && System.currentTimeMillis() < until;
                                 if (!overrideActive)
                                 {
-                                    displayedRanks.put(playerName, rank);
+                                    displayedRanks.put(nameKey, rank);
                                     try { nameRankCache.put(cacheKeyFor(playerName), new CacheEntry(rank, System.currentTimeMillis())); } catch (Exception ignore) {}
                                 }
                                 // If override is active, keep API-derived value; do not clear the override early
                                 try { nameRankCache.put(cacheKeyFor(playerName), new CacheEntry(rank, System.currentTimeMillis())); } catch (Exception ignore) {}
-                                if (loggedFetch.putIfAbsent(playerName, Boolean.TRUE) == null)
+                                if (loggedFetch.putIfAbsent(nameKey, Boolean.TRUE) == null)
                                 {
                                     log.debug("Fetched rank for {}: {}", playerName, rank);
                                 }
                             }
-                            else if (loggedFetch.putIfAbsent(playerName, Boolean.TRUE) == null)
+                            else if (loggedFetch.putIfAbsent(nameKey, Boolean.TRUE) == null)
                             {
                                 log.debug("No rank found for {} (no retry)", playerName);
                                 // Preserve last known rank on miss to avoid disappearing overlay in crowded areas
@@ -489,14 +505,14 @@ public class RankOverlay extends Overlay
                                     String ck = cacheKeyFor(playerName);
                                     CacheEntry ce = nameRankCache.get(ck);
                                     if (ce != null && (System.currentTimeMillis() - ce.ts) < RANK_CACHE_TTL_MS) {
-                                        displayedRanks.put(playerName, ce.rank);
+                                        displayedRanks.put(nameKey, ce.rank);
                                     }
                                 } catch (Exception ignore) {}
                             }
                         }
                         finally
                         {
-                            fetchInFlight.remove(playerName);
+                            fetchInFlight.remove(nameKey);
                         }
                     });
                 }
@@ -515,7 +531,7 @@ public class RankOverlay extends Overlay
                     if (!apiActive && cacheExpired)
                     {
                         // Backoff: only attempt one TTL refresh per name per TTL window
-                        Long lastAttempt = attemptedAtMs.get(playerName);
+                        Long lastAttempt = attemptedAtMs.get(nameKey);
                         if (lastAttempt != null && (now2 - lastAttempt) < RANK_CACHE_TTL_MS)
                         {
                             // already attempted within TTL window; skip until next TTL
@@ -540,14 +556,14 @@ public class RankOverlay extends Overlay
                             if (perScheduleDelayMs <= 0 || nowMsFetch2 - lastScheduleMs >= perScheduleDelayMs)
                             {
                                 lastScheduleMs = nowMsFetch2;
-                                if (fetchInFlight.putIfAbsent(playerName, Boolean.TRUE) == null)
+                                if (fetchInFlight.putIfAbsent(nameKey, Boolean.TRUE) == null)
                                 {
                                     scheduledThisTick++;
-                                    attemptedAtMs.put(playerName, now2);
+                                    attemptedAtMs.put(nameKey, now2);
                                     final boolean isSelf;
                                     try {
                                         String ln = (client != null && client.getLocalPlayer() != null) ? client.getLocalPlayer().getName() : null;
-                                        isSelf = (ln != null && ln.equals(playerName));
+                                        isSelf = (ln != null && ln.equalsIgnoreCase(playerName));
                                     } catch (Exception e) { throw e; }
                                     log.debug("[Overlay] refresh on TTL for player={} bucket={}", playerName, bucketKey(config.rankBucket()));
                                     java.util.concurrent.CompletableFuture.supplyAsync(() -> {
@@ -559,26 +575,26 @@ public class RankOverlay extends Overlay
                                         {
                                             if (rank != null)
                                             {
-                                                Long until = apiOverrideUntilMs.get(playerName);
+                                                Long until = apiOverrideUntilMs.get(nameKey);
                                                 boolean overrideActive = until != null && System.currentTimeMillis() < until;
                                                 if (!overrideActive)
                                                 {
-                                                    displayedRanks.put(playerName, rank);
+                                                    displayedRanks.put(nameKey, rank);
                                                 }
                                                 try { nameRankCache.put(cacheKeyFor(playerName), new CacheEntry(rank, System.currentTimeMillis())); } catch (Exception ignore) {}
-                                                if (loggedFetch.putIfAbsent(playerName, Boolean.TRUE) == null)
+                                                if (loggedFetch.putIfAbsent(nameKey, Boolean.TRUE) == null)
                                                 {
                                                     log.debug("Fetched rank for {}: {}", playerName, rank);
                                                 }
                                             }
-                                            else if (loggedFetch.putIfAbsent(playerName, Boolean.TRUE) == null)
+                                            else if (loggedFetch.putIfAbsent(nameKey, Boolean.TRUE) == null)
                                             {
                                                 log.debug("No rank found for {} (TTL refresh)", playerName);
                                             }
                                         }
                                         finally
                                         {
-                                            fetchInFlight.remove(playerName);
+                                            fetchInFlight.remove(nameKey);
                                         }
                                     });
                                 }
@@ -752,7 +768,7 @@ public class RankOverlay extends Overlay
             }
         }
 
-        if (fullRank.startsWith("Rank "))
+        if (config.colorblindMode() || fullRank.startsWith("Rank "))
         {
             g.setColor(Color.WHITE);
         }
@@ -880,7 +896,7 @@ public class RankOverlay extends Overlay
             case "Bronze": return new Color(184, 115, 51);
             case "Iron": return new Color(192, 192, 192);
             case "Steel": return new Color(154, 162, 166);
-            case "Black": return new Color(46, 46, 46);
+            case "Black": return Color.GRAY;
             case "Mithril": return new Color(59, 167, 214);
             case "Adamant": return new Color(26, 139, 111);
             case "Rune": return new Color(78, 159, 227);

@@ -8,8 +8,6 @@ import net.runelite.client.config.Range;
 @ConfigGroup("PvPLeaderboard")
 public interface PvPLeaderboardConfig extends Config
 {
-    
-    // Removed: Show Rank Icons (icons shown when showRankAsText == false)
 
 	@ConfigItem(
 		keyName = "showOwnRank",
@@ -129,8 +127,6 @@ public interface PvPLeaderboardConfig extends Config
 		return RankBucket.OVERALL;
 	}
 
-    // removed: onlyFetchOnLogin
-
 	@ConfigItem(
 		keyName = "rankIconWhiteOutline",
 		name = "Rank Icon White Outline",
@@ -216,7 +212,15 @@ public interface PvPLeaderboardConfig extends Config
 		return 6; // ~560ms per fetch, ~4 concurrent
 	}
 
-    // removed: muteUiErrors
+	@ConfigItem(
+		keyName = "colorblindMode",
+		name = "Colorblind Mode",
+		description = "Makes all rank text white for better visibility"
+	)
+	default boolean colorblindMode()
+	{
+		return false;
+	}
 
 	// Rank bucket selector enum (public via being a member of the interface)
 	enum RankBucket
@@ -237,7 +241,4 @@ public interface PvPLeaderboardConfig extends Config
 			@Override public String toString() { return "DMM"; }
 		}
 	}
-
-    // Removed: LeaderboardMode enum
-
 }

@@ -12,6 +12,7 @@ import net.runelite.api.events.ActorDeath;
 import net.runelite.api.events.MenuEntryAdded;
 import net.runelite.api.events.MenuOptionClicked;
 import net.runelite.api.Player;
+import net.runelite.api.HitsplatID;
 import net.runelite.api.Varbits;
 import net.runelite.api.MenuAction;
 import net.runelite.client.config.ConfigManager;
@@ -117,7 +118,13 @@ private volatile long suppressFightStartUntilMs = 0L;
     private final java.util.concurrent.ConcurrentHashMap<String, Boolean> apiFallbackActive = new java.util.concurrent.ConcurrentHashMap<>();
 	// Damage dealt by the local player to each opponent during the current combat window
 	private final java.util.concurrent.ConcurrentHashMap<String, Long> damageToOpponent = new java.util.concurrent.ConcurrentHashMap<>();
-	private static boolean DEBUG_HIT_SPLAT_LOGS = false;
+	private static final boolean DEBUG_HIT_SPLAT_LOGS = false;
+    private String clientUniqueId = null;
+
+    public String getClientUniqueId()
+    {
+        return clientUniqueId;
+    }
 
 	@Override
 	protected void startUp() throws Exception
@@ -127,6 +134,40 @@ private volatile long suppressFightStartUntilMs = 0L;
         okhttp3.OkHttpClient ok = net.runelite.client.RuneLite.getInjector().getInstance(okhttp3.OkHttpClient.class);
         com.google.gson.Gson gs = net.runelite.client.RuneLite.getInjector().getInstance(com.google.gson.Gson.class);
         dashboardPanel = new DashboardPanel(config, configManager, this, ok, gs);
+
+        // Ensure unique client ID exists (Global -> Profile)
+        String globalId = null;
+        java.io.File globalFile = new java.io.File(System.getProperty("user.home"), ".runelite/pvp-leaderboard.id");
+        try {
+            if (globalFile.exists()) {
+                java.nio.file.Path path = globalFile.toPath();
+                byte[] bytes = java.nio.file.Files.readAllBytes(path);
+                globalId = new String(bytes, java.nio.charset.StandardCharsets.UTF_8).trim();
+            }
+        } catch (Exception ignore) {}
+
+        // Logic: Prefer global file. If missing, generate new.
+        String finalId = globalId;
+        if (finalId == null || finalId.isEmpty()) {
+            finalId = java.util.UUID.randomUUID().toString();
+            // Save back to global file
+            try {
+                // Ensure parent directory exists
+                java.io.File parent = globalFile.getParentFile();
+                if (parent != null && !parent.exists()) {
+                    parent.mkdirs();
+                }
+                java.nio.file.Files.write(globalFile.toPath(), finalId.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            } catch (Exception ignore) {}
+        }
+        
+        // Sync to profile
+        String profileId = configManager.getConfiguration("PvPLeaderboard", "clientUniqueId");
+        if (!finalId.equals(profileId)) {
+            configManager.setConfiguration("PvPLeaderboard", "clientUniqueId", finalId);
+        }
+        
+        this.clientUniqueId = finalId;
 
         // Schedule GC task on injected scheduler
         try {
@@ -341,8 +382,8 @@ private volatile long suppressFightStartUntilMs = 0L;
 					}
                     // Preload account hash linkage for self so overall lookups use account shard immediately
                     try { dashboardPanel.preloadSelfRankNumbers(self); } catch (Exception ignore) {}
-					// Immediately refresh self rank (overlay + API fast-follow) for reliable above-head text
-					try { refreshSelfRankNow(); } catch (Exception ignore) {}
+					// Schedule a slight delay to avoid null-name timing on rapid hops
+					try { if (rankOverlay != null) rankOverlay.scheduleSelfRankRefresh(250L); } catch (Exception ignore) {}
 				}
 				else
 				{
@@ -354,7 +395,7 @@ private volatile long suppressFightStartUntilMs = 0L;
 									String selfLater = client.getLocalPlayer().getName();
 									if (selfLater != null && !selfLater.trim().isEmpty()) {
 										try { if (dashboardPanel != null) dashboardPanel.lookupPlayerFromRightClick(selfLater); } catch (Exception ignore2) {}
-										try { refreshSelfRankNow(); } catch (Exception ignore2) {}
+										try { if (rankOverlay != null) rankOverlay.scheduleSelfRankRefresh(0L); } catch (Exception ignore2) {}
 									}
 								}
 							} catch (Exception ignore2) {}
@@ -377,6 +418,14 @@ private volatile long suppressFightStartUntilMs = 0L;
 					rankOverlay.resetLookupStateOnWorldHop();
 				}
 				try { log.debug("[Fight] scene change: {} (fight preserved)", gameStateChanged.getGameState()); } catch (Exception ignore) {}
+				// Nudge self rank refresh after a short delay so overlay repopulates post-hop
+				try {
+					if (rankOverlay != null) {
+						scheduler.schedule(() -> {
+							try { rankOverlay.scheduleSelfRankRefresh(0L); } catch (Exception ignore) {}
+						}, 600L, java.util.concurrent.TimeUnit.MILLISECONDS);
+					}
+				} catch (Exception ignore) {}
 			} catch (Exception ignore) {}
 		}
 	}
@@ -411,7 +460,32 @@ private volatile long suppressFightStartUntilMs = 0L;
 			{
 				String opponentName = null;
 				boolean startNow = false;
-				int amt = 0; try { net.runelite.api.Hitsplat hs = hitsplatApplied.getHitsplat(); amt = (hs != null ? hs.getAmount() : 0); } catch (Exception ignore) {}
+				int amt = 0;
+				boolean startFromThisHit = false;
+				try {
+					net.runelite.api.Hitsplat hs = hitsplatApplied.getHitsplat();
+					if (hs != null)
+					{
+						int t = hs.getHitsplatType();
+						int a = hs.getAmount();
+						// Only consider true player-damage hitsplats; ignore poison/venom/heal/block/etc.
+						if (t == HitsplatID.DAMAGE_ME || t == HitsplatID.DAMAGE_OTHER)
+						{
+							amt = a;
+							startFromThisHit = (a > 0);
+						}
+						else if (t == HitsplatID.POISON || t == HitsplatID.VENOM)
+						{
+							amt = a; // include in totals
+							startFromThisHit = false; // don't start fights from poison/venom ticks
+						}
+						else
+						{
+							amt = 0;
+							startFromThisHit = false;
+						}
+					}
+				} catch (Exception ignore) {}
 				try {
 					if (DEBUG_HIT_SPLAT_LOGS) {
 						String actorName = null; try { actorName = player != null ? player.getName() : null; } catch (Exception ignore) {}
@@ -428,14 +502,14 @@ private volatile long suppressFightStartUntilMs = 0L;
 					{
 						lastEngagedOpponentName = opponentName;
 						lastExactOpponentName = opponentName;
-						try {
-							damageFromOpponent.merge(opponentName, (long) amt, (a, b) -> {
-								long av = (a == null ? 0L : a);
-								long bv = (b == null ? 0L : b);
-								return av + bv;
-							});
-						} catch (Exception ignore) {}
-						startNow = true;
+						if (amt > 0)
+						{
+							try { damageFromOpponent.merge(opponentName, (long) amt, (a, b) -> a + b); } catch (Exception ignore) {}
+						}
+						if (startFromThisHit)
+						{
+							startNow = true;
+						}
 						try { if (DEBUG_HIT_SPLAT_LOGS) { log.debug("[Hitsplat] inbound dmg={} opp='{}' dmgFromOpp={}", amt, opponentName, damageFromOpponent); } } catch (Exception ignore) {}
 					}
 				}
@@ -447,14 +521,14 @@ private volatile long suppressFightStartUntilMs = 0L;
 					{
 						opponentName = (player != null ? player.getName() : null);
 						if (opponentName != null) lastEngagedOpponentName = opponentName;
-						try {
-							damageToOpponent.merge(opponentName, (long) amt, (a, b) -> {
-								long av = (a == null ? 0L : a);
-								long bv = (b == null ? 0L : b);
-								return av + bv;
-							});
-						} catch (Exception ignore) {}
-						startNow = true;
+						if (amt > 0)
+						{
+							try { damageToOpponent.merge(opponentName, (long) amt, (a, b) -> a + b); } catch (Exception ignore) {}
+						}
+						if (startFromThisHit)
+						{
+							startNow = true;
+						}
 					}
 					try { if (DEBUG_HIT_SPLAT_LOGS) { log.debug("[Hitsplat] outbound dmg={} weAreAttacking={} opp='{}' dmgToOpp={} ", amt, weAreAttacking, opponentName, damageToOpponent.get(opponentName)); } } catch (Exception ignore) {}
 				}
@@ -781,7 +855,8 @@ private void startFight(String opponentName)
                 wasInMultiLocal,
                 accountHashLocal,
                 idTokenLocal,
-                damageToOpponentLocal
+                damageToOpponentLocal,
+                clientUniqueId
             ).thenAccept(success -> {
                 if (success) {
                     log.debug("Match result submitted successfully");
@@ -842,8 +917,7 @@ private void startFight(String opponentName)
                                 if (opponent == null || opponent.isEmpty()) {
                                     try { log.warn("[Fight] opponent missing at finalize; outcome={}, a={}, b={}", outcome, a, b); } catch (Exception ignore) {}
                                 }
-                                // LMS safeguard: small delay before endFight to avoid instance teardown race
-                                try { if (client != null && client.getWorld() == 390) { Thread.sleep(250); } } catch (Exception ignored) {}
+                                
                                 endFight(outcome);
                             } catch (Exception e) {
                                 try { log.error("[Fight] endFight({}) error", outcome, e); } catch (Exception ignore) {}
@@ -1033,19 +1107,25 @@ private void startFight(String opponentName)
 			try { if (DEBUG_HIT_SPLAT_LOGS) { log.debug("[Fight] touch vs={} lastActivityMs={} activeCount={}", opponentName, v.lastActivityMs, activeFights.size()); } } catch (Exception ignore) {}
             return v;
         });
-        // Probe shard presence once per opponent during combat
-        try {
-            String bucket = bucketKey(config.rankBucket());
-            String tier = resolvePlayerRank(opponentName, bucket);
-            if (tier != null && !tier.isEmpty()) {
-                shardPresence.put(opponentName, Boolean.TRUE);
-				try { log.debug("[Fight] shard presence hit for {} bucket={} tier={}", opponentName, bucket, tier); } catch (Exception ignore) {}
-            } else {
-                // No shard hit; mark as absent for now
-                shardPresence.putIfAbsent(opponentName, Boolean.FALSE);
-				try { log.debug("[Fight] shard presence miss for {} bucket={}", opponentName, bucket); } catch (Exception ignore) {}
-            }
-        } catch (Exception ignore) {}
+        
+        // Probe shard presence once per opponent during combat (async to avoid network IO on client thread)
+        if (!shardPresence.containsKey(opponentName))
+        {
+            java.util.concurrent.CompletableFuture.runAsync(() -> {
+                try {
+                    String bucket = bucketKey(config.rankBucket());
+                    String tier = resolvePlayerRank(opponentName, bucket);
+                    if (tier != null && !tier.isEmpty()) {
+                        shardPresence.put(opponentName, Boolean.TRUE);
+                        try { log.debug("[Fight] shard presence hit for {} bucket={} tier={}", opponentName, bucket, tier); } catch (Exception ignore) {}
+                    } else {
+                        // No shard hit; mark as absent for now
+                        shardPresence.putIfAbsent(opponentName, Boolean.FALSE);
+                        try { log.debug("[Fight] shard presence miss for {} bucket={}", opponentName, bucket); } catch (Exception ignore) {}
+                    }
+                } catch (Exception ignore) {}
+            }, scheduler);
+        }
     }
 
     private String mostRecentActiveOpponent()
@@ -1211,17 +1291,12 @@ private void startFight(String opponentName)
     {
         try
         {
-            boolean isSelf = false;
-            try {
-                isSelf = client != null && client.getLocalPlayer() != null && playerName != null && playerName.equals(client.getLocalPlayer().getName());
-            } catch (Exception ignore) {}
             if (dashboardPanel == null) return -1;
-            return isSelf ? dashboardPanel.getRankNumberFromLeaderboard(playerName, bucket)
-                          : dashboardPanel.getRankNumberByName(playerName, bucket);
+            // Use cached-only accessor to avoid blocking the client thread (especially for overlay render)
+            return dashboardPanel.getCachedRankNumberByName(playerName, bucket);
         }
         catch (Exception ignore) { return -1; }
     }
-
     private static String bucketKey(PvPLeaderboardConfig.RankBucket bucket)
     {
         if (bucket == null) return "overall";
@@ -1369,7 +1444,8 @@ private void submitMatchResult(String result, long fightEndTime)
             wasInMulti,
             accountHash,
             idToken,
-            dmgOut
+            dmgOut,
+            clientUniqueId
         ).thenAccept(success -> {
             if (success) {
                 log.debug("Match result submitted successfully");
@@ -1438,5 +1514,4 @@ private void submitMatchResult(String result, long fightEndTime)
     {
         return shardReady;
     }
-
 }

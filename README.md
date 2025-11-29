@@ -11,7 +11,14 @@ PvP Leaderboard is a RuneLite plugin that displays PvP ranks above players, prov
 - Side panel (Dashboard) with profile stats, tier graph, rank progress bars sized for the narrow sidebar, and match history (token‑paginated).
 - Optional Cognito login for authenticated submissions; unauthenticated fallback is automatic.
 - Automatic self‑rank refresh after matches, on login, and on bucket changes.
+- Smurf detection support via persistent unique client ID.
 - No popup dialogs or plugin‑generated sounds.
+
+## Identity & Smurf Detection
+The plugin generates a persistent unique ID (UUID) stored in `<user.home>/.runelite/pvp-leaderboard.id`. This ID is:
+- **Shared across all accounts** on the same machine.
+- Sent via the `X-Client-Unique-Id` header on match submissions and user stats lookups.
+- Used by the backend to resolve identity links, ensuring that playing on an alt account correctly reflects your "main" effective MMR and rank on the dashboard.
 
 ## Configuration
 Open RuneLite configuration for the plugin:
