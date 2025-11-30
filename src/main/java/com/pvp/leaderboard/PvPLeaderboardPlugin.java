@@ -247,6 +247,8 @@ private volatile long suppressFightStartUntilMs = 0L;
     @Subscribe
     public void onConfigChanged(ConfigChanged event)
     {
+        try
+        {
         if (event == null) return;
         if (!"PvPLeaderboard".equals(event.getGroup())) return;
         if ("enablePvpLookupMenu".equals(event.getKey()))
@@ -287,6 +289,11 @@ private volatile long suppressFightStartUntilMs = 0L;
                 }
             } catch (Exception ignore) {}
         }
+        }
+        catch (Exception e)
+        {
+            log.error("Uncaught exception in onConfigChanged", e);
+        }
     }
 
     // Removed sprite preview tooling per request
@@ -294,6 +301,8 @@ private volatile long suppressFightStartUntilMs = 0L;
     @Subscribe
     public void onMenuOptionClicked(MenuOptionClicked event)
     {
+        try
+        {
 		if (!config.enablePvpLookupMenu()) {
 			return;
 		}
@@ -348,6 +357,11 @@ private volatile long suppressFightStartUntilMs = 0L;
         if (clientToolbar != null && navButton != null) {
             SwingUtilities.invokeLater(() -> clientToolbar.openPanel(navButton));
         }
+        }
+        catch (Exception e)
+        {
+            log.error("Uncaught exception in onMenuOptionClicked", e);
+        }
     }
 
 
@@ -357,8 +371,10 @@ private volatile long suppressFightStartUntilMs = 0L;
 	@Subscribe
 	public void onGameStateChanged(GameStateChanged gameStateChanged)
 	{
-		if (gameStateChanged.getGameState() == GameState.LOGGED_IN)
+		try
 		{
+			if (gameStateChanged.getGameState() == GameState.LOGGED_IN)
+			{
 			accountHash = client.getAccountHash();
 			log.debug("PvP Leaderboard ready! Account hash: {}", accountHash);
             shardReady = true; // on-demand shard fetch; no prewarm
@@ -417,6 +433,11 @@ private volatile long suppressFightStartUntilMs = 0L;
                 pendingSelfRankLookupTicks = 3;
 			} catch (Exception ignore) {}
 		}
+		}
+		catch (Exception e)
+		{
+			log.error("Uncaught exception in onGameStateChanged", e);
+		}
 	}
 
     // Prewarm helpers removed
@@ -424,6 +445,8 @@ private volatile long suppressFightStartUntilMs = 0L;
     @Subscribe
     public void onGameTick(GameTick tick)
     {
+        try
+        {
         // Handle pending self-rank lookups (3-tick delay logic)
         if (pendingSelfRankLookupTicks > 0)
         {
@@ -584,14 +607,21 @@ private volatile long suppressFightStartUntilMs = 0L;
 			damageToOpponent.clear();
             try { log.debug("[Fight] window cleared on tick={} (idle>{} ticks)", tickNow, OUT_OF_COMBAT_TICKS); } catch (Exception ignore) {}
         }
+        }
+        catch (Exception e)
+        {
+            log.error("Uncaught exception in onGameTick", e);
+        }
     }
 
 	@Subscribe
 	public void onHitsplatApplied(HitsplatApplied hitsplatApplied)
 	{
-		// Only process Player vs Player combat
-		if (hitsplatApplied.getActor() instanceof Player)
+		try
 		{
+			// Only process Player vs Player combat
+			if (hitsplatApplied.getActor() instanceof Player)
+			{
             if (client == null || config == null) return;
             Player player = (Player) hitsplatApplied.getActor();
             Player localPlayer = client.getLocalPlayer();
@@ -742,14 +772,21 @@ private volatile long suppressFightStartUntilMs = 0L;
 		
 		// Fight timeout is handled by scheduled checker
 	}
+		catch (Exception e)
+		{
+			log.error("Uncaught exception in onHitsplatApplied", e);
+		}
+	}
 
     // Removed: InteractingChanged-driven opponent assignment; we rely on hitsplats only for fight start
 
 	@Subscribe
 	public void onActorDeath(ActorDeath actorDeath)
 	{
-		if (actorDeath.getActor() instanceof Player)
+		try
 		{
+			if (actorDeath.getActor() instanceof Player)
+			{
 			Player player = (Player) actorDeath.getActor();
 			Player localPlayer = client.getLocalPlayer();
 			try {
@@ -818,6 +855,11 @@ private volatile long suppressFightStartUntilMs = 0L;
 					}
                 }
             }
+		}
+		}
+		catch (Exception e)
+		{
+			log.error("Uncaught exception in onActorDeath", e);
 		}
 	}
 
@@ -1058,6 +1100,7 @@ private void startFight(String opponentName)
         try { suppressFightStartUntilMs = 0L; } catch (Exception ignore) {} // Clear legacy ms field
         activeFights.clear();
         damageFromOpponent.clear();
+        damageToOpponent.clear();
         lastCombatActivityTick = 0;
         try { log.debug("[Fight] state reset; suppressTicks={} activeFightsCleared" , suppressFightStartTicks); } catch (Exception ignore) {}
 	}

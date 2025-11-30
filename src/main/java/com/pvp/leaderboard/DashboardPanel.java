@@ -2223,71 +2223,15 @@ public class DashboardPanel extends PluginPanel
         if (input.isEmpty()) return;
         String exact = normalizeDisplayName(input);
 
-        final String fallbackUrl;
+        final String profileUrl;
         try {
-            fallbackUrl = "https://devsecopsautomated.com/profile.html?player=" + URLEncoder.encode(exact, "UTF-8");
-        } catch (Exception e) {
-            return;
-        }
-
-        // Async via OkHttp; UI updates on EDT
-        try {
-            String apiUrl = "https://kekh0x6kfk.execute-api.us-east-1.amazonaws.com/prod/user?player_id=" + URLEncoder.encode(exact, "UTF-8");
-            Request req = new Request.Builder().url(apiUrl).get().header("Cache-Control","no-store").build();
-            httpClient.newCall(req).enqueue(new Callback() {
-                @Override
-                public void onFailure(Call call, java.io.IOException e) {
-                    // API failed, fallback to player URL
-                    SwingUtilities.invokeLater(() -> {
-                        try { Desktop.getDesktop().browse(URI.create(fallbackUrl)); } catch (Exception ignore) {}
-                    });
-                }
-
-                @Override
-                public void onResponse(Call call, Response response) throws java.io.IOException {
-                    try (Response res = response) {
-                        if (!res.isSuccessful() || res.body() == null) {
-                            SwingUtilities.invokeLater(() -> {
-                                try { Desktop.getDesktop().browse(URI.create(fallbackUrl)); } catch (Exception ignore) {}
-                            });
-                            return;
-                        }
-                        okhttp3.ResponseBody rb = res.body();
-                        String body;
-                        try {
-                            body = rb != null ? rb.string() : "";
-                        } catch (Exception ex) {
-                            SwingUtilities.invokeLater(() -> {
-                                try { Desktop.getDesktop().browse(URI.create(fallbackUrl)); } catch (Exception ignore) {}
-                            });
-                            return;
-                        }
-                        
-                        try {
-                            JsonObject data = gson.fromJson(body, JsonObject.class);
-                            if (data.has("account_hash") && !data.get("account_hash").isJsonNull()) {
-                                String accountHash = data.get("account_hash").getAsString();
-                                String accountSha = generateAccountSha(accountHash);
-                                String profileUrl = "https://devsecopsautomated.com/profile.html?acct=" + accountSha;
-                                SwingUtilities.invokeLater(() -> {
-                                    try { Desktop.getDesktop().browse(URI.create(profileUrl)); } catch (Exception ignore) {}
-                                });
-                            } else {
-                                // No account hash, fallback
-                                SwingUtilities.invokeLater(() -> {
-                                    try { Desktop.getDesktop().browse(URI.create(fallbackUrl)); } catch (Exception ignore) {}
-                                });
-                            }
-                        } catch (Exception e) {
-                            // JSON parse error or other error, fallback
-                            SwingUtilities.invokeLater(() -> {
-                                try { Desktop.getDesktop().browse(URI.create(fallbackUrl)); } catch (Exception ignore) {}
-                            });
-                        }
-                    }
-                }
+            profileUrl = "https://devsecopsautomated.com/profile.html?player=" + URLEncoder.encode(exact, "UTF-8");
+            SwingUtilities.invokeLater(() -> {
+                try { Desktop.getDesktop().browse(URI.create(profileUrl)); } catch (Exception ignore) {}
             });
-        } catch (Exception ignore) {}
+        } catch (Exception e) {
+            // ignore
+        }
     }
     
     private void searchUserOnPlugin()
