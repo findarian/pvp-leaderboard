@@ -259,7 +259,7 @@ public class RankOverlay extends Overlay
             long now = System.currentTimeMillis();
             if (now - lastShardNotReadyLogMs >= 1000L)
             {
-                log.info("[Overlay] shard not ready yet; skipping render");
+                // log.debug("[Overlay] shard not ready yet; skipping render");
                 lastShardNotReadyLogMs = now;
             }
             return new Dimension(0, 0);

@@ -360,7 +360,7 @@ private volatile long suppressFightStartUntilMs = 0L;
         }
         catch (Exception e)
         {
-            log.error("Uncaught exception in onMenuOptionClicked", e);
+            // log.debug("Uncaught exception in onMenuOptionClicked", e);
         }
     }
 
@@ -436,7 +436,7 @@ private volatile long suppressFightStartUntilMs = 0L;
 		}
 		catch (Exception e)
 		{
-			log.error("Uncaught exception in onGameStateChanged", e);
+			// log.debug("Uncaught exception in onGameStateChanged", e);
 		}
 	}
 
@@ -469,8 +469,8 @@ private volatile long suppressFightStartUntilMs = 0L;
                 try
                 {
                     String fallbackResult = pendingFinalizeFallback;
-                    try { log.info("[Fight] finalize task fired (tick); fightFinalized={} a={} b={} inFight={}", fightFinalized, selfDeathMs, opponentDeathMs, inFight); } catch (Exception ignore) {}
-                    if (fightFinalized) { try { log.info("[Fight] finalize task exit: already finalized"); } catch (Exception ignore) {} }
+                    // try { log.debug("[Fight] finalize task fired (tick); fightFinalized={} a={} b={} inFight={}", fightFinalized, selfDeathMs, opponentDeathMs, inFight); } catch (Exception ignore) {}
+                    if (fightFinalized) { /* try { log.debug("[Fight] finalize task exit: already finalized"); } catch (Exception ignore) {} */ }
                     else
                     {
                         long a = selfDeathMs;
@@ -478,20 +478,20 @@ private volatile long suppressFightStartUntilMs = 0L;
                         if (a > 0L && b > 0L && Math.abs(a - b) <= 1500L)
                         {
                             fightFinalized = true;
-                            try { log.info("[Fight] finalize tie (Δ={} ms)", Math.abs(a - b)); } catch (Exception ignore) {}
+                            // try { log.debug("[Fight] finalize tie (Δ={} ms)", Math.abs(a - b)); } catch (Exception ignore) {}
                             Runnable fin = () -> { try { endFight("tie"); } catch (Exception e) { try { log.error("[Fight] endFight(tie) error", e); } catch (Exception ignore) {} } };
                             try { if (clientThread != null) clientThread.invokeLater(fin); else fin.run(); } catch (Exception e) { fin.run(); }
                         }
                         else if (fallbackResult != null)
                         {
                             fightFinalized = true;
-                            try { log.info("[Fight] finalize {} after wait; a={}, b={}", fallbackResult, a, b); } catch (Exception ignore) {}
+                            // try { log.debug("[Fight] finalize {} after wait; a={}, b={}", fallbackResult, a, b); } catch (Exception ignore) {}
                             final String outcome = fallbackResult;
                             Runnable fin = () -> {
                                 try {
                                     // Guard opponent presence; if lost due to relog, keep last known
                                     if (opponent == null || opponent.isEmpty()) {
-                                        try { log.warn("[Fight] opponent missing at finalize; outcome={}, a={}, b={}", outcome, a, b); } catch (Exception ignore) {}
+                                        // try { log.debug("[Fight] opponent missing at finalize; outcome={}, a={}, b={}", outcome, a, b); } catch (Exception ignore) {}
                                     }
                                     
                                     endFight(outcome);
@@ -610,7 +610,7 @@ private volatile long suppressFightStartUntilMs = 0L;
         }
         catch (Exception e)
         {
-            log.error("Uncaught exception in onGameTick", e);
+            // log.debug("Uncaught exception in onGameTick", e);
         }
     }
 
@@ -727,20 +727,20 @@ private volatile long suppressFightStartUntilMs = 0L;
 					lastCombatActivityTick = tickNow;
 					try {
 						if (client.getLocalPlayer() != null && opponentName.equals(client.getLocalPlayer().getName())) {
-							try { log.warn("[Fight] suppress start: opponent resolved as self ({}); waiting for better signal", opponentName); } catch (Exception ignore) {}
+							// try { log.debug("[Fight] suppress start: opponent resolved as self ({}); waiting for better signal", opponentName); } catch (Exception ignore) {}
 							return;
 						}
 					} catch (Exception ignore) {}
 					// Check global suppression
 					if (suppressFightStartTicks > 0)
 					{
-						try { log.info("[Fight] start suppressed ({} ticks remaining)", suppressFightStartTicks); } catch (Exception ignore) {}
+						// try { log.debug("[Fight] start suppressed ({} ticks remaining)", suppressFightStartTicks); } catch (Exception ignore) {}
 						return;
 					}
 					// Check per-opponent suppression
 					if (perOpponentSuppressUntilTicks.containsKey(opponentName))
 					{
-						try { log.info("[Fight] start suppressed for opponent={} ({} ticks remaining)", opponentName, perOpponentSuppressUntilTicks.get(opponentName)); } catch (Exception ignore) {}
+						// try { log.debug("[Fight] start suppressed for opponent={} ({} ticks remaining)", opponentName, perOpponentSuppressUntilTicks.get(opponentName)); } catch (Exception ignore) {}
 						return;
 					}
 					touchFight(opponentName);
@@ -774,7 +774,7 @@ private volatile long suppressFightStartUntilMs = 0L;
 	}
 		catch (Exception e)
 		{
-			log.error("Uncaught exception in onHitsplatApplied", e);
+			// log.debug("Uncaught exception in onHitsplatApplied", e);
 		}
 	}
 
@@ -859,7 +859,7 @@ private volatile long suppressFightStartUntilMs = 0L;
 		}
 		catch (Exception e)
 		{
-			log.error("Uncaught exception in onActorDeath", e);
+			// log.debug("Uncaught exception in onActorDeath", e);
 		}
 	}
 
@@ -869,7 +869,7 @@ private void startFight(String opponentName)
         long nowMsCheck = System.currentTimeMillis();
         if (nowMsCheck < suppressFightStartUntilMs)
         {
-            try { log.info("[Fight] startFight suppressed at {}ms (until {}ms) for opponent={}", nowMsCheck, suppressFightStartUntilMs, opponentName); } catch (Exception ignore) {}
+            // try { log.debug("[Fight] startFight suppressed at {}ms (until {}ms) for opponent={}", nowMsCheck, suppressFightStartUntilMs, opponentName); } catch (Exception ignore) {}
             return;
         }
 		inFight = true;
@@ -1075,11 +1075,11 @@ private void startFight(String opponentName)
     private int gcTicksCounter = 0;
 
     @SuppressWarnings("unused")
-    private void scheduleDoubleKoCheck(String fallbackResult)
+	private void scheduleDoubleKoCheck(String fallbackResult)
 	{
 		try
 		{
-            try { log.info("[Fight] scheduling finalize in 3 ticks (fallback={}), a={}, b={}", fallbackResult, selfDeathMs, opponentDeathMs); } catch (Exception ignore) {}
+            // try { log.debug("[Fight] scheduling finalize in 3 ticks (fallback={}), a={}, b={}", fallbackResult, selfDeathMs, opponentDeathMs); } catch (Exception ignore) {}
             // Use tick-based scheduling: wait 3 ticks (approx 1.8s)
             pendingFinalizeTicks = 3;
             pendingFinalizeFallback = fallbackResult;
@@ -1459,7 +1459,7 @@ private void startFight(String opponentName)
 		if (highestRankDefeated == null || isHigherRank(rank, highestRankDefeated))
 		{
 			highestRankDefeated = rank;
-			log.info("New highest rank defeated: " + rank);
+			// log.debug("New highest rank defeated: " + rank);
 			if (dashboardPanel != null)
 			{
 				dashboardPanel.updateAdditionalStatsFromPlugin(highestRankDefeated, lowestRankLostTo);
@@ -1472,7 +1472,7 @@ private void startFight(String opponentName)
 		if (lowestRankLostTo == null || isLowerRank(rank, lowestRankLostTo))
 		{
 			lowestRankLostTo = rank;
-			log.info("New lowest rank lost to: " + rank);
+			// log.debug("New lowest rank lost to: " + rank);
 			if (dashboardPanel != null)
 			{
 				dashboardPanel.updateAdditionalStatsFromPlugin(highestRankDefeated, lowestRankLostTo);

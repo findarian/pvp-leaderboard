@@ -1750,7 +1750,7 @@ public class DashboardPanel extends PluginPanel
                 shardFailUntil.remove(cacheKey);
                 ShardRank out = extractShardRank(obj, useAccount, accountKey, null);
                 // long dtMs = (System.nanoTime() - t0) / 1_000_000L;
-                // try { log.info("[ShardFetch] url={} status={} dtMs={} found={} ", urlStr, status, dtMs, (out != null)); } catch (Exception ignore) {}
+                // try { log.debug("[ShardFetch] url={} status={} dtMs={} found={} ", urlStr, status, dtMs, (out != null)); } catch (Exception ignore) {}
                 if (out == null)
                 {
                     try { missingPlayerUntilMs.put((dir + "|" + accountKey), System.currentTimeMillis() + MISSING_PLAYER_BACKOFF_MS); } catch (Exception ignore) {}
