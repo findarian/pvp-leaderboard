@@ -72,7 +72,6 @@ public class DashboardPanel extends PluginPanel
     private java.util.List<Double> tierHistory = new java.util.ArrayList<>();
     private JsonArray allMatches = null;
     private JButton refreshButton;
-    private JButton[] bucketButtons = new JButton[5];
     private long lastRefreshTime = 0;
     private static final long REFRESH_COOLDOWN_MS = 60000; // 1 minute
     private JButton loadMoreButton;
@@ -271,6 +270,16 @@ public class DashboardPanel extends PluginPanel
         mainPanel.add(extraStatsPanel);
         mainPanel.add(Box.createVerticalStrut(24));
         
+        // Win Rate Chart
+        chartPanel = createWinRateChart();
+        JScrollPane chartScroll = new JScrollPane(chartPanel);
+        chartScroll.setHorizontalScrollBarPolicy(JScrollPane.HORIZONTAL_SCROLLBAR_AS_NEEDED);
+        chartScroll.setVerticalScrollBarPolicy(JScrollPane.VERTICAL_SCROLLBAR_NEVER);
+        chartScroll.setPreferredSize(new Dimension(0, 220));
+        chartScroll.setBorder(BorderFactory.createTitledBorder("Win Rate History"));
+        mainPanel.add(chartScroll);
+        mainPanel.add(Box.createVerticalStrut(24));
+
         // Match History
         mainPanel.add(createMatchHistory());
         
@@ -476,94 +485,6 @@ public class DashboardPanel extends PluginPanel
         return panel;
     }
     
-    @SuppressWarnings("unused")
-    private JPanel createAdditionalStats()
-    {
-        additionalStatsPanel = new JPanel();
-        additionalStatsPanel.setLayout(new BoxLayout(additionalStatsPanel, BoxLayout.Y_AXIS));
-        additionalStatsPanel.setBorder(BorderFactory.createTitledBorder("Additional Stats"));
-        additionalStatsPanel.setVisible(false); // Hidden by default
-        
-        // Stats row like website with scroller
-        JPanel statsPanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 24, 0));
-        
-        JPanel highestRank = new JPanel();
-        highestRank.setLayout(new BoxLayout(highestRank, BoxLayout.Y_AXIS));
-        highestRank.add(new JLabel("Highest Rank Defeated"));
-        highestRankLabel = new JLabel("-");
-        highestRankTimeLabel = new JLabel("-");
-        highestRank.add(highestRankLabel);
-        highestRank.add(highestRankTimeLabel);
-        
-        JPanel lowestRank = new JPanel();
-        lowestRank.setLayout(new BoxLayout(lowestRank, BoxLayout.Y_AXIS));
-        lowestRank.add(new JLabel("Lowest Rank Lost To"));
-        lowestRankLabel = new JLabel("-");
-        lowestRankTimeLabel = new JLabel("-");
-        lowestRank.add(lowestRankLabel);
-        lowestRank.add(lowestRankTimeLabel);
-        
-        statsPanel.add(highestRank);
-        statsPanel.add(lowestRank);
-        
-        JScrollPane statsScrollPane = new JScrollPane(statsPanel);
-        statsScrollPane.setVerticalScrollBarPolicy(JScrollPane.VERTICAL_SCROLLBAR_NEVER);
-        statsScrollPane.setHorizontalScrollBarPolicy(JScrollPane.HORIZONTAL_SCROLLBAR_AS_NEEDED);
-        statsScrollPane.setBorder(null);
-        statsScrollPane.setPreferredSize(new Dimension(0, 60));
-        additionalStatsPanel.add(statsScrollPane);
-        additionalStatsPanel.add(Box.createVerticalStrut(16));
-        
-        // Bucket selector across two rows (to guarantee visibility in narrow panel)
-        JPanel row1 = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 0));
-        JPanel row2 = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 0));
-        String[] buckets = {"Overall", "NH", "Veng", "Multi", "DMM"};
-        for (int i = 0; i < buckets.length; i++) {
-            String bucket = buckets[i];
-            JButton btn = new JButton(bucket);
-            int chipWidth = 64; // fit within sidebar
-            btn.setPreferredSize(new Dimension(chipWidth, 25));
-            btn.setMinimumSize(btn.getPreferredSize());
-            btn.setFocusable(false);
-            btn.addActionListener(e -> {
-                selectedBucket = bucket.toLowerCase();
-                updateBucketButtonStates(bucket);
-                if (allMatches != null) {
-                    updateTierGraph(allMatches);
-                }
-            });
-            bucketButtons[i] = btn;
-            if (i < 2) row1.add(btn); else row2.add(btn);
-        }
-        updateBucketButtonStates("Overall");
-
-        JPanel chipsContainer = new JPanel();
-        chipsContainer.setLayout(new BoxLayout(chipsContainer, BoxLayout.Y_AXIS));
-        chipsContainer.setAlignmentX(LEFT_ALIGNMENT);
-        row1.setAlignmentX(LEFT_ALIGNMENT);
-        row2.setAlignmentX(LEFT_ALIGNMENT);
-        chipsContainer.add(row1);
-        chipsContainer.add(Box.createVerticalStrut(4));
-        chipsContainer.add(row2);
-        additionalStatsPanel.add(chipsContainer);
-        
-        // Tier Graph title - left aligned
-        JPanel titlePanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 0, 0));
-        JLabel tierTitle = new JLabel("Tier Graph");
-        tierTitle.setFont(tierTitle.getFont().deriveFont(Font.BOLD, 14f));
-        titlePanel.add(tierTitle);
-        additionalStatsPanel.add(titlePanel);
-        additionalStatsPanel.add(Box.createVerticalStrut(8));
-        
-        tierGraphPanel = createTierGraph();
-        // Fit within ~240px width and avoid scrollbars by constraining preferred size
-        tierGraphPanel.setPreferredSize(new Dimension(240, 240));
-        additionalStatsPanel.add(tierGraphPanel);
-        
-        // Preview button removed per request
-        
-        return additionalStatsPanel;
-    }
     
     private JPanel createMatchHistory()
     {
@@ -837,54 +758,7 @@ public class DashboardPanel extends PluginPanel
         catch (Exception ignore) {}
     }
 
-    @SuppressWarnings("unused")
-    private void applyMatchesToUI(JsonArray matches, String nextToken, boolean updateCache)
-    {
-        tableModel.setRowCount(0);
-        int wins = 0, losses = 0, ties = 0;
 
-        for (int i = 0; i < matches.size(); i++)
-        {
-            JsonObject match = matches.get(i).getAsJsonObject();
-            String result = match.has("result") ? match.get("result").getAsString() : "";
-            String opponent = match.has("opponent_id") ? match.get("opponent_id").getAsString() : "";
-            String matchType = match.has("bucket") ? match.get("bucket").getAsString().toUpperCase() : "Unknown";
-            String playerRank = computeRank(match, "player_");
-            String opponentRank = computeRank(match, "opponent_");
-            String matchDisplay = playerRank + " vs " + opponentRank;
-            String change = computeRatingChange(match);
-            String time = match.has("when") ? formatTime(match.get("when").getAsLong()) : "";
-
-            if ("win".equalsIgnoreCase(result)) wins++;
-            else if ("loss".equalsIgnoreCase(result)) losses++;
-            else if ("tie".equalsIgnoreCase(result)) ties++;
-
-            tableModel.addRow(new Object[]{result, opponent, matchType, matchDisplay, change, time});
-        }
-
-        updatePerformanceStats(wins, losses, ties);
-        updateWinRateChart(matches);
-        updateRankBreakdown(matches);
-
-        if (isLoggedIn) {
-            allMatches = matches;
-            updateAdditionalStats(matches);
-        }
-
-        allMatches = matches;
-        updateBucketBarsFromMatches();
-
-        matchesNextToken = nextToken;
-        if (loadMoreButton != null) {
-            loadMoreButton.setVisible(matchesNextToken != null && !matchesNextToken.isEmpty());
-        }
-        if (updateCache && currentMatchesPlayerId != null) {
-            matchesCache.put(currentMatchesPlayerId, new MatchesCache(matches, matchesNextToken, System.currentTimeMillis()));
-        }
-        if (extraStatsPanel != null) {
-            extraStatsPanel.setMatches(matches);
-        }
-    }
     
     private String computeRank(JsonObject match, String prefix)
     {
@@ -1705,6 +1579,15 @@ public class DashboardPanel extends PluginPanel
             {
                 // re-check cache once we hold the lock
                 now = System.currentTimeMillis();
+                
+                // Double-check throttle inside lock to prevent thundering herd
+                // (e.g. if another thread just updated the throttle while we were waiting for lock)
+                Long lastReqInner = shardThrottle.getOrDefault(cacheKey, 0L);
+                if (now - lastReqInner < 60_000L)
+                {
+                    return null;
+                }
+
                 cached = shardCache.get(cacheKey);
                 if (cached != null && now - cached.timestamp < SHARD_CACHE_EXPIRY_MS)
                 {
@@ -2185,19 +2068,9 @@ public class DashboardPanel extends PluginPanel
         }
     }
     
-    @SuppressWarnings("unused")
-    private void startTokenPolling()
-    {
-        // Removed (login flow updated to callback-only)
-    }
+
     
-    @SuppressWarnings("unused")
-    private boolean checkCallbackCompletion()
-    {
-        // Simulate callback completion after 3 seconds
-        // In real implementation, check callback endpoint or local server
-        return System.currentTimeMillis() % 10000 > 3000;
-    }
+
     
     private CognitoAuthService authService;
     
@@ -2489,82 +2362,6 @@ public class DashboardPanel extends PluginPanel
         return baseOrder * 10 + (4 - division);
     }
     
-    private JPanel createTierGraph()
-    {
-        JPanel panel = new JPanel()
-        {
-            @Override
-            protected void paintComponent(Graphics g)
-            {
-                super.paintComponent(g);
-                Graphics2D g2 = (Graphics2D) g;
-                g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
-                
-                int width = getWidth() - 40;
-                int height = getHeight() - 40;
-                
-                if (width <= 0 || height <= 0) return;
-                
-                // Draw axes
-                g2.setColor(Color.LIGHT_GRAY);
-                g2.drawLine(20, height + 20, width + 20, height + 20);
-                g2.drawLine(20, 20, 20, height + 20);
-                
-                // Draw tier lines and labels
-                String[] tiers = {"Bronze", "Iron", "Steel", "Black", "Mithril", "Adamant", "Rune", "Dragon", "3rd Age"};
-                Color[] tierColors = {
-                    new Color(184, 115, 51), new Color(192, 192, 192), new Color(154, 162, 166),
-                    Color.GRAY, new Color(59, 167, 214), new Color(26, 139, 111),
-                    new Color(78, 159, 227), new Color(229, 57, 53), new Color(229, 193, 0)
-                };
-                
-                for (int i = 0; i < tiers.length; i++)
-                {
-                    int y = 20 + (i * height / tiers.length);
-                    g2.setColor(tierColors[i]);
-                    g2.drawLine(20, y, width + 20, y);
-                    if (config != null && config.colorblindMode()) {
-                        g2.setColor(Color.WHITE);
-                    }
-                    g2.drawString(tiers[tiers.length - 1 - i], 2, y + 5);
-                }
-                
-                // Draw X-axis labels (match numbers) - show every ~50th match for 500+ matches
-                if (tierHistory.size() > 1)
-                {
-                    g2.setColor(Color.WHITE);
-                    int totalMatches = tierHistory.size();
-                    int labelInterval = Math.max(1, totalMatches / 8); // Show ~8 labels max
-                    
-                    for (int i = 0; i < totalMatches; i += labelInterval)
-                    {
-                        int x = 20 + (i * width / Math.max(1, totalMatches - 1));
-                        int matchNum = totalMatches - i; // Reverse order (most recent first)
-                        g2.drawString("#" + matchNum, x - 10, height + 35);
-                    }
-                    
-                    // Draw tier progression line
-                    g2.setColor(Color.WHITE);
-                    g2.setStroke(new BasicStroke(2));
-                    for (int i = 0; i < tierHistory.size() - 1; i++)
-                    {
-                        int x1 = 20 + (i * width / Math.max(1, tierHistory.size() - 1));
-                        int y1 = height + 20 - (int)(tierHistory.get(i) * height / 100);
-                        int x2 = 20 + ((i + 1) * width / Math.max(1, tierHistory.size() - 1));
-                        int y2 = height + 20 - (int)(tierHistory.get(i + 1) * height / 100);
-                        g2.drawLine(x1, y1, x2, y2);
-                    }
-                }
-                else
-                {
-                    g2.setColor(Color.GRAY);
-                    g2.drawString("No tier data available", width / 2 - 60, height / 2);
-                }
-            }
-        };
-        panel.setPreferredSize(new Dimension(240, 240));
-        return panel;
-    }
     
     private void updateTierGraph(JsonArray matches)
     {
@@ -2677,7 +2474,7 @@ public class DashboardPanel extends PluginPanel
         tiesLabel.setText("Ties: " + ties);
     }
     
-    @SuppressWarnings("unused")
+
     private JPanel createWinRateChart()
     {
         JPanel panel = new JPanel()
@@ -2775,6 +2572,8 @@ public class DashboardPanel extends PluginPanel
         
         if (chartPanel != null)
         {
+            chartPanel.setPreferredSize(new Dimension(Math.max(240, winRateHistory.size() * 5), 200));
+            chartPanel.revalidate();
             chartPanel.repaint();
         }
     }
@@ -2843,19 +2642,6 @@ public class DashboardPanel extends PluginPanel
         try { return authService != null && authService.isLoggedIn(); } catch (Exception ignore) { return false; }
     }
     
-    private void updateBucketButtonStates(String activeBucket)
-    {
-        String[] buckets = {"Overall", "NH", "Veng", "Multi", "DMM"};
-        for (int i = 0; i < bucketButtons.length; i++)
-        {
-            if (bucketButtons[i] != null)
-            {
-                boolean isActive = buckets[i].equals(activeBucket);
-                bucketButtons[i].setEnabled(!isActive);
-                bucketButtons[i].setBackground(isActive ? Color.DARK_GRAY : null);
-            }
-        }
-    }
     
     private void handleRefresh()
     {

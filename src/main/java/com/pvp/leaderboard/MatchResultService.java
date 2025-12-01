@@ -154,12 +154,12 @@ public class MatchResultService
 
         // Detailed client-side logging to validate final request shape
         log.debug("=== AUTHENTICATED REQUEST ===");
-        try { log.debug("URL: {}", request.url()); } catch (Exception ignore) {}
-        try { log.debug("Method: {}", request.method()); } catch (Exception ignore) {}
-        try { log.debug("Host: {}", request.url().host()); } catch (Exception ignore) {}
-        try { log.debug("Headers: {}", request.headers()); } catch (Exception ignore) {}
-        try { log.debug("Content-Type: {}", JSON); } catch (Exception ignore) {}
-        try { log.debug("Body: {}", body); } catch (Exception ignore) {}
+        log.debug("URL: {}", request.url());
+        log.debug("Method: {}", request.method());
+        log.debug("Host: {}", request.url().host());
+        log.debug("Headers: {}", request.headers());
+        log.debug("Content-Type: {}", JSON);
+        log.debug("Body: {}", body);
 
         httpClient.newCall(request).enqueue(new Callback()
         {
@@ -177,7 +177,7 @@ public class MatchResultService
                 {
                     int code = res.code();
                     String reqId = null; try { reqId = res.header("x-amzn-RequestId"); } catch (Exception ignore) {}
-                    try { log.debug("Response Code: {} x-amzn-RequestId={} url={}", code, reqId, res.request().url()); } catch (Exception ignore) {}
+                    log.debug("Response Code: {} x-amzn-RequestId={} url={}", code, reqId, res.request().url());
                     // For non-2xx, log response body to aid diagnosis
                     if (code < 200 || code >= 300)
                     {
@@ -225,12 +225,12 @@ public class MatchResultService
 
         // Detailed client-side logging to validate final request shape
         log.debug("=== UNAUTHENTICATED REQUEST ===");
-        try { log.debug("URL: {}", request.url()); } catch (Exception ignore) {}
-        try { log.debug("Method: {}", request.method()); } catch (Exception ignore) {}
-        try { log.debug("Host: {}", request.url().host()); } catch (Exception ignore) {}
-        try { log.debug("Headers: {}", request.headers()); } catch (Exception ignore) {}
-        try { log.debug("Content-Type: {}", JSON); } catch (Exception ignore) {}
-        try { log.debug("Body: {}", body); } catch (Exception ignore) {}
+        log.debug("URL: {}", request.url());
+        log.debug("Method: {}", request.method());
+        log.debug("Host: {}", request.url().host());
+        log.debug("Headers: {}", request.headers());
+        log.debug("Content-Type: {}", JSON);
+        log.debug("Body: {}", body);
         log.debug("Signature Message: POST\n/matchresult\n{}\n{}", body, timestamp);
 
         httpClient.newCall(request).enqueue(new Callback()
@@ -249,7 +249,7 @@ public class MatchResultService
                 {
                     int code = res.code();
                     String reqId = null; try { reqId = res.header("x-amzn-RequestId"); } catch (Exception ignore) {}
-                    try { log.debug("Response Code: {} x-amzn-RequestId={} url={}", code, reqId, res.request().url()); } catch (Exception ignore) {}
+                    log.debug("Response Code: {} x-amzn-RequestId={} url={}", code, reqId, res.request().url());
                     if (code < 200 || code >= 300)
                     {
                         try { okhttp3.ResponseBody err = res.body(); String errStr = err != null ? err.string() : null; log.debug("Response Body: {}", errStr); } catch (Exception ignore) {}
