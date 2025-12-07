@@ -168,76 +168,99 @@ public class FightMonitor
             if (!(event.getActor() instanceof Player)) return;
             if (client == null || config == null) return;
 
-            Player player = (Player) event.getActor();
+            Player hitPlayer = (Player) event.getActor();
             Player localPlayer = client.getLocalPlayer();
             if (localPlayer == null) return;
 
-            String opponentName = null;
-            boolean startNow = false;
-            int amt = 0;
-            boolean startFromThisHit = false;
-            boolean isMine = false;
-            int hitsplatType = -1;
-
             net.runelite.api.Hitsplat hs = event.getHitsplat();
-            if (hs != null)
+            if (hs == null) return;
+
+            int hitsplatType = hs.getHitsplatType();
+            int amt = hs.getAmount();
+            boolean isMine = hs.isMine();
+            String hitPlayerName = hitPlayer.getName();
+            String localPlayerName = localPlayer.getName();
+
+            // Debug: Log ALL hitsplats on players
+            log.debug("[Hitsplat] on='{}' amt={} type={} isMine={} localPlayer='{}'", 
+                hitPlayerName, amt, hitsplatType, isMine, localPlayerName);
+
+            // Only process relevant damage hitsplat types (matching pvp-performance-tracker approach)
+            // For non-zero hits, only process relevant hitsplat types
+            if (amt > 0)
             {
-                isMine = hs.isMine();
-                hitsplatType = hs.getHitsplatType();
-                int a = hs.getAmount();
-                if (hitsplatType == HitsplatID.DAMAGE_ME || hitsplatType == HitsplatID.DAMAGE_OTHER)
+                if (!(hitsplatType == HitsplatID.DAMAGE_ME
+                    || hitsplatType == HitsplatID.DAMAGE_OTHER
+                    || hitsplatType == HitsplatID.POISON
+                    || hitsplatType == HitsplatID.VENOM))
                 {
-                    amt = a;
-                    startFromThisHit = (a > 0);
-                }
-                else if (hitsplatType == HitsplatID.POISON || hitsplatType == HitsplatID.VENOM)
-                {
-                    amt = a;
-                    startFromThisHit = false;
+                    log.debug("[Hitsplat] SKIPPED - irrelevant type={}", hitsplatType);
+                    return;
                 }
             }
 
-            if (player == localPlayer)
+            // Determine if this should start/continue a fight (only for direct damage, not poison/venom)
+            boolean startFromThisHit = (amt > 0) && 
+                (hitsplatType == HitsplatID.DAMAGE_ME || hitsplatType == HitsplatID.DAMAGE_OTHER);
+
+            String opponentName = null;
+            boolean startNow = false;
+
+            // Key insight from pvp-performance-tracker:
+            // - If hitsplat lands on LOCAL PLAYER -> opponent dealt that damage to us
+            // - If hitsplat lands on OPPONENT -> we dealt that damage to them
+            // This is more reliable than using isMine() which may not work for all damage types
+
+            if (hitPlayer == localPlayer)
             {
-                // Inbound damage
+                // Hitsplat on us = opponent dealt damage to us
                 opponentName = resolveInboundAttacker(localPlayer);
+                log.debug("[Hitsplat] ON US - resolved attacker='{}' amt={}", opponentName, amt);
                 if (opponentName != null)
                 {
                     lastExactOpponentName = opponentName;
-                    if (amt > 0)
-                    {
-                        damageFromOpponent.merge(opponentName, (long) amt, (a, b) -> a + b);
-                    }
                     if (startFromThisHit) startNow = true;
                 }
             }
             else
             {
-                // Outbound damage
-                boolean weAreAttacking = isMine;
-                if (!weAreAttacking && (hitsplatType == HitsplatID.POISON || hitsplatType == HitsplatID.VENOM)) {
-                    weAreAttacking = (localPlayer.getInteracting() == player);
-                }
+                // Hitsplat on another player
+                if (hitPlayerName == null) return;
 
-                if (weAreAttacking)
+                // Check if this player is someone we're actively fighting or interacting with
+                boolean isActiveOpponent = activeFights.containsKey(hitPlayerName);
+                Player interacting = (Player) localPlayer.getInteracting();
+                boolean isCurrentTarget = interacting != null && interacting == hitPlayer;
+                Player theirTarget = (Player) hitPlayer.getInteracting();
+                boolean isTargetingUs = theirTarget != null && theirTarget == localPlayer;
+
+                log.debug("[Hitsplat] ON OTHER '{}': isActiveOpp={} isTarget={} targetsUs={} activeFights={}", 
+                    hitPlayerName, isActiveOpponent, isCurrentTarget, isTargetingUs, activeFights.keySet());
+
+                // If the hit player is our active opponent or current target, we dealt that damage
+                if (isActiveOpponent || isCurrentTarget || isTargetingUs)
                 {
-                    opponentName = player.getName();
-                    if (amt > 0)
-                    {
-                        damageToOpponent.merge(opponentName, (long) amt, (a, b) -> a + b);
-                    }
+                    opponentName = hitPlayerName;
                     if (startFromThisHit) startNow = true;
+                }
+                else
+                {
+                    log.debug("[Hitsplat] NOT COUNTED - '{}' not recognized as opponent", hitPlayerName);
                 }
             }
 
+            // Handle fight start/continuation - do window reset BEFORE adding damage
             boolean validOpp = (opponentName != null && isPlayerOpponent(opponentName));
             if (startNow && opponentName != null && validOpp)
             {
                 int tickNow = client.getTickCount();
+                
+                // Check for combat window reset FIRST, before adding damage
                 if (tickNow - lastCombatActivityTick > OUT_OF_COMBAT_TICKS)
                 {
                     activeFights.clear();
                     damageFromOpponent.clear();
+                    damageToOpponent.clear();
                     log.debug("[Fight] combat window reset after {} ticks idle", tickNow - lastCombatActivityTick);
                 }
                 lastCombatActivityTick = tickNow;
@@ -250,6 +273,25 @@ public class FightMonitor
                 inFight = true;
                 if (!inFight) startFight(opponentName);
                 if (client.getVarbitValue(Varbits.MULTICOMBAT_AREA) == 1) wasInMulti = true;
+            }
+
+            // NOW add the damage to maps AFTER window reset check
+            if (opponentName != null && amt > 0)
+            {
+                if (hitPlayer == localPlayer)
+                {
+                    // Inbound damage
+                    damageFromOpponent.merge(opponentName, (long) amt, Long::sum);
+                    log.debug("[Hitsplat] INBOUND DMG: {} dealt {} to us, total from them={}", 
+                        opponentName, amt, damageFromOpponent.get(opponentName));
+                }
+                else
+                {
+                    // Outbound damage
+                    damageToOpponent.merge(opponentName, (long) amt, Long::sum);
+                    log.debug("[Hitsplat] OUTBOUND DMG: we dealt {} to {}, total to them={}", 
+                        amt, opponentName, damageToOpponent.get(opponentName));
+                }
             }
         }
         catch (Exception e)
@@ -336,7 +378,11 @@ public class FightMonitor
         final String resolvedOpponent = (opponentName != null) ? opponentName : "Unknown";
         final long dmgOut = damageToOpponent.getOrDefault(resolvedOpponent, 0L);
 
-        log.debug("[Fight] Finalizing: res={} opp={} world={} start={} end={} multi={} dmg={}", result, resolvedOpponent, world, startTs, now, wasMulti, dmgOut);
+        // Debug: Log full damage state
+        log.debug("[Fight] Finalizing: res={} opp='{}' world={} start={} end={} multi={}", result, resolvedOpponent, world, startTs, now, wasMulti);
+        log.debug("[Fight] damageToOpponent map: {}", damageToOpponent);
+        log.debug("[Fight] damageFromOpponent map: {}", damageFromOpponent);
+        log.debug("[Fight] Using dmgOut={} for opponent='{}'", dmgOut, resolvedOpponent);
 
         // Async Submission
         java.util.concurrent.CompletableFuture.runAsync(() -> {

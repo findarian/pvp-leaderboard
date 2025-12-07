@@ -47,6 +47,9 @@ public class PvPDataService
     // Failed fetch backoff
     private static final long SHARD_FAIL_BACKOFF_MS = 60L * 1000L;
 
+	// In-flight request deduplication for getShardRankByName
+	private final ConcurrentHashMap<String, CompletableFuture<ShardRank>> inFlightLookups = new ConcurrentHashMap<>();
+
 	private final Map<String, ShardEntry> shardCache = Collections.synchronizedMap(
 		new LinkedHashMap<String, ShardEntry>(128, 0.75f, true)
 		{
@@ -342,19 +345,43 @@ public class PvPDataService
 
 	/**
      * Primary Entry Point: Get Rank by Name using the SHA256 Shard Logic
+     * Uses in-flight deduplication to prevent multiple concurrent lookups for the same (player, bucket).
      */
 	public CompletableFuture<ShardRank> getShardRankByName(String playerName, String bucket)
 	{
-		CompletableFuture<ShardRank> future = new CompletableFuture<>();
-        try {
-            if (playerName == null || playerName.trim().isEmpty()) {
-                future.complete(null);
-                return future;
-            }
+        if (playerName == null || playerName.trim().isEmpty()) {
+            return CompletableFuture.completedFuture(null);
+        }
 
-            // 1. Canonicalize Name
-            String canonicalName = playerName.trim().toLowerCase();
-            
+        // 1. Canonicalize Name and bucket
+        String canonicalName = playerName.trim().toLowerCase();
+        String bucketPath = (bucket == null || bucket.isEmpty()) ? "overall" : bucket.toLowerCase();
+        
+        // Create lookup key for deduplication
+        String lookupKey = canonicalName + ":" + bucketPath;
+        
+        // Check for existing in-flight lookup - if one exists, return it instead of starting a new one
+        CompletableFuture<ShardRank> existingLookup = inFlightLookups.get(lookupKey);
+        if (existingLookup != null) {
+            debug("[Lookup] Dedup: reusing in-flight lookup for '{}' bucket={}", canonicalName, bucketPath);
+            return existingLookup;
+        }
+        
+        // Create new future for this lookup
+        CompletableFuture<ShardRank> future = new CompletableFuture<>();
+        
+        // Try to register as the in-flight lookup (atomic operation)
+        CompletableFuture<ShardRank> previousLookup = inFlightLookups.putIfAbsent(lookupKey, future);
+        if (previousLookup != null) {
+            // Another thread beat us to it - use their future instead
+            debug("[Lookup] Dedup: race detected, reusing in-flight lookup for '{}' bucket={}", canonicalName, bucketPath);
+            return previousLookup;
+        }
+        
+        // We own this lookup - make sure to clean up when done
+        future.whenComplete((result, ex) -> inFlightLookups.remove(lookupKey, future));
+        
+        try {
             // Check Negative Cache first (1 hour block)
             Long missingUntil = missingPlayerUntilMs.get(canonicalName);
             if (missingUntil != null && System.currentTimeMillis() < missingUntil) {
@@ -367,7 +394,6 @@ public class PvPDataService
             String shardKey = canonicalName.length() >= 2 
                 ? canonicalName.substring(0, 2).toLowerCase() 
                 : canonicalName.toLowerCase();
-            String bucketPath = (bucket == null || bucket.isEmpty()) ? "overall" : bucket.toLowerCase();
             String url = SHARD_BASE_URL + "/" + bucketPath + "/" + shardKey + ".json";
 
             debug("[Lookup] Player: {} -> Shard: {} -> URL: {}", canonicalName, shardKey, url);
