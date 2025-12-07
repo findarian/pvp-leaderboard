@@ -31,16 +31,18 @@ Open RuneLite configuration for the plugin:
 - “pvp lookup” menu toggle (default OFF).
 
 ## How lookups work
-- Primary source: shard files `https://devsecopsautomated.com/rank_idx/<bucket>/<pp>.json` with 1‑hour cache.
-- Overall bucket: world rank is fetched from `/user`. If `/user` is unavailable, the last cached value remains until a later refresh succeeds.
-- Negative cache/backoff:
+- **Shard key**: First 2 characters of lowercase player name (e.g., `toyco` -> `to.json`, `MOH JO JOJO` -> `mo.json`)
+- **Primary source**: shard files `https://devsecopsautomated.com/rank_idx/<bucket>/<shard_key>.json` with 1‑hour cache.
+- **Direct lookup**: Player rank data is embedded directly in the name shard (`name_rank_info_map`)
+- **Redirect support**: If a player uses a linked account, the shard contains a `redirect` pointing to the master account's `acct_sha`, which is then resolved (max 10 redirect depth)
+- **Negative cache/backoff**:
   - Name misses → 1‑hour negative cache per bucket.
   - Per‑shard throttle → minimum 60s between fetches; single‑flight per shard.
   - Network fail‑fast: connect/read timeouts are short (≈3s/4s) and errors trigger temporary backoffs.
-- API fallbacks:
+- **API fallbacks**:
   - Self: on shard miss, derive tier from `/user` or recent `/matches` quickly.
-  - Others: after a fight, if an opponent isn’t in shards, schedule a delayed `/user` and show that rank until shards are fresh.
-  - Right‑click “pvp lookup” forces an API override for that player until shards update.
+  - Others: after a fight, if an opponent isn't in shards, schedule a delayed `/user` and show that rank until shards are fresh.
+  - Right‑click "pvp lookup" forces an API override for that player until shards update.
 
 ## Match history
 - GET `/matches?player_id=<id>&limit=<N>[&next_token=...]` with token‑based pagination.

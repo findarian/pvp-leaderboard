@@ -1,5 +1,7 @@
-package com.pvp.leaderboard;
+package com.pvp.leaderboard.overlay;
 
+import com.pvp.leaderboard.PvPLeaderboardPlugin;
+import com.pvp.leaderboard.config.PvPLeaderboardConfig;
 import net.runelite.api.Client;
 import net.runelite.api.Player;
 import net.runelite.client.ui.overlay.Overlay;
@@ -9,16 +11,14 @@ import net.runelite.client.ui.overlay.components.LineComponent;
 import net.runelite.client.ui.overlay.components.PanelComponent;
 import net.runelite.client.ui.overlay.components.TitleComponent;
 
-import com.pvp.leaderboard.config.PvPLeaderboardConfig;
-
 import javax.inject.Inject;
 import java.awt.*;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 
-
-public class TopNearbyOverlay extends Overlay
+@SuppressWarnings("deprecation")
+public class BottomNearbyOverlay extends Overlay
 {
     private final Client client;
     private final PvPLeaderboardPlugin plugin;
@@ -26,7 +26,7 @@ public class TopNearbyOverlay extends Overlay
     private final PanelComponent panelComponent = new PanelComponent();
 
     @Inject
-    public TopNearbyOverlay(Client client, PvPLeaderboardPlugin plugin, PvPLeaderboardConfig config)
+    public BottomNearbyOverlay(Client client, PvPLeaderboardPlugin plugin, PvPLeaderboardConfig config)
     {
         this.client = client;
         this.plugin = plugin;
@@ -40,7 +40,7 @@ public class TopNearbyOverlay extends Overlay
     @Override
     public Dimension render(Graphics2D graphics)
     {
-        if (!config.showTopNearbyOverlay())
+        if (!config.showBottomNearbyOverlay())
         {
             return null;
         }
@@ -50,13 +50,13 @@ public class TopNearbyOverlay extends Overlay
         int fontSize = Math.max(9, config.nearbyOverlayFontSize());
         Font base = graphics.getFont().deriveFont(Font.BOLD, (float) fontSize);
         panelComponent.getChildren().add(TitleComponent.builder()
-            .text("Best Players Nearby")
+            .text("Worst Players Nearby")
             .color(Color.YELLOW)
             .build());
         // Include self; no need to track separately
 
         List<PlayerEntry> entries = new ArrayList<>();
-        for (Player p : client.getTopLevelWorldView().players())
+        for (Player p : client.getPlayers())
         {
             if (p == null) continue;
             String pname = p.getName();
@@ -67,12 +67,12 @@ public class TopNearbyOverlay extends Overlay
             entries.add(new PlayerEntry(pname, rank, rankOrder(rank)));
         }
 
-        // Top N
-        List<PlayerEntry> sortedTop = new ArrayList<>(entries);
-        sortedTop.sort(Comparator.comparingInt((PlayerEntry e) -> e.order).reversed().thenComparing(e -> e.name));
+        // Bottom N
+        List<PlayerEntry> sortedBottom = new ArrayList<>(entries);
+        sortedBottom.sort(Comparator.comparingInt((PlayerEntry e) -> e.order).thenComparing(e -> e.name));
         int shown = 0;
-        int topLimit = Math.max(1, Math.min(10, config.topNearbyCount()));
-        for (PlayerEntry e : sortedTop)
+        int bottomLimit = Math.max(1, Math.min(10, config.bottomNearbyCount()));
+        for (PlayerEntry e : sortedBottom)
         {
             LineComponent line = LineComponent.builder()
                 .left(e.name + ":")
@@ -84,7 +84,7 @@ public class TopNearbyOverlay extends Overlay
             line.setRightFont(base);
             panelComponent.getChildren().add(line);
             shown++;
-            if (shown >= topLimit) break;
+            if (shown >= bottomLimit) break;
         }
 
         int width = Math.max(140, config.nearbyOverlayWidth());
@@ -152,5 +152,3 @@ public class TopNearbyOverlay extends Overlay
         }
     }
 }
-
-

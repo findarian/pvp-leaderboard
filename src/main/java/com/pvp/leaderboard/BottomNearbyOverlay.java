@@ -9,13 +9,15 @@ import net.runelite.client.ui.overlay.components.LineComponent;
 import net.runelite.client.ui.overlay.components.PanelComponent;
 import net.runelite.client.ui.overlay.components.TitleComponent;
 
+import com.pvp.leaderboard.config.PvPLeaderboardConfig;
+
 import javax.inject.Inject;
 import java.awt.*;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 
-@SuppressWarnings("deprecation")
+
 public class BottomNearbyOverlay extends Overlay
 {
     private final Client client;
@@ -51,10 +53,10 @@ public class BottomNearbyOverlay extends Overlay
             .text("Worst Players Nearby")
             .color(Color.YELLOW)
             .build());
-        // Include self; no need to track separately
+        // Include self; 
 
         List<PlayerEntry> entries = new ArrayList<>();
-        for (Player p : client.getPlayers())
+        for (Player p : client.getTopLevelWorldView().players())
         {
             if (p == null) continue;
             String pname = p.getName();

@@ -1,7 +1,8 @@
-package com.pvp.leaderboard;
+package com.pvp.leaderboard.ui;
 
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
+import com.pvp.leaderboard.util.RankUtils;
 import javax.swing.*;
 import java.awt.*;
 import java.text.SimpleDateFormat;
@@ -163,11 +164,11 @@ public class AdditionalStatsPanel extends JPanel {
             if (oppRank.isEmpty()) continue;
 
             if ("win".equals(result)) {
-                if (bestRank == null || rankOrder(oppRank) > rankOrder(bestRank)) {
+                if (bestRank == null || RankUtils.getRankOrder(oppRank) > RankUtils.getRankOrder(bestRank)) {
                     bestRank = oppRank; bestTs = ts;
                 }
             } else if ("loss".equals(result)) {
-                if (worstRank == null || rankOrder(oppRank) < rankOrder(worstRank)) {
+                if (worstRank == null || RankUtils.getRankOrder(oppRank) < RankUtils.getRankOrder(worstRank)) {
                     worstRank = oppRank; worstTs = ts;
                 }
             }
@@ -217,7 +218,7 @@ public class AdditionalStatsPanel extends JPanel {
                     double mu = last.getOrDefault(e.getKey(), 1000.0);
                     overallMu += mu * e.getValue();
                 }
-                rawY.add(encodeRankValue(overallMu));
+                rawY.add(RankUtils.calculateContinuousTierValue(overallMu));
             }
         } else {
             Double prevMu = null;
@@ -229,7 +230,7 @@ public class AdditionalStatsPanel extends JPanel {
                 } else {
                     chosen = (prevMu != null) ? prevMu : 1000.0;
                 }
-                rawY.add(encodeRankValue(chosen));
+                rawY.add(RankUtils.calculateContinuousTierValue(chosen));
             }
         }
 
@@ -281,25 +282,6 @@ public class AdditionalStatsPanel extends JPanel {
         return Double.NaN;
     }
 
-    // Encode MMR to rank-scale value like the website (baseIndex*3 + divisionOffset + progress)
-    private static double encodeRankValue(double mmr) {
-        final String[] ORDER = {"Bronze","Iron","Steel","Black","Mithril","Adamant","Rune","Dragon","3rd Age"};
-        double v = mmr;
-        String[] curr = THRESHOLDS[0];
-        for (String[] t : THRESHOLDS) { if (v >= Double.parseDouble(t[2])) curr = t; else break; }
-        int idxCurr = indexOfThreshold(curr);
-        String[] next = THRESHOLDS[Math.min(idxCurr + 1, THRESHOLDS.length - 1)];
-        int baseIdx = 0;
-        for (int i = 0; i < ORDER.length; i++) { if (ORDER[i].equals(curr[0])) { baseIdx = i; break; } }
-        int div = "3rd Age".equals(curr[0]) ? 0 : Integer.parseInt(curr[1]);
-        int divOffset = "3rd Age".equals(curr[0]) ? 0 : (3 - div);
-        double tierBase = baseIdx * 3 + divOffset;
-        if ("3rd Age".equals(curr[0])) return tierBase;
-        double span = Math.max(1.0, Double.parseDouble(next[2]) - Double.parseDouble(curr[2]));
-        double prog = Math.max(0.0, Math.min(1.0, (v - Double.parseDouble(curr[2])) / span));
-        return tierBase + prog;
-    }
-
     private void updateGraphSize() {
         // Keep fixed sizes to avoid scrollbars in Additional Stats
         graphLabels.setPreferredSize(GRAPH_LABELS_SIZE);
@@ -323,39 +305,6 @@ public class AdditionalStatsPanel extends JPanel {
         return division > 0 ? (rank + " " + division) : rank;
     }
 
-    private static final java.util.List<String> RANKS = Arrays.asList(
-            "Bronze","Iron","Steel","Black","Mithril","Adamant","Rune","Dragon","3rd Age"
-    );
-    private static int rankOrder(String label) {
-        String[] parts = label.trim().split("\\s+");
-        String base = parts[0];
-        int div = (parts.length > 1) ? parseInt(parts[1], 0) : 0;
-        int baseIdx = RANKS.indexOf(base);
-        if (baseIdx < 0) return -1;
-        int divOrder = (base.equals("3rd") || base.equals("3rd Age")) ? 0 : (4 - div);
-        return baseIdx * 10 + (10 - divOrder);
-    }
-    private static int parseInt(String s, int d) { try { return Integer.parseInt(s); } catch (Exception e) { return d; } }
-
-    private static final String[][] THRESHOLDS = {
-            {"Bronze","3","0"}, {"Bronze","2","170"}, {"Bronze","1","240"},
-            {"Iron","3","310"}, {"Iron","2","380"}, {"Iron","1","450"},
-            {"Steel","3","520"}, {"Steel","2","590"}, {"Steel","1","660"},
-            {"Black","3","730"}, {"Black","2","800"}, {"Black","1","870"},
-            {"Mithril","3","940"}, {"Mithril","2","1010"}, {"Mithril","1","1080"},
-            {"Adamant","3","1150"},{"Adamant","2","1250"},{"Adamant","1","1350"},
-            {"Rune","3","1450"}, {"Rune","2","1550"}, {"Rune","1","1650"},
-            {"Dragon","3","1750"},{"Dragon","2","1850"},{"Dragon","1","1950"},
-            {"3rd Age","0","2100"}
-    };
-    
-    private static int indexOfThreshold(String[] t) {
-        for (int i = 0; i < THRESHOLDS.length; i++) {
-            if (Arrays.equals(THRESHOLDS[i], t)) return i;
-        }
-        return -1;
-    }
-
     // Fixed-width labels + guides panel
     private static class TierGraphLabelsPanel extends JPanel {
         private double vMin = 0.0, vMax = 24.0;
@@ -374,11 +323,11 @@ public class AdditionalStatsPanel extends JPanel {
                 int y = top + innerH - (int) Math.round(frac * innerH);
                 g2.setColor(new Color(120,120,120));
                 g2.drawLine(0, y, w, y);
-                int base = gi / 3; int off = gi % 3; String baseRank = THRESHOLDS[Math.min(base * 3, THRESHOLDS.length - 1)][0];
+                int base = gi / 3; int off = gi % 3; String baseRank = RankUtils.THRESHOLDS[Math.min(base * 3, RankUtils.THRESHOLDS.length - 1)][0];
                 // Only render division 3 labels (off==0) and 3rd Age
                 if (off == 0) {
                     String label = baseRank.equals("3rd Age") ? baseRank : baseRank + " 3";
-                    g2.setColor(rankColor(baseRank));
+                    g2.setColor(RankUtils.getRankColor(baseRank));
                     g2.drawString(label, 2, y + 5);
                 }
             }
@@ -427,23 +376,4 @@ public class AdditionalStatsPanel extends JPanel {
             }
         }
     }
-
-    // Tier color mapping used for label coloring
-    private static Color rankColor(String baseRank) {
-        if (baseRank == null) return Color.LIGHT_GRAY;
-        switch (baseRank) {
-            case "Bronze": return new Color(184, 115, 51);
-            case "Iron": return new Color(192, 192, 192);
-            case "Steel": return new Color(154, 162, 166);
-            case "Black": return Color.GRAY;
-            case "Mithril": return new Color(59, 167, 214);
-            case "Adamant": return new Color(26, 139, 111);
-            case "Rune": return new Color(78, 159, 227);
-            case "Dragon": return new Color(229, 57, 53);
-            case "3rd Age": return new Color(229, 193, 0);
-            default: return Color.LIGHT_GRAY;
-        }
-    }
-
-    
 }

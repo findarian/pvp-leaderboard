@@ -1,5 +1,7 @@
-package com.pvp.leaderboard;
+package com.pvp.leaderboard.overlay;
 
+import com.pvp.leaderboard.PvPLeaderboardPlugin;
+import com.pvp.leaderboard.config.PvPLeaderboardConfig;
 import net.runelite.api.Client;
 import net.runelite.api.Player;
 import net.runelite.client.ui.overlay.Overlay;
@@ -9,15 +11,13 @@ import net.runelite.client.ui.overlay.components.LineComponent;
 import net.runelite.client.ui.overlay.components.PanelComponent;
 import net.runelite.client.ui.overlay.components.TitleComponent;
 
-import com.pvp.leaderboard.config.PvPLeaderboardConfig;
-
 import javax.inject.Inject;
 import java.awt.*;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 
-
+@SuppressWarnings("deprecation")
 public class TopNearbyOverlay extends Overlay
 {
     private final Client client;
@@ -56,7 +56,7 @@ public class TopNearbyOverlay extends Overlay
         // Include self; no need to track separately
 
         List<PlayerEntry> entries = new ArrayList<>();
-        for (Player p : client.getTopLevelWorldView().players())
+        for (Player p : client.getPlayers())
         {
             if (p == null) continue;
             String pname = p.getName();
@@ -152,5 +152,3 @@ public class TopNearbyOverlay extends Overlay
         }
     }
 }
-
-

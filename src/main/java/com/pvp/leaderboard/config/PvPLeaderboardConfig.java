@@ -1,4 +1,4 @@
-package com.pvp.leaderboard;
+package com.pvp.leaderboard.config;
 
 import net.runelite.client.config.Config;
 import net.runelite.client.config.ConfigGroup;
@@ -36,7 +36,7 @@ public interface PvPLeaderboardConfig extends Config
 	)
 	default boolean enablePvpLookupMenu()
 	{
-		return false; // OFF by default
+		return false; 
 	}
 
     enum RankDisplayMode { TEXT { public String toString(){return "Text";} }, RANK_NUMBER { public String toString(){return "Rank";} }, ICON { public String toString(){return "Icon";} } }
@@ -220,6 +220,16 @@ public interface PvPLeaderboardConfig extends Config
 	default boolean colorblindMode()
 	{
 		return false;
+	}
+
+	@ConfigItem(
+		keyName = "debugMode",
+		name = "Debug Mode",
+		description = "Enable detailed logging for PvP lookups"
+	)
+	default boolean debugMode()
+	{
+		return true;
 	}
 
 	// Rank bucket selector enum (public via being a member of the interface)

@@ -1,4 +1,4 @@
-package com.pvp.leaderboard;
+package com.pvp.leaderboard.util;
 
 import java.util.Locale;
 
@@ -22,4 +22,3 @@ public final class NameUtils
 		return display.toLowerCase(Locale.ROOT);
 	}
 }
-

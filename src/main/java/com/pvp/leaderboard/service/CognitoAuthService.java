@@ -1,4 +1,4 @@
-package com.pvp.leaderboard;
+package com.pvp.leaderboard.service;
 
 import com.google.gson.Gson;
 import com.google.gson.JsonObject;
@@ -22,6 +22,7 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
+import javax.inject.Inject;
 
 public class CognitoAuthService {
     private static final String COGNITO_DOMAIN = "osrs-mmr-a8959e04.auth.us-east-1.amazoncognito.com";
@@ -43,6 +44,7 @@ public class CognitoAuthService {
     private final ScheduledExecutorService scheduler;
     private ScheduledFuture<?> refreshTask;
     
+    @Inject
     public CognitoAuthService(ConfigManager configManager, OkHttpClient httpClient, Gson gson, ScheduledExecutorService scheduler) {
         this.configManager = configManager;
         this.httpClient = httpClient;
@@ -50,13 +52,6 @@ public class CognitoAuthService {
         this.scheduler = scheduler;
     }
 
-    // No-arg constructor for tests or environments without ConfigManager
-    public CognitoAuthService() {
-        this.configManager = null;
-        this.httpClient = net.runelite.client.RuneLite.getInjector().getInstance(OkHttpClient.class);
-        this.gson = net.runelite.client.RuneLite.getInjector().getInstance(Gson.class);
-        this.scheduler = net.runelite.client.RuneLite.getInjector().getInstance(ScheduledExecutorService.class);
-    }
 
     public CompletableFuture<Boolean> login() {
         return CompletableFuture.supplyAsync(() -> {
