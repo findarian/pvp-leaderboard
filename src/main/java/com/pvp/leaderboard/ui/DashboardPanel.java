@@ -196,6 +196,11 @@ public class DashboardPanel extends PluginPanel
     {
         currentMatchesPlayerId = normalizePlayerId(playerId);
         playerNameLabel.setText(playerId); // Update header immediately
+        
+        // Also update the search box so user can see/edit the searched name
+        if (loginPanel != null) {
+            loginPanel.setPluginSearchText(playerId);
+        }
 
         resetUiForNewSearch();
 

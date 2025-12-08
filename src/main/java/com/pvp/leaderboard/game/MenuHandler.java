@@ -110,7 +110,7 @@ public class MenuHandler
         }
         catch (Exception e)
         {
-             log.debug("Uncaught exception in handleMenuOptionClicked", e);
+             // log.debug("Uncaught exception in handleMenuOptionClicked", e);
         }
     }
 }

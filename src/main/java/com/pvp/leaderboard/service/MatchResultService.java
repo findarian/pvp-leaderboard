@@ -59,18 +59,18 @@ public class MatchResultService
                 boolean notSelf = (pLower != null && oLower != null) && !pLower.equals(oLower);
                 boolean timeOk = match.getFightStartTs() > 0 && match.getFightEndTs() > 0 && match.getFightEndTs() >= match.getFightStartTs();
                 boolean worldOk = match.getWorld() > 0;
-                log.debug("[Submit] preflight namesOk={} notSelf={} timeOk={} worldOk={} player='{}' opponent='{}' startTs={} endTs={} world={} multi={} dmgOut={}",
-                    namesOk, notSelf, timeOk, worldOk, match.getPlayerId(), match.getOpponentId(), match.getFightStartTs(), match.getFightEndTs(), match.getWorld(), match.isWasInMulti(), match.getDamageToOpponent());
-                if (!namesOk) { log.debug("[Submit][why] Missing player/opponent name"); }
-                else if (!notSelf) { log.debug("[Submit][why] Opponent equals self; likely mis-attribution"); }
-                if (!timeOk) { log.debug("[Submit][why] Invalid timestamps startTs={} endTs={}", match.getFightStartTs(), match.getFightEndTs()); }
-                if (!worldOk) { log.debug("[Submit][why] Invalid world={}", match.getWorld()); }
+                // log.debug("[Submit] preflight namesOk={} notSelf={} timeOk={} worldOk={} player='{}' opponent='{}' startTs={} endTs={} world={} multi={} dmgOut={}",
+                //     namesOk, notSelf, timeOk, worldOk, match.getPlayerId(), match.getOpponentId(), match.getFightStartTs(), match.getFightEndTs(), match.getWorld(), match.isWasInMulti(), match.getDamageToOpponent());
+                // if (!namesOk) { log.debug("[Submit][why] Missing player/opponent name"); }
+                // else if (!notSelf) { log.debug("[Submit][why] Opponent equals self; likely mis-attribution"); }
+                // if (!timeOk) { log.debug("[Submit][why] Invalid timestamps startTs={} endTs={}", match.getFightStartTs(), match.getFightEndTs()); }
+                // if (!worldOk) { log.debug("[Submit][why] Invalid world={}", match.getWorld()); }
             } catch (Exception ignore) {}
             
             String dbgPlayer = (match.getPlayerId() != null ? match.getPlayerId() : "<null>");
             String dbgOpponent = (match.getOpponentId() != null ? match.getOpponentId() : "<null>");
-            log.debug("[Submit] begin playerId={} opponentId={} result={} world={} startTs={} endTs={} startSpell={} endSpell={} multi={} authed={}",
-                dbgPlayer, dbgOpponent, match.getResult(), match.getWorld(), match.getFightStartTs(), match.getFightEndTs(), match.getFightStartSpellbook(), match.getFightEndSpellbook(), match.isWasInMulti(), (match.getIdToken() != null && !match.getIdToken().isEmpty()));
+            // log.debug("[Submit] begin playerId={} opponentId={} result={} world={} startTs={} endTs={} startSpell={} endSpell={} multi={} authed={}",
+            //     dbgPlayer, dbgOpponent, match.getResult(), match.getWorld(), match.getFightStartTs(), match.getFightEndTs(), match.getFightStartSpellbook(), match.getFightEndSpellbook(), match.isWasInMulti(), (match.getIdToken() != null && !match.getIdToken().isEmpty()));
 
             JsonObject body = new JsonObject();
             body.addProperty("player_id", match.getPlayerId());
@@ -87,13 +87,16 @@ public class MatchResultService
             body.addProperty("damage_to_opponent", match.getDamageToOpponent());
 
             String bodyJson = gson.toJson(body);
+            
+            log.debug("[MatchAPI] Request body: {}", bodyJson);
 
             if (match.getIdToken() != null && !match.getIdToken().isEmpty())
             {
+                log.debug("[MatchAPI] Using authenticated path (has idToken)");
                 submitAuthenticatedFightAsync(bodyJson, match.getIdToken(), match.getClientUniqueId()).whenComplete((ok, ex) -> {
                     if (ex != null)
                     {
-                        log.debug("[Submit] authenticated exception; fallback to unauth path", ex);
+                        log.debug("[MatchAPI] Authenticated path exception: {}, falling back to unauth", ex.getMessage());
                         submitUnauthenticatedFightAsync(bodyJson, match.getClientUniqueId()).whenComplete((ok2, ex2) -> {
                             if (ex2 != null) overall.complete(false); else overall.complete(ok2);
                         });
@@ -101,12 +104,12 @@ public class MatchResultService
                     }
                     if (Boolean.TRUE.equals(ok))
                     {
-                        log.debug("[Submit] authenticated path accepted");
+                        log.debug("[MatchAPI] Authenticated path SUCCESS");
                         overall.complete(true);
                     }
                     else
                     {
-                        log.debug("[Submit] authenticated failed; fallback to unauth path");
+                        log.debug("[MatchAPI] Authenticated path failed, falling back to unauth");
                         submitUnauthenticatedFightAsync(bodyJson, match.getClientUniqueId()).whenComplete((ok2, ex2) -> {
                             if (ex2 != null) overall.complete(false); else overall.complete(ok2);
                         });
@@ -115,6 +118,7 @@ public class MatchResultService
             }
             else
             {
+                log.debug("[MatchAPI] Using unauthenticated path (no idToken)");
                 submitUnauthenticatedFightAsync(bodyJson, match.getClientUniqueId()).whenComplete((ok, ex) -> {
                     if (ex != null) overall.complete(false); else overall.complete(ok);
                 });
@@ -122,7 +126,7 @@ public class MatchResultService
         }
         catch (Exception e)
         {
-            log.debug("[Submit] exception during submit", e);
+            log.debug("[MatchAPI] EXCEPTION during submit: {}", e.getMessage(), e);
             overall.complete(false);
         }
         return overall;
@@ -139,21 +143,14 @@ public class MatchResultService
             .addHeader("X-Client-Unique-Id", clientUniqueId)
             .build();
 
-        // Detailed client-side logging to validate final request shape
-        log.debug("=== AUTHENTICATED REQUEST ===");
-        log.debug("URL: {}", request.url());
-        log.debug("Method: {}", request.method());
-        log.debug("Host: {}", request.url().host());
-        log.debug("Headers: {}", request.headers());
-        log.debug("Content-Type: {}", JSON);
-        log.debug("Body: {}", body);
+        log.debug("[MatchAPI] Auth request to: {}", API_URL);
 
         httpClient.newCall(request).enqueue(new Callback()
         {
             @Override
             public void onFailure(Call call, IOException e)
             {
-                log.debug("[Submit] auth request failure", e);
+                log.debug("[MatchAPI] Auth request NETWORK FAILURE: {}", e.getMessage());
                 future.complete(false);
             }
 
@@ -164,18 +161,17 @@ public class MatchResultService
                 {
                     int code = res.code();
                     String reqId = null; try { reqId = res.header("x-amzn-RequestId"); } catch (Exception ignore) {}
-                    log.debug("Response Code: {} x-amzn-RequestId={} url={}", code, reqId, res.request().url());
-                    // For non-2xx, log response body to aid diagnosis
-                    if (code < 200 || code >= 300)
-                    {
-                        try { okhttp3.ResponseBody err = res.body(); String errStr = err != null ? err.string() : null; log.debug("Response Body: {}", errStr); } catch (Exception ignore) {}
-                    }
+                    
                     if (code >= 200 && code < 300)
                     {
+                        log.debug("[MatchAPI] Auth response SUCCESS: code={} requestId={}", code, reqId);
                         future.complete(true);
                     }
                     else
                     {
+                        String errBody = null;
+                        try { okhttp3.ResponseBody err = res.body(); errBody = err != null ? err.string() : null; } catch (Exception ignore) {}
+                        log.debug("[MatchAPI] Auth response FAILED: code={} requestId={} body={}", code, reqId, errBody);
                         future.complete(false);
                     }
                 }
@@ -196,6 +192,7 @@ public class MatchResultService
         }
         catch (Exception e)
         {
+            log.debug("[MatchAPI] Unauth signature generation FAILED: {}", e.getMessage());
             future.completeExceptionally(e);
             return future;
         }
@@ -209,22 +206,14 @@ public class MatchResultService
             .addHeader("X-Client-Unique-Id", clientUniqueId)
             .build();
 
-        // Detailed client-side logging to validate final request shape
-        log.debug("=== UNAUTHENTICATED REQUEST ===");
-        log.debug("URL: {}", request.url());
-        log.debug("Method: {}", request.method());
-        log.debug("Host: {}", request.url().host());
-        log.debug("Headers: {}", request.headers());
-        log.debug("Content-Type: {}", JSON);
-        log.debug("Body: {}", body);
-        log.debug("Signature Message: POST\n/matchresult\n{}\n{}", body, timestamp);
+        log.debug("[MatchAPI] Unauth request to: {} timestamp={}", API_URL, timestamp);
 
         httpClient.newCall(request).enqueue(new Callback()
         {
             @Override
             public void onFailure(Call call, IOException e)
             {
-                log.debug("[Submit] unauth request failure", e);
+                log.debug("[MatchAPI] Unauth request NETWORK FAILURE: {}", e.getMessage());
                 future.complete(false);
             }
 
@@ -235,17 +224,17 @@ public class MatchResultService
                 {
                     int code = res.code();
                     String reqId = null; try { reqId = res.header("x-amzn-RequestId"); } catch (Exception ignore) {}
-                    log.debug("Response Code: {} x-amzn-RequestId={} url={}", code, reqId, res.request().url());
-                    if (code < 200 || code >= 300)
-                    {
-                        try { okhttp3.ResponseBody err = res.body(); String errStr = err != null ? err.string() : null; log.debug("Response Body: {}", errStr); } catch (Exception ignore) {}
-                    }
+                    
                     if ((code >= 200 && code < 300) || code == 202)
                     {
+                        log.debug("[MatchAPI] Unauth response SUCCESS: code={} requestId={}", code, reqId);
                         future.complete(true);
                     }
                     else
                     {
+                        String errBody = null;
+                        try { okhttp3.ResponseBody err = res.body(); errBody = err != null ? err.string() : null; } catch (Exception ignore) {}
+                        log.debug("[MatchAPI] Unauth response FAILED: code={} requestId={} body={}", code, reqId, errBody);
                         future.complete(false);
                     }
                 }

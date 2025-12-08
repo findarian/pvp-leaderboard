@@ -73,7 +73,7 @@ public class PvPDataService
         if (playerName == null) return;
         String canonicalName = playerName.trim().toLowerCase();
         missingPlayerUntilMs.remove(canonicalName);
-        debug("[Cache] Cleared shard negative cache for {}", canonicalName);
+        // debug("[Cache] Cleared shard negative cache for {}", canonicalName);
     }
 
     // User Profile Caching
@@ -94,10 +94,10 @@ public class PvPDataService
 
     private void debug(String format, Object... args)
     {
-        if (config.debugMode())
-        {
-            log.debug("[PvPDataService] " + format, args);
-        }
+        // if (config.debugMode())
+        // {
+        //     log.debug("[PvPDataService] " + format, args);
+        // }
     }
 
 	public CompletableFuture<JsonObject> getPlayerMatches(String playerName, String nextToken, int limit)
@@ -179,7 +179,14 @@ public class PvPDataService
 
 					try
 					{
-						String bodyString = body.string();
+						String bodyString;
+						try {
+							bodyString = body.string();
+						} catch (IOException cacheEx) {
+							// Windows cache file locking issue - request succeeded but cache failed
+							future.complete(new JsonObject());
+							return;
+						}
 						JsonObject json = gson.fromJson(bodyString, JsonObject.class);
 						if (nextToken == null || nextToken.isEmpty()) {
                             String cacheKey = "matches:" + playerName + ":" + limit;
@@ -200,17 +207,25 @@ public class PvPDataService
 
 	public CompletableFuture<JsonObject> getUserProfile(String playerName, String clientUniqueId)
 	{
+		return getUserProfile(playerName, clientUniqueId, false);
+	}
+
+	public CompletableFuture<JsonObject> getUserProfile(String playerName, String clientUniqueId, boolean forceRefresh)
+	{
 		CompletableFuture<JsonObject> future = new CompletableFuture<>();
+		log.debug("[API] getUserProfile called: player={} forceRefresh={}", playerName, forceRefresh);
 
 		String cacheKey = "user:" + playerName;
 		UserStatsCache cached = userStatsCache.get(cacheKey);
-		if (cached != null && System.currentTimeMillis() - cached.getTimestamp() <= USER_CACHE_TTL_MS) {
+		if (!forceRefresh && cached != null && System.currentTimeMillis() - cached.getTimestamp() <= USER_CACHE_TTL_MS) {
+			log.debug("[API] getUserProfile: returning cached data for player={}", playerName);
 			future.complete(cached.getStats().deepCopy());
 			return future;
 		}
 
 		HttpUrl urlObj = HttpUrl.parse(API_BASE_URL + "/user");
 		if (urlObj == null) {
+			log.debug("[API] getUserProfile: invalid base URL");
 			future.completeExceptionally(new IOException("Invalid base URL"));
 			return future;
 		}
@@ -219,14 +234,17 @@ public class PvPDataService
 			.build();
 
 		Request request = new Request.Builder().url(url).get().build();
+		log.debug("[API] getUserProfile: making HTTP request to {}", url);
 
 		okHttpClient.newCall(request).enqueue(new Callback()
 		{
 			@Override
 			public void onFailure(Call call, IOException e)
 			{
+				log.debug("[API] getUserProfile onFailure: player={} error={}", playerName, e.getMessage());
 				UserStatsCache stale = userStatsCache.get(cacheKey);
 				if (stale != null) {
+					log.debug("[API] getUserProfile: using stale cache on failure for player={}", playerName);
 					future.complete(stale.getStats().deepCopy());
 					return;
 				}
@@ -238,23 +256,45 @@ public class PvPDataService
 			{
 				try (Response res = response)
 				{
+					log.debug("[API] getUserProfile onResponse: player={} code={}", playerName, res.code());
 					if (!res.isSuccessful())
 					{
 						if (res.code() == 404) {
+							log.debug("[API] getUserProfile: 404 not found for player={}", playerName);
 							future.complete(null);
 							return;
 						}
+						log.debug("[API] getUserProfile: HTTP error {} for player={}", res.code(), playerName);
 						future.completeExceptionally(new IOException("API error: " + res.code()));
 						return;
 					}
 					ResponseBody body = res.body();
-					String bodyString = body != null ? body.string() : "{}";
+					String bodyString;
+					try {
+						bodyString = body != null ? body.string() : "{}";
+					} catch (IOException cacheEx) {
+						log.debug("[API] getUserProfile: cache error during body read for player={}: {}", playerName, cacheEx.getMessage());
+						// Windows cache file locking issue - request succeeded but cache failed
+						// Try to serve stale cache if available
+						UserStatsCache stale = userStatsCache.get(cacheKey);
+						if (stale != null) {
+							log.debug("[API] getUserProfile: using stale cache after cache error for player={}", playerName);
+							future.complete(stale.getStats().deepCopy());
+							return;
+						}
+						log.debug("[API] getUserProfile: no stale cache, returning null for player={}", playerName);
+						future.complete(null);
+						return;
+					}
+					log.debug("[API] getUserProfile SUCCESS: player={} bodyLength={}", playerName, bodyString.length());
+					log.debug("[API] getUserProfile RESPONSE: player={} body={}", playerName, bodyString);
 					JsonObject json = gson.fromJson(bodyString, JsonObject.class);
 					userStatsCache.put(cacheKey, new UserStatsCache(json.deepCopy(), System.currentTimeMillis()));
 					future.complete(json);
 				}
 				catch (JsonSyntaxException e)
 				{
+					log.debug("[API] getUserProfile: JSON parse error for player={}: {}", playerName, e.getMessage());
 					future.completeExceptionally(e);
 				}
 			}
@@ -270,19 +310,44 @@ public class PvPDataService
      */
     public CompletableFuture<String> getTierFromProfile(String playerName, String bucket)
     {
-        debug("[API] getTierFromProfile called for player={} bucket={}", playerName, bucket);
+        log.debug("[API] getTierFromProfile called: player={} bucket={}", playerName, bucket);
         
-        // Clear cache to get fresh data after a fight
+        // Force refresh to get fresh data after a fight, but keep cached data as fallback
         String cacheKey = "user:" + playerName;
-        userStatsCache.remove(cacheKey);
+        UserStatsCache cachedData = userStatsCache.get(cacheKey);
+        log.debug("[API] getTierFromProfile: cachedData exists={}", cachedData != null);
         
-        return getUserProfile(playerName, null).thenApply(profile -> {
+        return getUserProfile(playerName, null, true).thenApply(profile -> {
             if (profile == null) {
-                debug("[API] getTierFromProfile: profile is null for player={}", playerName);
+                log.debug("[API] getTierFromProfile: profile is null for player={}", playerName);
+                // Try fallback to cached data if available
+                if (cachedData != null) {
+                    JsonObject cachedProfile = cachedData.getStats();
+                    if (cachedProfile != null) {
+                        log.debug("[API] getTierFromProfile: using cached fallback for player={}", playerName);
+                        // Try bucket-specific data first
+                        if (cachedProfile.has("buckets") && cachedProfile.get("buckets").isJsonObject()) {
+                            JsonObject buckets = cachedProfile.getAsJsonObject("buckets");
+                            if (buckets.has(bucket) && buckets.get(bucket).isJsonObject()) {
+                                JsonObject bucketData = buckets.getAsJsonObject(bucket);
+                                String tier = extractTierFromUserResponse(bucketData, playerName, bucket);
+                                if (tier != null) {
+                                    log.debug("[API] getTierFromProfile: cached bucket tier={} for player={}", tier, playerName);
+                                    return tier;
+                                }
+                            }
+                        }
+                        // Fallback to top-level
+                        String tier = extractTierFromUserResponse(cachedProfile, playerName, "overall");
+                        log.debug("[API] getTierFromProfile: cached top-level tier={} for player={}", tier, playerName);
+                        return tier;
+                    }
+                }
+                log.debug("[API] getTierFromProfile: no cached data, returning null for player={}", playerName);
                 return null;
             }
             
-            debug("[API] getTierFromProfile raw profile for {}: {}", playerName, profile);
+            log.debug("[API] getTierFromProfile: got profile for player={}, keys={}", playerName, profile.keySet());
             
             // Try bucket-specific data first (in "buckets" object)
             if (profile.has("buckets") && profile.get("buckets").isJsonObject()) {
@@ -290,15 +355,21 @@ public class PvPDataService
                 if (buckets.has(bucket) && buckets.get(bucket).isJsonObject()) {
                     JsonObject bucketData = buckets.getAsJsonObject(bucket);
                     String tier = extractTierFromUserResponse(bucketData, playerName, bucket);
-                    if (tier != null) return tier;
+                    if (tier != null) {
+                        log.debug("[API] getTierFromProfile SUCCESS: bucket tier={} for player={}", tier, playerName);
+                        return tier;
+                    }
                 }
             }
             
             // Fallback to top-level rank/division fields (for overall bucket)
             String tier = extractTierFromUserResponse(profile, playerName, "overall");
-            if (tier != null) return tier;
+            if (tier != null) {
+                log.debug("[API] getTierFromProfile SUCCESS: top-level tier={} for player={}", tier, playerName);
+                return tier;
+            }
             
-            debug("[API] getTierFromProfile: no rank found for player={} bucket={}", playerName, bucket);
+            log.debug("[API] getTierFromProfile: no rank found in profile for player={} bucket={}", playerName, bucket);
             return null;
         });
     }
@@ -326,7 +397,7 @@ public class PvPDataService
         if (rank != null && !rank.isEmpty()) {
             // Combine rank and division (e.g., "Dragon 3")
             String tier = division > 0 ? rank + " " + division : rank;
-            debug("[API] extractTierFromUserResponse SUCCESS player={} bucket={} tier={}", playerName, bucket, tier);
+            // debug("[API] extractTierFromUserResponse SUCCESS player={} bucket={} tier={}", playerName, bucket, tier);
             return tier;
         }
         return null;
@@ -338,7 +409,7 @@ public class PvPDataService
      */
 	public CompletableFuture<String> getPlayerTier(String playerName, String bucket)
 	{
-		debug("[API] getPlayerTier called for player={} bucket={}", playerName, bucket);
+		// debug("[API] getPlayerTier called for player={} bucket={}", playerName, bucket);
         // Delegate to getTierFromProfile which uses /user endpoint correctly
         return getTierFromProfile(playerName, bucket);
 	}
@@ -363,7 +434,7 @@ public class PvPDataService
         // Check for existing in-flight lookup - if one exists, return it instead of starting a new one
         CompletableFuture<ShardRank> existingLookup = inFlightLookups.get(lookupKey);
         if (existingLookup != null) {
-            debug("[Lookup] Dedup: reusing in-flight lookup for '{}' bucket={}", canonicalName, bucketPath);
+            // debug("[Lookup] Dedup: reusing in-flight lookup for '{}' bucket={}", canonicalName, bucketPath);
             return existingLookup;
         }
         
@@ -374,7 +445,7 @@ public class PvPDataService
         CompletableFuture<ShardRank> previousLookup = inFlightLookups.putIfAbsent(lookupKey, future);
         if (previousLookup != null) {
             // Another thread beat us to it - use their future instead
-            debug("[Lookup] Dedup: race detected, reusing in-flight lookup for '{}' bucket={}", canonicalName, bucketPath);
+            // debug("[Lookup] Dedup: race detected, reusing in-flight lookup for '{}' bucket={}", canonicalName, bucketPath);
             return previousLookup;
         }
         
@@ -385,7 +456,7 @@ public class PvPDataService
             // Check Negative Cache first (1 hour block)
             Long missingUntil = missingPlayerUntilMs.get(canonicalName);
             if (missingUntil != null && System.currentTimeMillis() < missingUntil) {
-                debug("[Lookup] Negative cache hit for {} (blocked until {})", canonicalName, missingUntil);
+                // debug("[Lookup] Negative cache hit for {} (blocked until {})", canonicalName, missingUntil);
                 future.complete(null);
                 return future;
             }
@@ -396,12 +467,12 @@ public class PvPDataService
                 : canonicalName.toLowerCase();
             String url = SHARD_BASE_URL + "/" + bucketPath + "/" + shardKey + ".json";
 
-            debug("[Lookup] Player: {} -> Shard: {} -> URL: {}", canonicalName, shardKey, url);
+            // debug("[Lookup] Player: {} -> Shard: {} -> URL: {}", canonicalName, shardKey, url);
 
             // 4. Fetch/Get Cached Shard
             getShard(url).thenCompose(shardJson -> {
                 if (shardJson == null) {
-                    debug("[Lookup] Shard download failed/empty for {}", url);
+                    // debug("[Lookup] Shard download failed/empty for {}", url);
                     // THIS: Also mark player as missing for 1 hour when shard doesn't exist
                     missingPlayerUntilMs.put(canonicalName, System.currentTimeMillis() + MISSING_PLAYER_BACKOFF_MS);
                     future.complete(null);
@@ -411,7 +482,7 @@ public class PvPDataService
                 // 5. Look for Name in name_rank_info_map
                 JsonObject nameMap = shardJson.getAsJsonObject("name_rank_info_map");
                 if (nameMap == null || !nameMap.has(canonicalName)) {
-                    debug("[Lookup] Player '{}' NOT FOUND in shard {}", canonicalName, shardKey);
+                    // debug("[Lookup] Player '{}' NOT FOUND in shard {}", canonicalName, shardKey);
                     // Mark missing (1 Hour TTL)
                     missingPlayerUntilMs.put(canonicalName, System.currentTimeMillis() + MISSING_PLAYER_BACKOFF_MS);
                     future.complete(null);
@@ -423,7 +494,7 @@ public class PvPDataService
                 // Scenario B: Redirect
                 if (entry.has("redirect")) {
                     String accountSha = entry.get("redirect").getAsString();
-                    debug("[Lookup] Redirect found for '{}' -> SHA: {}", canonicalName, accountSha);
+                    // debug("[Lookup] Redirect found for '{}' -> SHA: {}", canonicalName, accountSha);
                     // FIX: Complete the outer future with the redirect result
                     resolveRedirect(accountSha, bucketPath).thenAccept(result -> {
                         future.complete(result);
@@ -435,19 +506,19 @@ public class PvPDataService
                 }
                 
                 // Scenario A: Direct Hit
-                debug("[Lookup] Direct hit for '{}'", canonicalName);
+                // debug("[Lookup] Direct hit for '{}'", canonicalName);
                 ShardRank rank = parseRankObject(entry);
                 future.complete(rank);
                 return CompletableFuture.completedFuture(null);
                 
             }).exceptionally(ex -> {
-                debug("Exception in getShardRankByName: {}", ex.getMessage());
+                // debug("Exception in getShardRankByName: {}", ex.getMessage());
                 future.complete(null);
                 return null;
             });
             
         } catch (Exception e) {
-            debug("Error in getShardRankByName: {}", e.getMessage());
+            // debug("Error in getShardRankByName: {}", e.getMessage());
             future.complete(null);
         }
 		return future;
@@ -465,7 +536,7 @@ public class PvPDataService
         CompletableFuture<ShardRank> future = new CompletableFuture<>();
         
         if (depth >= 10) {
-            debug("[Redirect] Max depth (10) reached for {}, aborting", accountSha);
+            // debug("[Redirect] Max depth (10) reached for {}, aborting", accountSha);
             future.complete(null);
             return future;
         }
@@ -479,7 +550,7 @@ public class PvPDataService
         String shardKey = accountSha.substring(0, 2);
         String url = SHARD_BASE_URL + "/" + bucket + "/" + shardKey + ".json";
         
-        debug("[Redirect] depth={} SHA={} -> Shard={}", depth, accountSha, shardKey);
+        // debug("[Redirect] depth={} SHA={} -> Shard={}", depth, accountSha, shardKey);
 
         // 2. Fetch/Get Cached Shard
         getShard(url).thenAccept(shardJson -> {
@@ -496,16 +567,16 @@ public class PvPDataService
                 // Check for chained redirect
                 if (entry.has("redirect")) {
                     String nextSha = entry.get("redirect").getAsString();
-                    debug("[Redirect] Chain redirect to {}", nextSha);
+                    // debug("[Redirect] Chain redirect to {}", nextSha);
                     resolveRedirectWithDepth(nextSha, bucket, depth + 1)
                         .thenAccept(future::complete);
                     return;
                 }
                 
-                debug("[Redirect] Found SHA entry at depth {}", depth);
+                // debug("[Redirect] Found SHA entry at depth {}", depth);
                 future.complete(parseRankObject(entry));
             } else {
-                debug("[Redirect] SHA entry NOT FOUND in shard");
+                // debug("[Redirect] SHA entry NOT FOUND in shard");
                 future.complete(null);
             }
         }).exceptionally(ex -> {
@@ -551,7 +622,7 @@ public class PvPDataService
         // 1. Check Memory Cache
         ShardEntry cached = shardCache.get(url);
         if (cached != null && (now - cached.getTimestamp() < SHARD_CACHE_EXPIRY_MS)) {
-            debug("[Cache] HIT for {}", url);
+            // debug("[Cache] HIT for {}", url);
             future.complete(cached.getPayload());
             return future;
         }
@@ -559,21 +630,21 @@ public class PvPDataService
         // 2. Check Negative Cache (Fail Until)
         Long failUntil = shardFailUntil.get(url);
         if (failUntil != null && now < failUntil) {
-            debug("[Cache] Negative/Fail HIT for {}", url);
+            // debug("[Cache] Negative/Fail HIT for {}", url);
             future.complete(null);
             return future;
         }
 
         // 3. Download
 		Request request = new Request.Builder().url(url).get().build();
-		debug("[Network] Downloading shard: {}", url);
+		// debug("[Network] Downloading shard: {}", url);
 
 		okHttpClient.newCall(request).enqueue(new Callback()
 		{
 			@Override
 			public void onFailure(Call call, IOException e)
 			{
-                debug("[Network] Fail: {}", e.getMessage());
+                // debug("[Network] Fail: {}", e.getMessage());
                 shardFailUntil.put(url, System.currentTimeMillis() + SHARD_FAIL_BACKOFF_MS);
 				future.completeExceptionally(e);
 			}
@@ -584,7 +655,7 @@ public class PvPDataService
 				try (Response res = response)
 				{
 					if (!res.isSuccessful()) {
-                        debug("[Network] HTTP Error: {}", res.code());
+                        // debug("[Network] HTTP Error: {}", res.code());
                         shardFailUntil.put(url, System.currentTimeMillis() + SHARD_FAIL_BACKOFF_MS);
 						future.complete(null);
 						return;
@@ -596,7 +667,20 @@ public class PvPDataService
                         return;
                     }
                     
-                    String bodyStr = body.string();
+                    String bodyStr;
+                    try {
+                        bodyStr = body.string();
+                    } catch (IOException cacheEx) {
+                        // Windows cache file locking issue - request succeeded but cache failed
+                        // Try to serve stale cache if available
+                        ShardEntry stale = shardCache.get(url);
+                        if (stale != null) {
+                            future.complete(stale.getPayload());
+                            return;
+                        }
+                        future.complete(null);
+                        return;
+                    }
                     JsonObject json = gson.fromJson(bodyStr, JsonObject.class);
                     
                     // Cache Success (60s)
@@ -605,7 +689,7 @@ public class PvPDataService
                     
                     future.complete(json);
 				} catch (Exception e) {
-                    debug("[Network] Parse Error: {}", e.getMessage());
+                    // debug("[Network] Parse Error: {}", e.getMessage());
                     future.complete(null);
                 }
 			}

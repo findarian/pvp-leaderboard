@@ -44,7 +44,7 @@ public class ClientIdentityService
         }
         catch (Exception e)
         {
-            log.warn("Failed to read global identity file", e);
+            // log.debug("Failed to read global identity file", e);
         }
 
         String finalId = globalId;
@@ -63,7 +63,7 @@ public class ClientIdentityService
             }
             catch (Exception e)
             {
-                log.warn("Failed to write global identity file", e);
+                // log.debug("Failed to write global identity file", e);
             }
         }
 

@@ -160,7 +160,7 @@ public class PvPLeaderboardPlugin extends Plugin
         // Init fight monitor
         // fightMonitor.init(dashboardPanel, rankOverlay); 
         
-		log.debug("PvP Leaderboard started!");
+		// log.debug("PvP Leaderboard started!");
 	}
 
 	@Override
@@ -172,7 +172,7 @@ public class PvPLeaderboardPlugin extends Plugin
 		overlayManager.remove(rankOverlay);
         overlayManager.remove(topNearbyOverlay);
         overlayManager.remove(bottomNearbyOverlay);
-		log.info("PvP Leaderboard stopped!");
+		// log.debug("PvP Leaderboard stopped!");
     }
 
     @Subscribe
@@ -239,7 +239,7 @@ public class PvPLeaderboardPlugin extends Plugin
 		else if (gameStateChanged.getGameState() == GameState.LOGIN_SCREEN)
         {
 			// Fully clear fight state on logout
-            log.debug("[Fight] state reset on LOGIN_SCREEN");
+            // log.debug("[Fight] state reset on LOGIN_SCREEN");
 			fightMonitor.resetFightState();
         }
 		else if (gameStateChanged.getGameState() == GameState.HOPPING || gameStateChanged.getGameState() == GameState.LOADING)
@@ -248,7 +248,7 @@ public class PvPLeaderboardPlugin extends Plugin
 				if (rankOverlay != null) {
 					rankOverlay.resetLookupStateOnWorldHop();
 				}
-				log.debug("[Fight] scene change: {} (fight preserved)", gameStateChanged.getGameState());
+				// log.debug("[Fight] scene change: {} (fight preserved)", gameStateChanged.getGameState());
 				// Nudge self rank refresh after a short delay so overlay repopulates post-hop
                 // Use tick-based scheduling: wait 3 ticks (approx 1.8s)
                 pendingSelfRankLookupTicks = 3;
@@ -294,7 +294,7 @@ public class PvPLeaderboardPlugin extends Plugin
                                 String self = client.getLocalPlayer().getName();
                                 if (self != null) dashboardPanel.loadMatchHistory(self);
                                     } 
-                            log.debug("[Plugin] executing delayed self-rank lookup");
+                            // log.debug("[Plugin] executing delayed self-rank lookup");
                                 }
                                 else
                                 {

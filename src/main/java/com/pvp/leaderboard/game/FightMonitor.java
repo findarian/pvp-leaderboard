@@ -138,7 +138,7 @@ public class FightMonitor
                     FightEntry fe = e.getValue();
                     if (fe == null) return true;
                     if (!fe.finalized && now - fe.lastActivityMs > 10_000L) {
-                        log.debug("[Fight] expire inactive vs={} lastActivity={}msAgo", e.getKey(), now - fe.lastActivityMs);
+                        // log.debug("[Fight] expire inactive vs={} lastActivity={}msAgo", e.getKey(), now - fe.lastActivityMs);
                         return true;
                     }
                     return false;
@@ -152,12 +152,12 @@ public class FightMonitor
             {
                 damageFromOpponent.clear();
                 damageToOpponent.clear();
-                log.debug("[Fight] window cleared on tick={} (idle>{} ticks)", tickNow, OUT_OF_COMBAT_TICKS);
+                // log.debug("[Fight] window cleared on tick={} (idle>{} ticks)", tickNow, OUT_OF_COMBAT_TICKS);
             }
         }
         catch (Exception e)
         {
-            log.error("Uncaught exception in FightMonitor.onGameTick", e);
+            // log.error("Uncaught exception in FightMonitor.onGameTick", e);
         }
     }
 
@@ -181,9 +181,8 @@ public class FightMonitor
             String hitPlayerName = hitPlayer.getName();
             String localPlayerName = localPlayer.getName();
 
-            // Debug: Log ALL hitsplats on players
-            log.debug("[Hitsplat] on='{}' amt={} type={} isMine={} localPlayer='{}'", 
-                hitPlayerName, amt, hitsplatType, isMine, localPlayerName);
+            // log.debug("[Hitsplat] on='{}' amt={} type={} isMine={} localPlayer='{}'", 
+            //     hitPlayerName, amt, hitsplatType, isMine, localPlayerName);
 
             // Only process relevant damage hitsplat types (matching pvp-performance-tracker approach)
             // For non-zero hits, only process relevant hitsplat types
@@ -194,7 +193,7 @@ public class FightMonitor
                     || hitsplatType == HitsplatID.POISON
                     || hitsplatType == HitsplatID.VENOM))
                 {
-                    log.debug("[Hitsplat] SKIPPED - irrelevant type={}", hitsplatType);
+                    // log.debug("[Hitsplat] SKIPPED - irrelevant type={}", hitsplatType);
                     return;
                 }
             }
@@ -215,7 +214,7 @@ public class FightMonitor
             {
                 // Hitsplat on us = opponent dealt damage to us
                 opponentName = resolveInboundAttacker(localPlayer);
-                log.debug("[Hitsplat] ON US - resolved attacker='{}' amt={}", opponentName, amt);
+                // log.debug("[Hitsplat] ON US - resolved attacker='{}' amt={}", opponentName, amt);
                 if (opponentName != null)
                 {
                     lastExactOpponentName = opponentName;
@@ -234,8 +233,8 @@ public class FightMonitor
                 Player theirTarget = (Player) hitPlayer.getInteracting();
                 boolean isTargetingUs = theirTarget != null && theirTarget == localPlayer;
 
-                log.debug("[Hitsplat] ON OTHER '{}': isActiveOpp={} isTarget={} targetsUs={} activeFights={}", 
-                    hitPlayerName, isActiveOpponent, isCurrentTarget, isTargetingUs, activeFights.keySet());
+                // log.debug("[Hitsplat] ON OTHER '{}': isActiveOpp={} isTarget={} targetsUs={} activeFights={}", 
+                //     hitPlayerName, isActiveOpponent, isCurrentTarget, isTargetingUs, activeFights.keySet());
 
                 // If the hit player is our active opponent or current target, we dealt that damage
                 if (isActiveOpponent || isCurrentTarget || isTargetingUs)
@@ -245,7 +244,7 @@ public class FightMonitor
                 }
                 else
                 {
-                    log.debug("[Hitsplat] NOT COUNTED - '{}' not recognized as opponent", hitPlayerName);
+                    // log.debug("[Hitsplat] NOT COUNTED - '{}' not recognized as opponent", hitPlayerName);
                 }
             }
 
@@ -261,7 +260,7 @@ public class FightMonitor
                     activeFights.clear();
                     damageFromOpponent.clear();
                     damageToOpponent.clear();
-                    log.debug("[Fight] combat window reset after {} ticks idle", tickNow - lastCombatActivityTick);
+                    // log.debug("[Fight] combat window reset after {} ticks idle", tickNow - lastCombatActivityTick);
                 }
                 lastCombatActivityTick = tickNow;
 
@@ -282,21 +281,21 @@ public class FightMonitor
                 {
                     // Inbound damage
                     damageFromOpponent.merge(opponentName, (long) amt, Long::sum);
-                    log.debug("[Hitsplat] INBOUND DMG: {} dealt {} to us, total from them={}", 
-                        opponentName, amt, damageFromOpponent.get(opponentName));
+                    // log.debug("[Hitsplat] INBOUND DMG: {} dealt {} to us, total from them={}", 
+                    //     opponentName, amt, damageFromOpponent.get(opponentName));
                 }
                 else
                 {
                     // Outbound damage
                     damageToOpponent.merge(opponentName, (long) amt, Long::sum);
-                    log.debug("[Hitsplat] OUTBOUND DMG: we dealt {} to {}, total to them={}", 
-                        amt, opponentName, damageToOpponent.get(opponentName));
+                    // log.debug("[Hitsplat] OUTBOUND DMG: we dealt {} to {}, total to them={}", 
+                    //     amt, opponentName, damageToOpponent.get(opponentName));
                 }
             }
         }
         catch (Exception e)
         {
-            log.debug("Uncaught exception in FightMonitor.onHitsplatApplied", e);
+            // log.debug("Uncaught exception in FightMonitor.onHitsplatApplied", e);
         }
     }
 
@@ -340,7 +339,7 @@ public class FightMonitor
         }
         catch (Exception e)
         {
-            log.debug("Uncaught exception in FightMonitor.onActorDeath", e);
+            // log.debug("Uncaught exception in FightMonitor.onActorDeath", e);
         }
     }
 
@@ -351,7 +350,7 @@ public class FightMonitor
         wasInMulti = client.getVarbitValue(Varbits.MULTICOMBAT_AREA) == 1;
         fightStartSpellbook = client.getVarbitValue(Varbits.SPELLBOOK);
         fightStartTime = System.currentTimeMillis() / 1000;
-        log.debug("[Fight] startFight opp='{}' world={} startSpell={} multi={}", opponentName, client.getWorld(), fightStartSpellbook, wasInMulti);
+        // log.debug("[Fight] startFight opp='{}' world={} startSpell={} multi={}", opponentName, client.getWorld(), fightStartSpellbook, wasInMulti);
     }
 
     private void endFightFor(String opponentName, String result)
@@ -379,14 +378,18 @@ public class FightMonitor
         final long dmgOut = damageToOpponent.getOrDefault(resolvedOpponent, 0L);
 
         // Debug: Log full damage state
-        log.debug("[Fight] Finalizing: res={} opp='{}' world={} start={} end={} multi={}", result, resolvedOpponent, world, startTs, now, wasMulti);
-        log.debug("[Fight] damageToOpponent map: {}", damageToOpponent);
-        log.debug("[Fight] damageFromOpponent map: {}", damageFromOpponent);
-        log.debug("[Fight] Using dmgOut={} for opponent='{}'", dmgOut, resolvedOpponent);
+        // log.debug("[Fight] Finalizing: res={} opp='{}' world={} start={} end={} multi={}", result, resolvedOpponent, world, startTs, now, wasMulti);
+        // log.debug("[Fight] damageToOpponent map: {}", damageToOpponent);
+        // log.debug("[Fight] damageFromOpponent map: {}", damageFromOpponent);
+        // log.debug("[Fight] Using dmgOut={} for opponent='{}'", dmgOut, resolvedOpponent);
 
         // Async Submission
         java.util.concurrent.CompletableFuture.runAsync(() -> {
-            submitMatchResult(result, now, selfName, resolvedOpponent, world, startTs, startSb, currentSpellbook, wasMulti, idTokenSafe, dmgOut);
+            try {
+                submitMatchResult(result, now, selfName, resolvedOpponent, world, startTs, startSb, currentSpellbook, wasMulti, idTokenSafe, dmgOut);
+            } catch (Exception e) {
+                log.debug("[MatchSubmit] EXCEPTION in async submission: {}", e.getMessage(), e);
+            }
         }, scheduler);
 
         // Update UI
@@ -425,44 +428,70 @@ public class FightMonitor
                 .clientUniqueId(clientIdentityService.getClientUniqueId())
                 .build();
 
+        log.debug("[MatchSubmit] Submitting: player={} opponent={} result={} world={} startTs={} endTs={} dmgOut={} multi={} hasToken={}",
+                playerId, opponentId, result, world, fightStartTs, fightEndTime, damageToOpponentLocal, wasInMultiLocal, (idTokenLocal != null && !idTokenLocal.isEmpty()));
+
         matchResultService.submitMatchResult(match).thenAccept(success -> {
-             if (success) log.debug("Match result submitted");
+            if (success) {
+                log.debug("[MatchSubmit] SUCCESS: match submitted for player={} vs opponent={} result={}", playerId, opponentId, result);
+            } else {
+                log.debug("[MatchSubmit] FAILED: match submission failed for player={} vs opponent={} result={}", playerId, opponentId, result);
+            }
         });
     }
 
     private void scheduleApiRefreshes(String opponentName) {
          // Always fetch fresh ranks after a fight so players see rank changes immediately
          // API results persist until shard is refreshed (1 hour)
-         log.debug("[Fight] Scheduling API refresh in 15s for self and opponent={}", opponentName);
+         log.debug("[PostFight] Scheduling API refresh in 15s for self and opponent={}", opponentName);
          scheduler.schedule(() -> {
              try {
                 String bucket = bucketKey(config.rankBucket());
                 String selfName = getLocalPlayerName();
-                log.debug("[Fight] Executing API refresh: self={} opponent={} bucket={}", selfName, opponentName, bucket);
+                log.debug("[PostFight] Executing API refresh: self={} opponent={} bucket={}", selfName, opponentName, bucket);
                 
-                // Refresh self rank using profile API (more reliable)
+                // Refresh self rank using profile API (more reliable) - with retry
                 if (selfName != null) {
-                    pvpDataService.getTierFromProfile(selfName, bucket).thenAccept(tier -> {
-                        log.debug("[Fight] Profile API returned tier={} for self={}", tier, selfName);
-                        if (tier != null) {
-                            eventBus.post(new PlayerRankEvent(selfName, bucket, tier));
-                        }
-                    });
+                    fetchTierWithRetry(selfName, bucket, 3);
+                } else {
+                    log.debug("[PostFight] selfName is null, skipping self refresh");
                 }
                 
-                // Refresh opponent rank using profile API
+                // Refresh opponent rank using profile API - with retry
                 if (opponentName != null) {
-                    pvpDataService.getTierFromProfile(opponentName, bucket).thenAccept(tier -> {
-                        log.debug("[Fight] Profile API returned tier={} for opponent={}", tier, opponentName);
-                        if (tier != null) {
-                            eventBus.post(new PlayerRankEvent(opponentName, bucket, tier));
-                        }
-                    });
+                    fetchTierWithRetry(opponentName, bucket, 3);
+                } else {
+                    log.debug("[PostFight] opponentName is null, skipping opponent refresh");
                 }
              } catch(Exception e){
-                log.debug("[Fight] API refresh exception", e);
+                log.debug("[PostFight] API refresh exception: {}", e.getMessage());
              }
          }, 15L, java.util.concurrent.TimeUnit.SECONDS);
+    }
+    
+    private void fetchTierWithRetry(String playerName, String bucket, int retriesLeft) {
+        log.debug("[PostFight] fetchTierWithRetry called: player={} bucket={} retriesLeft={}", playerName, bucket, retriesLeft);
+        pvpDataService.getTierFromProfile(playerName, bucket).thenAccept(tier -> {
+            if (tier != null) {
+                log.debug("[PostFight] SUCCESS: tier={} for player={}, posting PlayerRankEvent", tier, playerName);
+                eventBus.post(new PlayerRankEvent(playerName, bucket, tier));
+            } else if (retriesLeft > 0) {
+                log.debug("[PostFight] tier is null for player={}, retrying ({} left)", playerName, retriesLeft - 1);
+                scheduler.schedule(() -> fetchTierWithRetry(playerName, bucket, retriesLeft - 1), 
+                    2L, java.util.concurrent.TimeUnit.SECONDS);
+            } else {
+                log.debug("[PostFight] FAILED: tier is null for player={}, no retries left", playerName);
+            }
+        }).exceptionally(ex -> {
+            if (retriesLeft > 0) {
+                log.debug("[PostFight] Exception for player={}: {}, retrying ({} left)", playerName, ex.getMessage(), retriesLeft - 1);
+                scheduler.schedule(() -> fetchTierWithRetry(playerName, bucket, retriesLeft - 1), 
+                    2L, java.util.concurrent.TimeUnit.SECONDS);
+            } else {
+                log.debug("[PostFight] FAILED with exception for player={}: {}, no retries left", playerName, ex.getMessage());
+            }
+            return null;
+        });
     }
 
     private void touchFight(String opponentName)

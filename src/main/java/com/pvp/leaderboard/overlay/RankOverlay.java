@@ -65,17 +65,28 @@ public class RankOverlay extends Overlay
     @Subscribe
     public void onPlayerRankEvent(PlayerRankEvent event)
     {
-        if (event == null || event.getPlayerName() == null || event.getTier() == null) return;
-        debug("onPlayerRankEvent received: player={} tier={} bucket={}", event.getPlayerName(), event.getTier(), event.getBucket());
+        if (event == null) {
+            log.debug("[Overlay] onPlayerRankEvent: event is null");
+            return;
+        }
+        if (event.getPlayerName() == null) {
+            log.debug("[Overlay] onPlayerRankEvent: playerName is null");
+            return;
+        }
+        if (event.getTier() == null) {
+            log.debug("[Overlay] onPlayerRankEvent: tier is null for player={}", event.getPlayerName());
+            return;
+        }
+        log.debug("[Overlay] onPlayerRankEvent received: player={} tier={} bucket={}", event.getPlayerName(), event.getTier(), event.getBucket());
         setRankFromApi(event.getPlayerName(), event.getTier());
     }
 
     private void debug(String format, Object... args)
     {
-        if (config.debugMode())
-        {
-            log.debug("[RankOverlay] " + format, args);
-        }
+        // if (config.debugMode())
+        // {
+        //     log.debug("[RankOverlay] " + format, args);
+        // }
     }
 
     public void scheduleSelfRankRefresh(long delayMs)
@@ -84,7 +95,7 @@ public class RankOverlay extends Overlay
         nextSelfRankAllowedAtMs = now + Math.max(0L, delayMs);
         selfRankAttempted = false;
         selfRefreshRequestedAtMs = nextSelfRankAllowedAtMs;
-        debug("scheduleSelfRankRefresh delayMs={} nextAllowedAtMs={}", delayMs, nextSelfRankAllowedAtMs);
+        // debug("scheduleSelfRankRefresh delayMs={} nextAllowedAtMs={}", delayMs, nextSelfRankAllowedAtMs);
     }
 
     public void resetLookupStateOnWorldHop()
@@ -114,7 +125,7 @@ public class RankOverlay extends Overlay
                 {
                     String key = NameUtils.canonicalKey(playerName);
                     String bucket = bucketKey(config.rankBucket());
-                    debug("forced profile API fetch for player={} bucket={}", playerName, bucket);
+                    // debug("forced profile API fetch for player={} bucket={}", playerName, bucket);
                     
                     // Use profile API to bypass shard negative cache and get reliable data
                     pvpDataService.getTierFromProfile(playerName, bucket).thenAccept(tier -> {
@@ -124,11 +135,11 @@ public class RankOverlay extends Overlay
                             displayedRanksTimestamp.put(key, System.currentTimeMillis());
                             negativeCache.remove(key);
                             pvpDataService.clearShardNegativeCache(playerName);
-                            debug("Forced profile API returned rank for {}: {}", playerName, tier);
+                            // debug("Forced profile API returned rank for {}: {}", playerName, tier);
                         }
                         else
                         {
-                            debug("Forced profile API returned no rank for {}", playerName);
+                            // debug("Forced profile API returned no rank for {}", playerName);
                         }
                     });
                 }
@@ -139,20 +150,29 @@ public class RankOverlay extends Overlay
 
     public void setRankFromApi(String playerName, String rank)
     {
-        if (playerName == null || playerName.trim().isEmpty()) return;
-        if (rank == null || rank.trim().isEmpty()) return;
+        if (playerName == null || playerName.trim().isEmpty()) {
+            log.debug("[Overlay] setRankFromApi: playerName is null/empty");
+            return;
+        }
+        if (rank == null || rank.trim().isEmpty()) {
+            log.debug("[Overlay] setRankFromApi: rank is null/empty for player={}", playerName);
+            return;
+        }
         try
         {
             String key = NameUtils.canonicalKey(playerName);
-            debug("setRankFromApi player={} rank={}", playerName, rank);
+            log.debug("[Overlay] setRankFromApi SUCCESS: player={} key={} rank={}", playerName, key, rank);
             displayedRanks.put(key, rank);
             displayedRanksTimestamp.put(key, System.currentTimeMillis());
             // Clear overlay negative cache so the rank shows immediately
             negativeCache.remove(key);
             // Also clear shard negative cache so future lookups aren't blocked
             pvpDataService.clearShardNegativeCache(playerName);
+            log.debug("[Overlay] displayedRanks now contains {} entries, key={} has rank={}", displayedRanks.size(), key, displayedRanks.get(key));
         }
-        catch (Exception ignore) {}
+        catch (Exception e) {
+            log.debug("[Overlay] setRankFromApi exception: {}", e.getMessage());
+        }
     }
 
     public void holdApiOverride(String playerName, long millis)
@@ -233,7 +253,7 @@ public class RankOverlay extends Overlay
             negativeCache.clear();
             lastBucketKey = currentBucket;
             lastDisplayMode = currentMode;
-            debug("config changed to {}/{} -> clear transient state", currentBucket, currentMode);
+            // debug("config changed to {}/{} -> clear transient state", currentBucket, currentMode);
             selfRankAttempted = false;
             nextSelfRankAllowedAtMs = 0L;
         }
@@ -250,7 +270,7 @@ public class RankOverlay extends Overlay
             else if (!selfRankAttempted && now >= nextSelfRankAllowedAtMs)
             {
                 selfRankAttempted = true;
-                debug("fetch self first name={} bucket={}", selfName, bucketKey(config.rankBucket()));
+                // debug("fetch self first name={} bucket={}", selfName, bucketKey(config.rankBucket()));
                 selfRefreshRequestedAtMs = 0L;
                 fetchRankForUser(selfName).thenAccept(rank -> {
                     if (rank != null)
@@ -312,7 +332,7 @@ public class RankOverlay extends Overlay
             // Queue lookup if: no cached rank, OR cached rank expired and needs refresh
             if ((cachedRank == null || needsRefresh) && !isNegative && !isRecentlyRequested(nameKey)) {
                  markRequested(nameKey);
-                 debug("Queueing auto-fetch for nearby player: {}", playerName);
+                 // debug("Queueing auto-fetch for nearby player: {}", playerName);
                  queueLookup(playerName);
             }
 
@@ -716,7 +736,7 @@ public class RankOverlay extends Overlay
                 }
                 catch (Exception e)
                 {
-                    log.warn("Error decoding image from S3: {}", url, e);
+                    // log.debug("Error decoding image from S3: {}", url, e);
                 }
                 finally
                 {
