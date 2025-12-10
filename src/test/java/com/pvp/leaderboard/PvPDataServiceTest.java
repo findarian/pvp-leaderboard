@@ -200,6 +200,12 @@ public class PvPDataServiceTest {
     
     private class MockConfig implements PvPLeaderboardConfig {
         @Override
-        public int lookupThrottleLevel() { return 0; }
+        public boolean enablePvpLookupMenu() { return false; }
+        
+        @Override
+        public RankBucket rankBucket() { return RankBucket.OVERALL; }
+        
+        @Override
+        public boolean debugMode() { return false; }
     }
 }

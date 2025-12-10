@@ -7,7 +7,6 @@ import com.pvp.leaderboard.service.CognitoAuthService;
 import com.pvp.leaderboard.service.MatchResult;
 import com.pvp.leaderboard.service.MatchResultService;
 import com.pvp.leaderboard.service.PvPDataService;
-import net.runelite.client.eventbus.EventBus;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -35,11 +34,9 @@ public class FightMonitor
     private final PvPDataService pvpDataService;
     private final CognitoAuthService cognitoAuthService;
     private final ClientIdentityService clientIdentityService;
-    private final EventBus eventBus;
 
     // Dependencies injected via init
     // private DashboardPanel dashboardPanel; 
-    // private RankOverlay rankOverlay; 
 
     // --- Fight State ---
     private boolean inFight = false;
@@ -76,8 +73,7 @@ public class FightMonitor
         MatchResultService matchResultService,
         PvPDataService pvpDataService,
         CognitoAuthService cognitoAuthService,
-        ClientIdentityService clientIdentityService,
-        EventBus eventBus)
+        ClientIdentityService clientIdentityService)
     {
         this.client = client;
         this.config = config;
@@ -86,7 +82,6 @@ public class FightMonitor
         this.pvpDataService = pvpDataService;
         this.cognitoAuthService = cognitoAuthService;
         this.clientIdentityService = clientIdentityService;
-        this.eventBus = eventBus;
     }
 
     public void resetFightState()
@@ -473,8 +468,7 @@ public class FightMonitor
         log.debug("[PostFight] fetchTierWithRetry called: player={} bucket={} retriesLeft={}", playerName, bucket, retriesLeft);
         pvpDataService.getTierFromProfile(playerName, bucket).thenAccept(tier -> {
             if (tier != null) {
-                log.debug("[PostFight] SUCCESS: tier={} for player={}, posting PlayerRankEvent", tier, playerName);
-                eventBus.post(new PlayerRankEvent(playerName, bucket, tier));
+                log.debug("[PostFight] SUCCESS: tier={} for player={}", tier, playerName);
             } else if (retriesLeft > 0) {
                 log.debug("[PostFight] tier is null for player={}, retrying ({} left)", playerName, retriesLeft - 1);
                 scheduler.schedule(() -> fetchTierWithRetry(playerName, bucket, retriesLeft - 1), 
@@ -514,9 +508,6 @@ public class FightMonitor
             pvpDataService.getShardRankByName(opponentName, bucket).thenAccept(shardRank -> {
                 if (shardRank != null && shardRank.rank > 0) {
                     shardPresence.put(opponentName, Boolean.TRUE);
-                    if (shardRank.tier != null) {
-                        eventBus.post(new PlayerRankEvent(opponentName, bucket, shardRank.tier));
-                    }
                 } else {
                     shardPresence.putIfAbsent(opponentName, Boolean.FALSE);
                 }
