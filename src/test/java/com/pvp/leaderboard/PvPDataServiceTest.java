@@ -201,11 +201,5 @@ public class PvPDataServiceTest {
     private class MockConfig implements PvPLeaderboardConfig {
         @Override
         public boolean enablePvpLookupMenu() { return false; }
-        
-        @Override
-        public RankBucket rankBucket() { return RankBucket.OVERALL; }
-        
-        @Override
-        public boolean debugMode() { return false; }
     }
 }

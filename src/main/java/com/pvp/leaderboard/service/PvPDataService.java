@@ -92,13 +92,6 @@ public class PvPDataService
 		this.config = config;
 	}
 
-    private void debug(String format, Object... args)
-    {
-        // if (config.debugMode())
-        // {
-        //     log.debug("[PvPDataService] " + format, args);
-        // }
-    }
 
 	public CompletableFuture<JsonObject> getPlayerMatches(String playerName, String nextToken, int limit)
 	{

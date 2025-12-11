@@ -4,7 +4,6 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import com.pvp.leaderboard.PvPLeaderboardPlugin;
 import com.pvp.leaderboard.config.PvPLeaderboardConfig;
-import com.pvp.leaderboard.config.PvPLeaderboardConfig.RankBucket;
 import com.pvp.leaderboard.service.CognitoAuthService;
 import com.pvp.leaderboard.service.PvPDataService;
 import com.pvp.leaderboard.service.RankInfo;
@@ -89,7 +88,7 @@ public class DashboardPanel extends PluginPanel
         // 6. Additional Stats (Hidden by default)
         extraStatsPanel = new AdditionalStatsPanel();
         extraStatsPanel.setVisible(false);
-        try { setStatsBucketFromConfig(config.rankBucket()); } catch (Exception ignore) {}
+        try { if (extraStatsPanel != null) extraStatsPanel.setBucket("overall"); } catch (Exception ignore) {}
         mainPanel.add(extraStatsPanel);
         mainPanel.add(Box.createVerticalStrut(24));
         
@@ -382,7 +381,7 @@ public class DashboardPanel extends PluginPanel
                 double pct = (est != null ? est.progress : 0.0);
                 
                 // Only fetch rank number for currently selected rank bucket
-                String currentBucket = bucketKey(config != null ? config.rankBucket() : null);
+                String currentBucket = "overall";
                 if (bucket.equals(currentBucket))
                 {
                 SwingWorker<Integer, Void> worker = new SwingWorker<Integer, Void>()
@@ -417,24 +416,7 @@ public class DashboardPanel extends PluginPanel
         } catch (Exception ignore) { return -1; }
     }
 
-    public void setStatsBucketFromConfig(PvPLeaderboardConfig.RankBucket b) {
-        if (extraStatsPanel != null) {
-            extraStatsPanel.setBucket(bucketKey(b));
-            }
-    }
-
     private static String normalizePlayerId(String name) {
         return name != null ? name.trim().replaceAll("\\s+", " ") : null;
-    }
-    
-    private static String bucketKey(RankBucket bucket) {
-        if (bucket == null) return "overall";
-        switch (bucket) {
-            case NH: return "nh";
-            case VENG: return "veng";
-            case MULTI: return "multi";
-            case DMM: return "dmm";
-            default: return "overall";
-        }
     }
 }

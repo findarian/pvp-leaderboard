@@ -1,7 +1,6 @@
 package com.pvp.leaderboard.game;
 
 import com.pvp.leaderboard.config.PvPLeaderboardConfig;
-import com.pvp.leaderboard.config.PvPLeaderboardConfig.RankBucket;
 import com.pvp.leaderboard.service.ClientIdentityService;
 import com.pvp.leaderboard.service.CognitoAuthService;
 import com.pvp.leaderboard.service.MatchResult;
@@ -441,7 +440,7 @@ public class FightMonitor
          log.debug("[PostFight] Scheduling API refresh in 15s for self and opponent={}", opponentName);
          scheduler.schedule(() -> {
              try {
-                String bucket = bucketKey(config.rankBucket());
+                String bucket = "overall";
                 String selfName = getLocalPlayerName();
                 log.debug("[PostFight] Executing API refresh: self={} opponent={} bucket={}", selfName, opponentName, bucket);
                 
@@ -502,7 +501,7 @@ public class FightMonitor
 
         if (!shardPresence.containsKey(opponentName))
         {
-            String bucket = bucketKey(config.rankBucket());
+            String bucket = "overall";
             
             // Single call - getShardRankByName handles everything internally
             pvpDataService.getShardRankByName(opponentName, bucket).thenAccept(shardRank -> {
@@ -595,20 +594,6 @@ public class FightMonitor
         }
     }
     
-    private static String bucketKey(RankBucket bucket)
-    {
-        if (bucket == null) return "overall";
-        switch (bucket)
-        {
-            case NH: return "nh";
-            case VENG: return "veng";
-            case MULTI: return "multi";
-            case DMM: return "dmm";
-            case OVERALL:
-            default: return "overall";
-        }
-    }
-
     private static class FightEntry {
         final long startTs;
         final int startSpellbook;
