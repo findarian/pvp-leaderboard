@@ -12,10 +12,6 @@ import java.util.Map;
 public class PerformanceStatsPanel extends JPanel
 {
     private JLabel winPercentLabel;
-    private JLabel tiesLabel;
-    private JLabel kdLabel;
-    private JLabel killsLabel;
-    private JLabel deathsLabel;
     
     private DefaultTableModel rankBreakdownModel;
     private JTable rankBreakdownTable;
@@ -32,28 +28,12 @@ public class PerformanceStatsPanel extends JPanel
     {
         JPanel summaryRow = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 0));
         winPercentLabel = new JLabel("- % Winrate");
-        kdLabel = new JLabel("KD:");
-        killsLabel = new JLabel("K:");
-        deathsLabel = new JLabel("D:");
-        tiesLabel = new JLabel("Ties:");
         
         Font baseFont = winPercentLabel.getFont();
         Font small = baseFont.deriveFont(Font.PLAIN, Math.max(10f, baseFont.getSize2D() - 1f));
         winPercentLabel.setFont(small);
-        kdLabel.setFont(small);
-        killsLabel.setFont(small);
-        deathsLabel.setFont(small);
-        tiesLabel.setFont(small);
         
         summaryRow.add(winPercentLabel);
-        summaryRow.add(Box.createHorizontalStrut(6));
-        summaryRow.add(kdLabel);
-        summaryRow.add(Box.createHorizontalStrut(6));
-        summaryRow.add(killsLabel);
-        summaryRow.add(new JLabel(" | "));
-        summaryRow.add(deathsLabel);
-        summaryRow.add(Box.createHorizontalStrut(6));
-        summaryRow.add(tiesLabel);
         add(summaryRow);
 
         // Rank breakdown table
@@ -66,6 +46,16 @@ public class PerformanceStatsPanel extends JPanel
         rankBreakdownModel = new DefaultTableModel(columns, 0);
         rankBreakdownTable = new JTable(rankBreakdownModel);
         rankBreakdownTable.setEnabled(false);
+        
+        // Set all columns to the same width
+        int columnWidth = 60;
+        for (int i = 0; i < rankBreakdownTable.getColumnCount(); i++) {
+            rankBreakdownTable.getColumnModel().getColumn(i).setPreferredWidth(columnWidth);
+            rankBreakdownTable.getColumnModel().getColumn(i).setMinWidth(columnWidth);
+            rankBreakdownTable.getColumnModel().getColumn(i).setMaxWidth(columnWidth);
+        }
+        rankBreakdownTable.setAutoResizeMode(JTable.AUTO_RESIZE_OFF);
+        
         JScrollPane sp = new JScrollPane(rankBreakdownTable);
         sp.setPreferredSize(new Dimension(0, 150)); // Adjusted height
         
@@ -83,10 +73,6 @@ public class PerformanceStatsPanel extends JPanel
             double winRate = total > 0 ? (double) wins / total * 100 : 0;
             
             winPercentLabel.setText(String.format("%.1f%% Winrate", winRate));
-            tiesLabel.setText("Ties: " + ties);
-            kdLabel.setText("KD: -");
-            killsLabel.setText("K: -");
-            deathsLabel.setText("D: -");
         });
     }
 

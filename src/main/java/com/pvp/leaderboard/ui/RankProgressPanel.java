@@ -19,23 +19,13 @@ public class RankProgressPanel extends JPanel
         progressLabels = new JLabel[5];
 
         setLayout(new BoxLayout(this, BoxLayout.Y_AXIS));
-        setBorder(BorderFactory.createTitledBorder("Rank Progress"));
+        setBorder(BorderFactory.createTitledBorder("Season 0"));
 
         initUI();
     }
 
     private void initUI()
     {
-        JLabel seasonLabel = new JLabel("Season 0");
-        seasonLabel.setAlignmentX(Component.LEFT_ALIGNMENT);
-        Font baseFont = seasonLabel.getFont();
-        if (baseFont != null)
-        {
-            seasonLabel.setFont(baseFont.deriveFont(Font.BOLD, Math.max(12f, baseFont.getSize2D())));
-        }
-        add(seasonLabel);
-        add(Box.createVerticalStrut(6));
-        
         for (int i = 0; i < buckets.length; i++)
         {
             JPanel bucketPanel = new JPanel(new BorderLayout());
