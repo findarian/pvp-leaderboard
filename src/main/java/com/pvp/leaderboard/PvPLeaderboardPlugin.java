@@ -9,7 +9,6 @@ import com.pvp.leaderboard.service.CognitoAuthService;
 import com.pvp.leaderboard.service.PvPDataService;
 import com.pvp.leaderboard.ui.DashboardPanel;
 import javax.inject.Inject;
-import javax.swing.SwingUtilities;
 import lombok.extern.slf4j.Slf4j;
 import net.runelite.api.Client;
 import net.runelite.api.GameState;
@@ -27,6 +26,7 @@ import net.runelite.client.plugins.PluginDescriptor;
 import net.runelite.client.ui.ClientToolbar;
 import net.runelite.client.ui.NavigationButton;
 import java.awt.image.BufferedImage;
+import net.runelite.client.util.ImageUtil;
 
 @Slf4j
 @PluginDescriptor(
@@ -34,6 +34,8 @@ import java.awt.image.BufferedImage;
 )
 public class PvPLeaderboardPlugin extends Plugin
 {
+	private static final BufferedImage PANEL_ICON = ImageUtil.loadImageResource(PvPLeaderboardPlugin.class, "panel-icon.png");
+
 	@Inject
 	private Client client;
 
@@ -82,37 +84,13 @@ public class PvPLeaderboardPlugin extends Plugin
         
         // Initialize identity
         clientIdentityService.loadOrGenerateId();
-		
-        // Use in-game white PvP skull for the sidebar icon (PLAYER_KILLER_SKULL = 439)
-        final BufferedImage icon = net.runelite.client.util.ImageUtil.loadImageResource(getClass(), "/util/clue_arrow.png");
-        try {
-            spriteManager.getSpriteAsync(439, 0, img -> {
-                if (img != null && navButton != null) {
-                    SwingUtilities.invokeLater(() -> {
-                        // Rebuild nav button with new icon because NavigationButton is immutable
-                        NavigationButton updated = NavigationButton.builder()
-                            .tooltip("PvP Leaderboard")
-                            .icon(img)
-                            .priority(5)
-                            .panel(dashboardPanel)
-                            .build();
-                        clientToolbar.removeNavigation(navButton);
-                        navButton = updated;
-                        clientToolbar.addNavigation(navButton);
-                        
-                        // Update menu handler with new button
-                        if (menuHandler != null) menuHandler.updateNavButton(navButton);
-                    });
-                }
-            });
-        } catch (Exception ignore) {}
+
 		navButton = NavigationButton.builder()
 			.tooltip("PvP Leaderboard")
-			.icon(icon)
+			.icon(PANEL_ICON)
 			.priority(5)
 			.panel(dashboardPanel)
 			.build();
-
 		clientToolbar.addNavigation(navButton);
         
         // Init menu handler
