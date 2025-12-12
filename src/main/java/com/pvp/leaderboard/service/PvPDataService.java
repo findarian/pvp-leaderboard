@@ -81,7 +81,7 @@ public class PvPDataService
     private final ConcurrentHashMap<String, UserStatsCache> userStatsCache = new ConcurrentHashMap<>();
 
     // Matches Caching
-    private static final long MATCHES_CACHE_TTL_MS = 6L * 60L * 60L * 1000L; // 6 hours
+    private static final long MATCHES_CACHE_TTL_MS = 1L * 60L * 1000L; // 1 minute
     private final ConcurrentHashMap<String, MatchesCacheEntry> matchesCache = new ConcurrentHashMap<>();
 
 	@Inject
