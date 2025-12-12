@@ -124,14 +124,14 @@ public class DashboardPanel extends PluginPanel
         discordBtn.setPreferredSize(new Dimension(90, 25));
         discordBtn.setToolTipText("Join our Discord");
         discordBtn.addActionListener(e -> {
-            try { java.awt.Desktop.getDesktop().browse(java.net.URI.create("https://discord.gg/3Ct5CQmCPr")); } catch (Exception ignore) {}
+            try { LinkBrowser.browse("https://discord.gg/3Ct5CQmCPr"); } catch (Exception ignore) {}
         });
         row.add(discordBtn);
         JButton websiteBtn = new JButton("Website");
         websiteBtn.setPreferredSize(new Dimension(90, 25));
         websiteBtn.setToolTipText("Open the website");
         websiteBtn.addActionListener(e -> {
-            try { java.awt.Desktop.getDesktop().browse(java.net.URI.create("https://devsecopsautomated.com/index.html")); } catch (Exception ignore) {}
+            try { LinkBrowser.browse("https://devsecopsautomated.com/index.html"); } catch (Exception ignore) {}
         });
         row.add(websiteBtn);
         box.add(row);
