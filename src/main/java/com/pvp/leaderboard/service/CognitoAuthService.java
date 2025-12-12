@@ -23,6 +23,7 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import javax.inject.Inject;
+import net.runelite.client.util.LinkBrowser;
 
 public class CognitoAuthService {
     private static final String COGNITO_DOMAIN = "osrs-mmr-a8959e04.auth.us-east-1.amazoncognito.com";
@@ -80,7 +81,7 @@ public class CognitoAuthService {
                     "https://%s/login?client_id=%s&response_type=code&scope=openid+email+profile&redirect_uri=%s&code_challenge_method=S256&code_challenge=%s&state=%s",
                     COGNITO_DOMAIN, CLIENT_ID, URLEncoder.encode(REDIRECT_URI, "UTF-8"), challenge, URLEncoder.encode(state, "UTF-8")
                 );
-                Desktop.getDesktop().browse(URI.create(loginUrl));
+                LinkBrowser.browse(loginUrl);
 
                 // Wait for code up to 10s; on timeout, fail silently and allow re-login
                 String code = null;

@@ -6,6 +6,7 @@ import java.awt.*;
 import java.net.URI;
 import java.net.URLEncoder;
 import java.util.function.Consumer;
+import net.runelite.client.util.LinkBrowser;
 
 public class LoginPanel extends JPanel
 {
@@ -91,13 +92,13 @@ public class LoginPanel extends JPanel
         String username = websiteSearchField.getText();
         if (username == null || username.trim().isEmpty())
         {
-            try { Desktop.getDesktop().browse(URI.create("https://devsecopsautomated.com/index.html")); } catch (Exception ignore) {}
+            try { LinkBrowser.browse("https://devsecopsautomated.com/index.html"); } catch (Exception ignore) {}
             return;
         }
         try
         {
             String encoded = URLEncoder.encode(username.trim(), "UTF-8");
-            Desktop.getDesktop().browse(URI.create("https://devsecopsautomated.com/profile.html?player=" + encoded));
+            LinkBrowser.browse("https://devsecopsautomated.com/profile.html?player=" + encoded);
         }
         catch (Exception ignore) {}
     }

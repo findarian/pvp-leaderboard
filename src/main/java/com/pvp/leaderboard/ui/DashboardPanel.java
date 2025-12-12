@@ -10,6 +10,7 @@ import com.pvp.leaderboard.service.RankInfo;
 import com.pvp.leaderboard.service.ShardRank;
 import com.pvp.leaderboard.util.RankUtils;
 import net.runelite.client.ui.PluginPanel;
+import net.runelite.client.util.LinkBrowser;
 
 import javax.swing.*;
 import java.awt.*;
