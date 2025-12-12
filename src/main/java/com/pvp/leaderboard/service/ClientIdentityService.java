@@ -48,23 +48,36 @@ public class ClientIdentityService
         }
 
         String finalId = globalId;
+        
+        // If disk file missing, try to recover from profile config
+        if (finalId == null || finalId.isEmpty())
+        {
+            String profileId = configManager.getConfiguration("PvPLeaderboard", "clientUniqueId");
+            if (profileId != null && !profileId.isEmpty())
+            {
+                finalId = profileId;
+            }
+        }
+        
+        // If still no ID, generate new one
         if (finalId == null || finalId.isEmpty())
         {
             finalId = UUID.randomUUID().toString();
-            // Save back to global file
-            try
+        }
+        
+        // Save to global file
+        try
+        {
+            File parent = globalFile.getParentFile();
+            if (parent != null && !parent.exists())
             {
-                File parent = globalFile.getParentFile();
-                if (parent != null && !parent.exists())
-                {
-                    parent.mkdirs();
-                }
-                Files.write(globalFile.toPath(), finalId.getBytes(StandardCharsets.UTF_8));
+                parent.mkdirs();
             }
-            catch (Exception e)
-            {
-                // log.debug("Failed to write global identity file", e);
-            }
+            Files.write(globalFile.toPath(), finalId.getBytes(StandardCharsets.UTF_8));
+        }
+        catch (Exception e)
+        {
+            // log.debug("Failed to write global identity file", e);
         }
 
         // Sync to profile
