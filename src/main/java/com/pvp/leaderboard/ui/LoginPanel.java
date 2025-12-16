@@ -10,16 +10,22 @@ import net.runelite.client.util.LinkBrowser;
 
 public class LoginPanel extends JPanel
 {
+    private static final int MAX_PLUGIN_SEARCHES_PER_MINUTE = 10;
+    
     private final CognitoAuthService cognitoAuthService;
     private final Consumer<String> onPluginSearch;
     private final Runnable onLoginStateChanged;
 
     private JTextField websiteSearchField;
     private JTextField pluginSearchField;
+    private JButton pluginSearchBtn;
     private JButton loginButton;
     
     private boolean loginInProgress = false;
     private boolean isLoggedIn = false;
+    
+    // Rate limiting for plugin search (10 per minute)
+    private final java.util.Deque<Long> pluginSearchTimestamps = new java.util.ArrayDeque<>();
 
     public LoginPanel(CognitoAuthService cognitoAuthService, Consumer<String> onPluginSearch, Runnable onLoginStateChanged)
     {
@@ -69,7 +75,7 @@ public class LoginPanel extends JPanel
         pluginSearchField.setPreferredSize(new Dimension(120, 25));
         pluginSearchField.addActionListener(e -> searchUserOnPlugin());
         
-        JButton pluginSearchBtn = new JButton("Search");
+        pluginSearchBtn = new JButton("Search");
         pluginSearchBtn.setPreferredSize(new Dimension(70, 25));
         pluginSearchBtn.addActionListener(e -> searchUserOnPlugin());
         
@@ -87,6 +93,22 @@ public class LoginPanel extends JPanel
         add(loginButton);
     }
 
+    private boolean isValidUsername(String username)
+    {
+        if (username == null) return false;
+        String trimmed = username.trim();
+        if (trimmed.isEmpty() || trimmed.length() > 12) return false;
+        // Allow alphanumeric, spaces, underscores, and hyphens (RuneScape username format)
+        return trimmed.matches("^[a-zA-Z0-9 _-]+$");
+    }
+    
+    private String normalizeUsername(String username)
+    {
+        if (username == null) return null;
+        // Normalize: trim, lowercase, collapse multiple spaces to single space
+        return username.trim().toLowerCase().replaceAll("\\s+", " ");
+    }
+
     private void searchUserOnWebsite()
     {
         String username = websiteSearchField.getText();
@@ -95,10 +117,12 @@ public class LoginPanel extends JPanel
             try { LinkBrowser.browse("https://devsecopsautomated.com/index.html"); } catch (Exception ignore) {}
             return;
         }
+        if (!isValidUsername(username)) return;
         try
         {
-            String encoded = URLEncoder.encode(username.trim(), "UTF-8");
-            LinkBrowser.browse("https://devsecopsautomated.com/profile.html?player=" + encoded);
+            String normalizedUsername = normalizeUsername(username);
+            String url = "https://devsecopsautomated.com/profile.html?player=" + normalizedUsername;
+            LinkBrowser.browse(url);
         }
         catch (Exception ignore) {}
     }
@@ -106,13 +130,54 @@ public class LoginPanel extends JPanel
     private void searchUserOnPlugin()
     {
         String username = pluginSearchField.getText();
-        if (username != null && !username.trim().isEmpty())
+        if (username == null || username.trim().isEmpty()) return;
+        if (!isValidUsername(username)) return;
+        
+        // Rate limit: 10 searches per minute
+        if (!checkPluginSearchRateLimit())
         {
-            if (onPluginSearch != null)
+            // Show rate limit feedback briefly
+            if (pluginSearchBtn != null)
             {
-                onPluginSearch.accept(username.trim());
+                pluginSearchBtn.setText("Wait...");
+                Timer timer = new Timer(1000, e -> pluginSearchBtn.setText("Search"));
+                timer.setRepeats(false);
+                timer.start();
             }
+            return;
         }
+        
+        if (onPluginSearch != null)
+        {
+            // Immediate visual feedback
+            String normalizedUsername = normalizeUsername(username);
+            pluginSearchField.setText(normalizedUsername);
+            
+            // Trigger search
+            onPluginSearch.accept(normalizedUsername);
+        }
+    }
+    
+    private boolean checkPluginSearchRateLimit()
+    {
+        long now = System.currentTimeMillis();
+        long oneMinuteAgo = now - 60_000;
+        
+        // Remove timestamps older than 1 minute
+        while (!pluginSearchTimestamps.isEmpty() && pluginSearchTimestamps.peekFirst() < oneMinuteAgo)
+        {
+            pluginSearchTimestamps.pollFirst();
+        }
+        
+        // Check if we've exceeded the limit
+        if (pluginSearchTimestamps.size() >= MAX_PLUGIN_SEARCHES_PER_MINUTE)
+        {
+            return false; // Rate limited
+        }
+        
+        // Record this search
+        pluginSearchTimestamps.addLast(now);
+        return true;
     }
 
     private void handleLogin()

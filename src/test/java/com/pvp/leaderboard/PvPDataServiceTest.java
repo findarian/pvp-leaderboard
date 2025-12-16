@@ -34,8 +34,8 @@ public class PvPDataServiceTest {
                 .addInterceptor(testInterceptor)
                 .build();
         config = new MockConfig();
-        // authService is unused in PvPDataService, passing null
-        dataService = new PvPDataService(okHttpClient, gson, null, config);
+        // authService and clientIdentityService are unused in tests, passing null
+        dataService = new PvPDataService(okHttpClient, gson, null, config, null);
     }
 
     @Test

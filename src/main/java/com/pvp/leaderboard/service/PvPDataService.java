@@ -32,12 +32,13 @@ import java.util.concurrent.ConcurrentHashMap;
 @Singleton
 public class PvPDataService
 {
-	private static final String API_BASE_URL = "https://kekh0x6kfk.execute-api.us-east-1.amazonaws.com/prod";
+	private static final String API_BASE_URL = "https://l5xya0wf0d.execute-api.us-east-1.amazonaws.com/prod";
     private static final String SHARD_BASE_URL = "https://devsecopsautomated.com/rank_idx";
 
 	private final OkHttpClient okHttpClient;
 	private final Gson gson;
 	private final PvPLeaderboardConfig config;
+	private final ClientIdentityService clientIdentityService;
 
 	// Shard lookup caching
     // Per spec: Shard Files = 60s TTL
@@ -71,7 +72,7 @@ public class PvPDataService
      */
     public void clearShardNegativeCache(String playerName) {
         if (playerName == null) return;
-        String canonicalName = playerName.trim().toLowerCase();
+        String canonicalName = playerName.trim().replaceAll("\\s+", " ").toLowerCase();
         missingPlayerUntilMs.remove(canonicalName);
         // debug("[Cache] Cleared shard negative cache for {}", canonicalName);
     }
@@ -85,11 +86,12 @@ public class PvPDataService
     private final ConcurrentHashMap<String, MatchesCacheEntry> matchesCache = new ConcurrentHashMap<>();
 
 	@Inject
-	public PvPDataService(OkHttpClient okHttpClient, Gson gson, CognitoAuthService authService, PvPLeaderboardConfig config)
+	public PvPDataService(OkHttpClient okHttpClient, Gson gson, CognitoAuthService authService, PvPLeaderboardConfig config, ClientIdentityService clientIdentityService)
 	{
 		this.okHttpClient = okHttpClient;
 		this.gson = gson;
 		this.config = config;
+		this.clientIdentityService = clientIdentityService;
 	}
 
 
@@ -121,10 +123,18 @@ public class PvPDataService
 			urlBuilder.addQueryParameter("next_token", nextToken);
 		}
 
-		Request request = new Request.Builder()
+		Request.Builder requestBuilder = new Request.Builder()
 			.url(urlBuilder.build())
-			.get()
-			.build();
+			.get();
+		
+		// Add client UUID header for API authentication/tracking
+		String clientUuid = clientIdentityService.getClientUniqueId();
+		if (clientUuid != null && !clientUuid.isEmpty())
+		{
+			requestBuilder.addHeader("X-Client-Unique-Id", clientUuid);
+		}
+		
+		Request request = requestBuilder.build();
 
 		okHttpClient.newCall(request).enqueue(new Callback()
 		{
@@ -226,7 +236,16 @@ public class PvPDataService
 			.addQueryParameter("player_id", playerName)
 			.build();
 
-		Request request = new Request.Builder().url(url).get().build();
+		Request.Builder requestBuilder = new Request.Builder().url(url).get();
+		
+		// Add client UUID header for API authentication/tracking
+		String clientUuid = clientIdentityService.getClientUniqueId();
+		if (clientUuid != null && !clientUuid.isEmpty())
+		{
+			requestBuilder.addHeader("X-Client-Unique-Id", clientUuid);
+		}
+		
+		Request request = requestBuilder.build();
 		log.debug("[API] getUserProfile: making HTTP request to {}", url);
 
 		okHttpClient.newCall(request).enqueue(new Callback()
@@ -417,8 +436,8 @@ public class PvPDataService
             return CompletableFuture.completedFuture(null);
         }
 
-        // 1. Canonicalize Name and bucket
-        String canonicalName = playerName.trim().toLowerCase();
+        // 1. Canonicalize Name and bucket (normalize spaces for consistency)
+        String canonicalName = playerName.trim().replaceAll("\\s+", " ").toLowerCase();
         String bucketPath = (bucket == null || bucket.isEmpty()) ? "overall" : bucket.toLowerCase();
         
         // Create lookup key for deduplication

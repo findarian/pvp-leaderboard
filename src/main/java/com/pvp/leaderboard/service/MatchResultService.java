@@ -20,7 +20,7 @@ import java.util.concurrent.CompletableFuture;
 @Slf4j
 public class MatchResultService
 {
-    private static final String API_URL = "https://kekh0x6kfk.execute-api.us-east-1.amazonaws.com/prod/matchresult";
+    private static final String API_URL = "https://l5xya0wf0d.execute-api.us-east-1.amazonaws.com/prod/matchresult";
     private static final String CLIENT_ID = "runelite";
     private static final String PLUGIN_VERSION = "1.0.0";
     // This is meant to be hardcoded and be this value for everyone. New versions of the plugin will update this on the backend so that it doesn't take matches from old clients if there is an incompatibility added.
@@ -46,23 +46,41 @@ public class MatchResultService
         );
     }
 
+    /**
+     * Validates a RuneScape username format.
+     * Valid: alphanumeric, spaces, underscores, hyphens, 1-12 characters
+     */
+    private boolean isValidRunescapeName(String name)
+    {
+        if (name == null) return false;
+        String trimmed = name.trim();
+        if (trimmed.isEmpty() || trimmed.length() > 12) return false;
+        return trimmed.matches("^[a-zA-Z0-9 _-]+$");
+    }
+
     public CompletableFuture<Boolean> submitMatchResult(MatchResult match)
     {
         CompletableFuture<Boolean> overall = new CompletableFuture<>();
         try
         {
+            // Validate player and opponent names match RuneScape format
+            if (!isValidRunescapeName(match.getPlayerId()) || !isValidRunescapeName(match.getOpponentId()))
+            {
+                log.debug("[Submit] Invalid name format: player='{}' opponent='{}'", match.getPlayerId(), match.getOpponentId());
+                overall.complete(false);
+                return overall;
+            }
+
             // Preflight diagnostics to understand why server might reject
             try {
-                boolean namesOk = (match.getPlayerId() != null && !match.getPlayerId().trim().isEmpty()) && (match.getOpponentId() != null && !match.getOpponentId().trim().isEmpty());
-                String pLower = (match.getPlayerId() != null) ? match.getPlayerId().toLowerCase(java.util.Locale.ROOT) : null;
-                String oLower = (match.getOpponentId() != null) ? match.getOpponentId().toLowerCase(java.util.Locale.ROOT) : null;
-                boolean notSelf = (pLower != null && oLower != null) && !pLower.equals(oLower);
+                String pLower = match.getPlayerId().trim().replaceAll("\\s+", " ").toLowerCase(java.util.Locale.ROOT);
+                String oLower = match.getOpponentId().trim().replaceAll("\\s+", " ").toLowerCase(java.util.Locale.ROOT);
+                boolean notSelf = !pLower.equals(oLower);
                 boolean timeOk = match.getFightStartTs() > 0 && match.getFightEndTs() > 0 && match.getFightEndTs() >= match.getFightStartTs();
                 boolean worldOk = match.getWorld() > 0;
-                // log.debug("[Submit] preflight namesOk={} notSelf={} timeOk={} worldOk={} player='{}' opponent='{}' startTs={} endTs={} world={} multi={} dmgOut={}",
-                //     namesOk, notSelf, timeOk, worldOk, match.getPlayerId(), match.getOpponentId(), match.getFightStartTs(), match.getFightEndTs(), match.getWorld(), match.isWasInMulti(), match.getDamageToOpponent());
-                // if (!namesOk) { log.debug("[Submit][why] Missing player/opponent name"); }
-                // else if (!notSelf) { log.debug("[Submit][why] Opponent equals self; likely mis-attribution"); }
+                // log.debug("[Submit] preflight notSelf={} timeOk={} worldOk={} player='{}' opponent='{}' startTs={} endTs={} world={} multi={} dmgOut={}",
+                //     notSelf, timeOk, worldOk, match.getPlayerId(), match.getOpponentId(), match.getFightStartTs(), match.getFightEndTs(), match.getWorld(), match.isWasInMulti(), match.getDamageToOpponent());
+                // if (!notSelf) { log.debug("[Submit][why] Opponent equals self; likely mis-attribution"); }
                 // if (!timeOk) { log.debug("[Submit][why] Invalid timestamps startTs={} endTs={}", match.getFightStartTs(), match.getFightEndTs()); }
                 // if (!worldOk) { log.debug("[Submit][why] Invalid world={}", match.getWorld()); }
             } catch (Exception ignore) {}

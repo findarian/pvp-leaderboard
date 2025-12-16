@@ -197,7 +197,7 @@ public class DashboardPanel extends PluginPanel
         currentMatchesPlayerId = normalizePlayerId(playerId);
         playerNameLabel.setText(playerId); // Update header immediately
         
-        // Also update the search box so user can see/edit the searched name
+        // Update the search box (needed for pvp lookup right-click menu)
         if (loginPanel != null) {
             loginPanel.setPluginSearchText(playerId);
         }
@@ -418,6 +418,6 @@ public class DashboardPanel extends PluginPanel
     }
 
     private static String normalizePlayerId(String name) {
-        return name != null ? name.trim().replaceAll("\\s+", " ") : null;
+        return name != null ? name.trim().replaceAll("\\s+", " ").toLowerCase() : null;
     }
 }
