@@ -1,6 +1,7 @@
 package com.pvp.leaderboard.game;
 
 import com.pvp.leaderboard.config.PvPLeaderboardConfig;
+import com.pvp.leaderboard.overlay.RankOverlay;
 import com.pvp.leaderboard.ui.DashboardPanel;
 import javax.inject.Inject;
 import javax.inject.Singleton;
@@ -23,6 +24,7 @@ public class MenuHandler
 
     // Dependencies set after startup via init/update
     private DashboardPanel dashboardPanel;
+    private RankOverlay rankOverlay;
     private NavigationButton navButton;
 
     @Inject
@@ -33,9 +35,10 @@ public class MenuHandler
         this.clientToolbar = clientToolbar;
     }
 
-    public void init(DashboardPanel dashboardPanel, NavigationButton navButton)
+    public void init(DashboardPanel dashboardPanel, RankOverlay rankOverlay, NavigationButton navButton)
     {
         this.dashboardPanel = dashboardPanel;
+        this.rankOverlay = rankOverlay;
         this.navButton = navButton;
         
         refreshMenuOption();

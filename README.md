@@ -1,80 +1,42 @@
 # PvP Leaderboard RuneLite Plugin
 
-PvP Leaderboard is a RuneLite plugin that displays PvP ranks above players, provides right‑click lookups, and shows profile stats from the PvP leaderboard service. Ranks are sourced from shard files hosted at `devsecopsautomated.com` and, when needed, from the API (AWS API Gateway) for new players not yet present in shards. The Overall bucket uses the API world rank and does not use shards.
+## Overview
+This plugin submits matches when someone dies, either you or the opponent. Once the match is submitted a calculation is done in the backend of https://devsecopsautomated.com/ and your rating is updated.
+
+The backend is able to determine based off off the data sent if the match was NH / Veng / Multi / DMM. Each one of these has their own separate MMR values. Combining them all together in an average gives you your Overall rating.
 
 
-## Features
-- Rank display defaults to tier/division text (e.g., “Adamant 3”). You can switch to “Rank XYZ” or to an icon.
-- Configurable icon size, white outline, and per‑player offsets (separate X/Y for Self and Others).
-- Right‑click “pvp lookup” menu is OFF by default; forces an immediate API lookup and updates the overlay.
-- Best/Worst Players Nearby overlays (separate, configurable count and font size, default off). Include local player.
-- Side panel (Dashboard) with profile stats, tier graph, rank progress bars sized for the narrow sidebar, and match history (token‑paginated).
-- Optional Cognito login for authenticated submissions; unauthenticated fallback is automatic.
-- Automatic self‑rank refresh after matches, on login, and on bucket changes.
-- Smurf detection support via persistent unique client ID.
-- No popup dialogs or plugin‑generated sounds.
 
 ## Identity & Smurf Detection
-The plugin generates a persistent unique ID (UUID) stored in `<user.home>/.runelite/pvp-leaderboard.id`. This ID is:
-- **Shared across all accounts** on the same machine.
-- Sent via the `X-Client-Unique-Id` header on match submissions and user stats lookups.
-- Used by the backend to resolve identity links, ensuring that playing on an alt account correctly reflects your "main" effective MMR and rank on the dashboard.
+This plugin is able to detect smurfs and alt accounts and prevents other people submitting matches for you.
+
 
 ## Configuration
 Open RuneLite configuration for the plugin:
-- Rank display mode: Text (tier/division), Rank Number, or Icon.
-- Rank text size and overlay width; icon size and white outline.
-- Rank icon/text offsets (Self/Others) X/Y.
-- Best/Worst Players Nearby: enable, count (default 10), font size (default 15), width (default 180).
-- Rank bucket: Overall (default), NH, Veng, Multi, DMM.
-- Throttle level (0–10): controls how aggressively lookups are scheduled; level 10 enforces wider gaps.
-- “pvp lookup” menu toggle (default OFF).
+“pvp lookup” menu toggle (default OFF).
+ - You will see this option when right clicking players, and it will open up the side panel for the plugin and submit a request to get a player's rank in each style and their recent match history
+
+MMR change
+-You can choose to offset to have this "xp drop" done wherever, but it is linked to your XP drop by default. 
+-You can also change how long it stays on screen 1-10 seconds.
 
 ## How lookups work
 - **Shard key**: First 2 characters of lowercase player name (e.g., `toyco` -> `to.json`, `MOH JO JOJO` -> `mo.json`)
 - **Primary source**: shard files `https://devsecopsautomated.com/rank_idx/<bucket>/<shard_key>.json` with 1‑hour cache.
-- **Direct lookup**: Player rank data is embedded directly in the name shard (`name_rank_info_map`)
-- **Redirect support**: If a player uses a linked account, the shard contains a `redirect` pointing to the master account's `acct_sha`, which is then resolved (max 10 redirect depth)
 - **Negative cache/backoff**:
   - Name misses → 1‑hour negative cache per bucket.
   - Per‑shard throttle → minimum 60s between fetches; single‑flight per shard.
   - Network fail‑fast: connect/read timeouts are short (≈3s/4s) and errors trigger temporary backoffs.
-- **API fallbacks**:
-  - Self: on shard miss, derive tier from `/user` or recent `/matches` quickly.
-  - Others: after a fight, if an opponent isn't in shards, schedule a delayed `/user` and show that rank until shards are fresh.
-  - Right‑click "pvp lookup" forces an API override for that player until shards update.
 
 ## Match history
-- GET `/matches?player_id=<id>&limit=<N>[&next_token=...]` with token‑based pagination.
-- Per‑profile in‑memory cache keyed by normalized `player_id`.
-- UI updates charts and bucket bars incrementally.
+- You see the last 100 matches of a player that you look up
 
 ## Networking, performance & logging
-- All network I/O runs off the client thread via RuneLite’s scheduler to avoid stutter.
-- Short timeouts and backoffs prevent repeated attempts during outages.
-- Overlay lookups are per‑tick rate‑limited with bounded concurrency to avoid client stutter.
-- To enable debug logs, start RuneLite with JVM args, e.g. `-Dlogback.configurationFile=path\to\logback-debug.xml` (optional: `-ea`).
+Requests are done to the website or the API.
 
 ## Authentication
 - Optional Cognito OAuth; tokens are refreshed in the background using the refresh token.
-- Match results submit immediately after death; unauthenticated fallback if the authed path fails. The only INFO logs retained are path‑accepted lines per plugin‑hub guidance.
-
-## Build
-```bash
-./gradlew clean build
-```
-Jar output is written to `build/libs/`.
-
-## Install
-1) Build the plugin:
-   - Linux/macOS: `./gradlew clean build`
-   - Windows: `.\gradlew.bat clean build`
-2) Copy the jar from `build/libs/` to your RuneLite plugins directory:
-   - Windows: `C:\Users\<you>\.runelite\plugins`
-3) Restart RuneLite and enable “PvP Leaderboard” in the plugin list.
-
-## Known issues
-- The `damage_to_opponent` value may be inaccurate; this does not impact other functionality.
+- This gives you additional stats for plugin lookup and on the website
 
 ## Credits
 Author: Toyco / Ryan McCusker
