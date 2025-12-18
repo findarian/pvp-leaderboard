@@ -381,6 +381,13 @@ public class FightMonitor
         final String idTokenSafe = cognitoAuthService.getStoredIdToken();
 
         final long startTs = entry.startTs;
+        
+        // Skip submission if start timestamp wasn't captured (fight was already in progress)
+        if (startTs <= 0)
+        {
+            log.debug("[MatchSubmit] Skipping - fight start not captured (startTs={}). Plugin likely started tracking mid-fight.", startTs);
+            return;
+        }
         final int startSb = entry.startSpellbook;
         final boolean wasMulti = entry.wasInMulti;
 

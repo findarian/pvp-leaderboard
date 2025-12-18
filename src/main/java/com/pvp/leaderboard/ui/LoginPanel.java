@@ -3,7 +3,6 @@ package com.pvp.leaderboard.ui;
 import com.pvp.leaderboard.service.CognitoAuthService;
 import javax.swing.*;
 import java.awt.*;
-import java.net.URI;
 import java.net.URLEncoder;
 import java.util.function.Consumer;
 import net.runelite.client.util.LinkBrowser;
@@ -114,14 +113,15 @@ public class LoginPanel extends JPanel
         String username = websiteSearchField.getText();
         if (username == null || username.trim().isEmpty())
         {
-            try { LinkBrowser.browse("https://devsecopsautomated.com/index.html"); } catch (Exception ignore) {}
+            LinkBrowser.browse("https://devsecopsautomated.com/index.html");
             return;
         }
         if (!isValidUsername(username)) return;
         try
         {
             String normalizedUsername = normalizeUsername(username);
-            String url = "https://devsecopsautomated.com/profile.html?player=" + normalizedUsername;
+            String encodedUsername = URLEncoder.encode(normalizedUsername, "UTF-8");
+            String url = "https://devsecopsautomated.com/profile.html?player=" + encodedUsername;
             LinkBrowser.browse(url);
         }
         catch (Exception ignore) {}
