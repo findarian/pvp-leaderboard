@@ -8,10 +8,12 @@ import com.pvp.leaderboard.service.CognitoAuthService;
 import com.pvp.leaderboard.service.MatchResult;
 import com.pvp.leaderboard.service.MatchResultService;
 import com.pvp.leaderboard.service.PvPDataService;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.atomic.AtomicLong;
 import javax.inject.Inject;
 import javax.inject.Singleton;
 import lombok.extern.slf4j.Slf4j;
@@ -47,12 +49,8 @@ public class FightMonitor
     private volatile String lastExactOpponentName = null;
     private long fightStartTime = 0;
 
-    // Tracks multiple simultaneous fights (per-opponent)
+    // Tracks multiple simultaneous fights (per-opponent) - damage is now tracked per-FightEntry
     private final ConcurrentHashMap<String, FightEntry> activeFights = new ConcurrentHashMap<>();
-    
-    // Damage accounting
-    private final ConcurrentHashMap<String, Long> damageFromOpponent = new ConcurrentHashMap<>();
-    private final ConcurrentHashMap<String, Long> damageToOpponent = new ConcurrentHashMap<>();
     
     // Tick counters
     private int suppressFightStartTicks = 0;
@@ -102,11 +100,39 @@ public class FightMonitor
         fightStartTime = 0;
         suppressFightStartTicks = 2;
         activeFights.clear();
-        damageFromOpponent.clear();
-        damageToOpponent.clear();
+        perOpponentSuppressUntilTicks.clear();
+        shardPresence.clear();
         lastCombatActivityTick = 0;
+        lastExactOpponentName = null;
         preFightMmr = null;
         try { log.debug("[Fight] state reset; suppressTicks={}", suppressFightStartTicks); } catch (Exception ignore) {}
+    }
+    
+    /**
+     * Clear only a specific fight without affecting other ongoing fights.
+     * Used when a fight ends but other multi-combat fights continue.
+     */
+    private void clearFightFor(String opponentName)
+    {
+        activeFights.remove(opponentName);
+        perOpponentSuppressUntilTicks.put(opponentName, 5);
+        shardPresence.remove(opponentName);
+        
+        // Only reset global state if ALL fights are done
+        if (activeFights.isEmpty())
+        {
+            inFight = false;
+            wasInMulti = false;
+            fightStartSpellbook = -1;
+            opponent = null;
+            fightStartTime = 0;
+            suppressFightStartTicks = 2;
+            preFightMmr = null;
+        }
+        else
+        {
+            inFight = true;
+        }
     }
 
     public void handleGameTick(GameTick tick)
@@ -150,13 +176,8 @@ public class FightMonitor
                 inFight = !activeFights.isEmpty();
             }
 
-            // Combat window idle check
-            int tickNow = client.getTickCount();
-            if (tickNow - lastCombatActivityTick > OUT_OF_COMBAT_TICKS && (!damageFromOpponent.isEmpty() || !damageToOpponent.isEmpty()))
-            {
-                damageFromOpponent.clear();
-                damageToOpponent.clear();
-            }
+            // Combat window idle check - individual fight expiration is handled by GC above
+            // No global damage maps to clear anymore; damage is per-FightEntry
         }
         catch (Exception e)
         {
@@ -237,12 +258,10 @@ public class FightMonitor
             {
                 int tickNow = client.getTickCount();
                 
-                // Check for combat window reset FIRST
+                // Check for combat window reset FIRST - clear stale fights after long idle
                 if (tickNow - lastCombatActivityTick > OUT_OF_COMBAT_TICKS)
                 {
                     activeFights.clear();
-                    damageFromOpponent.clear();
-                    damageToOpponent.clear();
                 }
                 lastCombatActivityTick = tickNow;
 
@@ -256,16 +275,20 @@ public class FightMonitor
                 if (client.getVarbitValue(Varbits.MULTICOMBAT_AREA) == 1) wasInMulti = true;
             }
 
-            // Add the damage to maps
+            // Add the damage to per-fight tracking in FightEntry
             if (opponentName != null && amt > 0)
             {
-                if (hitPlayer == localPlayer)
+                FightEntry fe = activeFights.get(opponentName);
+                if (fe != null)
                 {
-                    damageFromOpponent.merge(opponentName, (long) amt, Long::sum);
-                }
-                else
-                {
-                    damageToOpponent.merge(opponentName, (long) amt, Long::sum);
+                    if (hitPlayer == localPlayer)
+                    {
+                        fe.addDamageReceived(amt);
+                    }
+                    else
+                    {
+                        fe.addDamageDealt(amt);
+                    }
                 }
             }
         }
@@ -285,7 +308,7 @@ public class FightMonitor
 
             if (player == localPlayer)
             {
-                // Self death
+                // Self death - find who killed us
                 String killer = findActualKiller(localPlayer);
                 if (killer != null) opponent = killer;
 
@@ -293,14 +316,24 @@ public class FightMonitor
                 if (killer == null) killer = opponent;
                 if (killer == null) killer = mostRecentActiveOpponent();
 
-                if (killer != null) endFightFor(killer, "loss");
-                else {
-                    activeFights.clear(); inFight = false;
+                // Submit loss against the killer
+                if (killer != null)
+                {
+                    endFightFor(killer, "loss");
                 }
+                
+                // Clear remaining fights without submitting (we died, they didn't kill us)
+                for (String remaining : new ArrayList<>(activeFights.keySet()))
+                {
+                    clearFightFor(remaining);
+                }
+                
+                // Ensure full reset after self-death
+                resetFightState();
             }
             else
             {
-                // Other death
+                // Other player death
                 String name = player.getName();
                 if (name != null)
                 {
@@ -329,26 +362,30 @@ public class FightMonitor
 
     private void endFightFor(String opponentName, String result)
     {
-        FightEntry fe = activeFights.remove(opponentName);
-        if (fe != null) fe.finalized = true;
+        FightEntry fe = activeFights.get(opponentName);
+        if (fe == null || fe.finalized) return;
+        
+        fe.finalized = true;
         finalizeFight(opponentName, result, fe);
-        inFight = !activeFights.isEmpty();
+        clearFightFor(opponentName);  // Use targeted clear instead of resetFightState
     }
 
     private void finalizeFight(String opponentName, String result, FightEntry entry)
     {
+        if (entry == null) return;  // Require valid FightEntry for accurate data
+        
         final int currentSpellbook = client.getVarbitValue(Varbits.SPELLBOOK);
         final int world = client.getWorld();
         final long now = System.currentTimeMillis() / 1000;
         final String selfName = getLocalPlayerName();
         final String idTokenSafe = cognitoAuthService.getStoredIdToken();
 
-        final long startTs = (entry != null) ? entry.startTs : fightStartTime;
-        final int startSb = (entry != null) ? entry.startSpellbook : fightStartSpellbook;
-        final boolean wasMulti = (entry != null) ? entry.wasInMulti : wasInMulti;
+        final long startTs = entry.startTs;
+        final int startSb = entry.startSpellbook;
+        final boolean wasMulti = entry.wasInMulti;
 
         final String resolvedOpponent = (opponentName != null) ? opponentName : "Unknown";
-        final long dmgOut = damageToOpponent.getOrDefault(resolvedOpponent, 0L);
+        final long dmgOut = entry.damageDealt.get();  // Read from FightEntry
 
         // Async Submission
         java.util.concurrent.CompletableFuture.runAsync(() -> {
@@ -358,16 +395,6 @@ public class FightMonitor
                 log.debug("[MatchSubmit] EXCEPTION in async submission: {}", e.getMessage(), e);
             }
         }, scheduler);
-
-        // Suppression
-        if (resolvedOpponent != null && !"Unknown".equals(resolvedOpponent)) {
-            perOpponentSuppressUntilTicks.put(resolvedOpponent, 5);
-        }
-        
-        // Reset if main fight
-        if (entry == null || (opponent != null && opponent.equals(opponentName))) {
-            resetFightState();
-        }
 
         // Schedule API refreshes (includes MMR notification)
         scheduleApiRefreshes(resolvedOpponent);
@@ -601,10 +628,18 @@ public class FightMonitor
 
     private String findKillerByDamage()
     {
-        String killer = null; long bestDmg = -1L;
-        for (Map.Entry<String, Long> e : damageFromOpponent.entrySet()) {
-            long v = (e.getValue() != null ? e.getValue() : 0L);
-            if (v > bestDmg) { bestDmg = v; killer = e.getKey(); }
+        String killer = null;
+        long bestDmg = -1L;
+        for (Map.Entry<String, FightEntry> e : activeFights.entrySet())
+        {
+            FightEntry fe = e.getValue();
+            if (fe == null) continue;
+            long v = fe.damageReceived.get();
+            if (v > bestDmg)
+            {
+                bestDmg = v;
+                killer = e.getKey();
+            }
         }
         return killer;
     }
@@ -653,10 +688,25 @@ public class FightMonitor
         final boolean wasInMulti;
         volatile long lastActivityMs;
         volatile boolean finalized = false;
+        
+        // Per-fight damage tracking for multi-combat accuracy
+        final AtomicLong damageDealt = new AtomicLong(0);    // Damage we dealt TO this opponent
+        final AtomicLong damageReceived = new AtomicLong(0); // Damage we received FROM this opponent
+        
         FightEntry(long ts, int sb, boolean multi) {
             startTs = ts;
             startSpellbook = sb;
             wasInMulti = multi;
+            lastActivityMs = System.currentTimeMillis();
+        }
+        
+        void addDamageDealt(long amount) {
+            damageDealt.addAndGet(amount);
+            lastActivityMs = System.currentTimeMillis();
+        }
+        
+        void addDamageReceived(long amount) {
+            damageReceived.addAndGet(amount);
             lastActivityMs = System.currentTimeMillis();
         }
     }

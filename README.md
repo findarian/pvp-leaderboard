@@ -5,7 +5,7 @@ This plugin submits matches when someone dies, either you or the opponent. Once 
 
 The backend is able to determine based off off the data sent if the match was NH / Veng / Multi / DMM. Each one of these has their own separate MMR values. Combining them all together in an average gives you your Overall rating.
 
-
+## Screenshots
 
 ## Identity & Smurf Detection
 This plugin is able to detect smurfs and alt accounts and prevents other people submitting matches for you.

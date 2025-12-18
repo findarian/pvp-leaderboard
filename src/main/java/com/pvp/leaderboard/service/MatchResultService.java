@@ -76,7 +76,8 @@ public class MatchResultService
                 String pLower = match.getPlayerId().trim().replaceAll("\\s+", " ").toLowerCase(java.util.Locale.ROOT);
                 String oLower = match.getOpponentId().trim().replaceAll("\\s+", " ").toLowerCase(java.util.Locale.ROOT);
                 boolean notSelf = !pLower.equals(oLower);
-                boolean timeOk = match.getFightStartTs() > 0 && match.getFightEndTs() > 0 && match.getFightEndTs() >= match.getFightStartTs();
+                // Allow fight_start_ts = 0 when fight was already in progress (backend handles duration validation only when startTs > 0)
+                boolean timeOk = match.getFightEndTs() > 0 && (match.getFightStartTs() == 0 || match.getFightEndTs() >= match.getFightStartTs());
                 boolean worldOk = match.getWorld() > 0;
                 // log.debug("[Submit] preflight notSelf={} timeOk={} worldOk={} player='{}' opponent='{}' startTs={} endTs={} world={} multi={} dmgOut={}",
                 //     notSelf, timeOk, worldOk, match.getPlayerId(), match.getOpponentId(), match.getFightStartTs(), match.getFightEndTs(), match.getWorld(), match.isWasInMulti(), match.getDamageToOpponent());
