@@ -39,10 +39,27 @@ public class RankOverlay extends Overlay
     private volatile boolean selfRankAttempted = false;
     private volatile long nextSelfRankAllowedAtMs = 0L;
 
-    // MMR change notification
-    private volatile Double previousMmr = null;
-    private volatile Double currentMmrDelta = null;
+    // MMR change notification queue (for multi-kill scenarios)
+    private final java.util.concurrent.ConcurrentLinkedQueue<MmrNotification> mmrNotificationQueue = new java.util.concurrent.ConcurrentLinkedQueue<>();
+    private volatile MmrNotification currentMmrNotification = null;
     private volatile long mmrNotificationStartMs = 0L;
+    private volatile int lastNotificationTick = -1; // Track tick for 1-per-tick display
+    
+    // Legacy fields kept for backwards compatibility
+    private volatile Double previousMmr = null;
+    
+    /**
+     * Represents a single MMR change notification.
+     */
+    private static class MmrNotification {
+        final double delta;
+        final String bucketLabel;
+        
+        MmrNotification(double delta, String bucketLabel) {
+            this.delta = delta;
+            this.bucketLabel = bucketLabel;
+        }
+    }
 
     @Inject
     public RankOverlay(Client client, PvPLeaderboardConfig config, PvPDataService pvpDataService)
@@ -121,19 +138,72 @@ public class RankOverlay extends Overlay
     }
 
     /**
-     * Called after fight when new MMR is fetched.
-     * Calculates delta and triggers notification.
+     * Show MMR delta notification with the actual delta from match history.
+     * This is the preferred method as it uses the accurate server-calculated delta.
+     * Notifications are queued for multi-kill scenarios.
+     * 
+     * @param mmrDelta The actual MMR change (positive for gain, negative for loss)
+     * @param bucketLabel Optional bucket label to display (e.g., "Multi") when different from config bucket
      */
-    public void onMmrUpdated(double newMmr, double oldMmr)
+    public void showMmrDelta(double mmrDelta, String bucketLabel)
     {
         if (!config.showMmrChangeNotification())
         {
             return;
         }
-        this.currentMmrDelta = newMmr - oldMmr;
-        this.mmrNotificationStartMs = System.currentTimeMillis();
-        this.previousMmr = null;
-        log.debug("[Overlay] MMR updated: old={} new={} delta={}", oldMmr, newMmr, currentMmrDelta);
+        
+        // Add to queue for sequential display
+        MmrNotification notification = new MmrNotification(mmrDelta, bucketLabel);
+        mmrNotificationQueue.offer(notification);
+        log.debug("[Overlay] Queued MMR notification: delta={} bucket={} queueSize={}", 
+            mmrDelta, bucketLabel, mmrNotificationQueue.size());
+        
+        // If no notification is currently showing, start this one immediately
+        if (currentMmrNotification == null && mmrNotificationStartMs == 0L)
+        {
+            startNextNotification();
+        }
+    }
+    
+    /**
+     * Start displaying the next notification from the queue.
+     */
+    private void startNextNotification()
+    {
+        MmrNotification next = mmrNotificationQueue.poll();
+        if (next != null)
+        {
+            currentMmrNotification = next;
+            mmrNotificationStartMs = System.currentTimeMillis();
+            log.debug("[Overlay] Started MMR notification: delta={} bucket={} remaining={}", 
+                next.delta, next.bucketLabel, mmrNotificationQueue.size());
+        }
+        else
+        {
+            currentMmrNotification = null;
+            mmrNotificationStartMs = 0L;
+        }
+    }
+
+    /**
+     * Called after fight when new MMR is fetched.
+     * Calculates delta and triggers notification.
+     * @deprecated Use showMmrDelta instead which uses accurate server-calculated delta
+     */
+    @Deprecated
+    public void onMmrUpdated(double newMmr, double oldMmr, String bucketLabel)
+    {
+        showMmrDelta(newMmr - oldMmr, bucketLabel);
+    }
+
+    /**
+     * Called after fight when new MMR is fetched (legacy method without bucket label).
+     * @deprecated Use showMmrDelta instead
+     */
+    @Deprecated
+    public void onMmrUpdated(double newMmr, double oldMmr)
+    {
+        onMmrUpdated(newMmr, oldMmr, null);
     }
 
     /**
@@ -343,8 +413,16 @@ public class RankOverlay extends Overlay
 
     private void renderMmrChangeNotification(Graphics2D g, Player localPlayer)
     {
-        if (currentMmrDelta == null || mmrNotificationStartMs == 0L)
+        int currentTick = client.getTickCount();
+        
+        if (currentMmrNotification == null || mmrNotificationStartMs == 0L)
         {
+            // Try to start next notification if queue has items (rate limit: 1 per tick)
+            if (!mmrNotificationQueue.isEmpty() && currentTick != lastNotificationTick)
+            {
+                startNextNotification();
+                lastNotificationTick = currentTick;
+            }
             return;
         }
         if (!config.showMmrChangeNotification())
@@ -352,13 +430,24 @@ public class RankOverlay extends Overlay
             return;
         }
 
+        // Check if current notification duration has expired
         long durationMs = config.mmrDuration() * 1000L;
         long elapsed = System.currentTimeMillis() - mmrNotificationStartMs;
+        
         if (elapsed > durationMs)
         {
-            // Clear notification after duration
-            currentMmrDelta = null;
-            mmrNotificationStartMs = 0L;
+            // Current notification finished - start next (rate limit: 1 per tick)
+            if (currentTick != lastNotificationTick)
+            {
+                startNextNotification();
+                lastNotificationTick = currentTick;
+            }
+            else
+            {
+                // Already started one this tick, clear current and wait for next tick
+                currentMmrNotification = null;
+                mmrNotificationStartMs = 0L;
+            }
             return;
         }
 
@@ -369,13 +458,26 @@ public class RankOverlay extends Overlay
             return;
         }
 
-        // Calculate fade alpha (255 -> 0 over duration)
+        double mmrDelta = currentMmrNotification.delta;
+        String bucketLabel = currentMmrNotification.bucketLabel;
+
+        // Calculate fade progress
         float progress = (float) elapsed / durationMs;
         int alpha = (int) (255 * (1.0f - progress));
+        int floatOffset = (int) (progress * 30); // Float up 30 pixels
 
-        // Format text: +100.9 MMR or -3.2 MMR
-        String sign = currentMmrDelta >= 0 ? "+" : "";
-        String text = String.format("%s%.1f MMR", sign, currentMmrDelta);
+        // Format text: +1.3 (Multi) or -3.2 (NH) when bucket label present
+        // Otherwise: +1.3 MMR
+        String sign = mmrDelta >= 0 ? "+" : "";
+        String text;
+        if (bucketLabel != null && !bucketLabel.isEmpty())
+        {
+            text = String.format("%s%.1f (%s)", sign, mmrDelta, bucketLabel);
+        }
+        else
+        {
+            text = String.format("%s%.1f MMR", sign, mmrDelta);
+        }
 
         // Determine color
         Color baseColor;
@@ -383,7 +485,7 @@ public class RankOverlay extends Overlay
         {
             baseColor = Color.WHITE;
         }
-        else if (currentMmrDelta >= 0)
+        else if (mmrDelta >= 0)
         {
             baseColor = new Color(0, 200, 0); // Green for gain
         }
@@ -398,9 +500,6 @@ public class RankOverlay extends Overlay
         FontMetrics fm = g.getFontMetrics();
         int textW = fm.stringWidth(text);
         int centerX = headLoc.getX() - textW / 2 + config.mmrOffsetX();
-
-        // Float upward as it fades
-        int floatOffset = (int) (progress * 30); // Float up 30 pixels
         int drawY = headLoc.getY() - floatOffset + config.mmrOffsetY();
 
         // Black outline with alpha

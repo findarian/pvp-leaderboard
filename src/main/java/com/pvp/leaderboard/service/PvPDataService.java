@@ -23,8 +23,10 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -85,6 +87,12 @@ public class PvPDataService
     private static final long MATCHES_CACHE_TTL_MS = 1L * 60L * 1000L; // 1 minute
     private final ConcurrentHashMap<String, MatchesCacheEntry> matchesCache = new ConcurrentHashMap<>();
 
+    // DMM Worlds Caching (1 hour TTL)
+    private static final long DMM_WORLDS_CACHE_TTL_MS = 60L * 60L * 1000L; // 1 hour
+    private volatile Set<Integer> dmmWorldsCache = new HashSet<>();
+    private volatile long dmmWorldsCacheTimestamp = 0L;
+    private volatile boolean dmmWorldsFetchInProgress = false;
+
 	@Inject
 	public PvPDataService(OkHttpClient okHttpClient, Gson gson, CognitoAuthService authService, PvPLeaderboardConfig config, ClientIdentityService clientIdentityService)
 	{
@@ -97,10 +105,22 @@ public class PvPDataService
 
 	public CompletableFuture<JsonObject> getPlayerMatches(String playerName, String nextToken, int limit)
 	{
+		return getPlayerMatches(playerName, nextToken, limit, false);
+	}
+
+	/**
+	 * Fetch player match history with optional cache bypass.
+	 * @param playerName The player to fetch matches for
+	 * @param nextToken Pagination token (null for first page)
+	 * @param limit Max matches to return
+	 * @param bypassCache If true, skip cache and always fetch fresh data (use for MMR delta lookups)
+	 */
+	public CompletableFuture<JsonObject> getPlayerMatches(String playerName, String nextToken, int limit, boolean bypassCache)
+	{
 		CompletableFuture<JsonObject> future = new CompletableFuture<>();
 
-        // Check cache (only for first page, i.e. no nextToken)
-        if (nextToken == null || nextToken.isEmpty()) {
+        // Check cache (only for first page, i.e. no nextToken, and if not bypassing)
+        if (!bypassCache && (nextToken == null || nextToken.isEmpty())) {
             String cacheKey = "matches:" + playerName + ":" + limit;
             MatchesCacheEntry cached = matchesCache.get(cacheKey);
             if (cached != null && System.currentTimeMillis() - cached.getTimestamp() <= MATCHES_CACHE_TTL_MS) {
@@ -750,5 +770,126 @@ public class PvPDataService
 		}
 		return hexString.toString();
 	}
+
+    /**
+     * Check if a world is a DMM world.
+     * Uses cached DMM world list with 1-hour TTL.
+     */
+    public boolean isDmmWorld(int world)
+    {
+        refreshDmmWorldsIfNeeded();
+        return dmmWorldsCache.contains(world);
+    }
+
+    /**
+     * Get the set of DMM worlds (cached).
+     */
+    public Set<Integer> getDmmWorlds()
+    {
+        refreshDmmWorldsIfNeeded();
+        return new HashSet<>(dmmWorldsCache);
+    }
+
+    /**
+     * Refresh DMM worlds cache if expired or empty.
+     */
+    private void refreshDmmWorldsIfNeeded()
+    {
+        long now = System.currentTimeMillis();
+        if (now - dmmWorldsCacheTimestamp < DMM_WORLDS_CACHE_TTL_MS && !dmmWorldsCache.isEmpty())
+        {
+            return; // Cache still valid
+        }
+
+        if (dmmWorldsFetchInProgress)
+        {
+            return; // Already fetching
+        }
+
+        dmmWorldsFetchInProgress = true;
+        fetchDmmWorlds().whenComplete((worlds, ex) -> {
+            dmmWorldsFetchInProgress = false;
+            if (worlds != null && !worlds.isEmpty())
+            {
+                dmmWorldsCache = worlds;
+                dmmWorldsCacheTimestamp = System.currentTimeMillis();
+                log.debug("[DMM] Updated DMM worlds cache: {}", worlds);
+            }
+            else if (ex != null)
+            {
+                log.debug("[DMM] Failed to fetch DMM worlds: {}", ex.getMessage());
+            }
+        });
+    }
+
+    /**
+     * Fetch DMM worlds from the API endpoint.
+     * Endpoint: /config/worlds
+     * Response: {"dmm": [345, 346, ...]}
+     */
+    private CompletableFuture<Set<Integer>> fetchDmmWorlds()
+    {
+        CompletableFuture<Set<Integer>> future = new CompletableFuture<>();
+
+        String url = API_BASE_URL + "/config/worlds";
+        Request request = new Request.Builder().url(url).get().build();
+
+        log.debug("[DMM] Fetching DMM worlds from {}", url);
+
+        okHttpClient.newCall(request).enqueue(new Callback()
+        {
+            @Override
+            public void onFailure(Call call, IOException e)
+            {
+                log.debug("[DMM] Network failure fetching DMM worlds: {}", e.getMessage());
+                future.complete(new HashSet<>());
+            }
+
+            @Override
+            public void onResponse(Call call, Response response) throws IOException
+            {
+                try (Response res = response)
+                {
+                    if (!res.isSuccessful())
+                    {
+                        log.debug("[DMM] HTTP error {} fetching DMM worlds", res.code());
+                        future.complete(new HashSet<>());
+                        return;
+                    }
+
+                    ResponseBody body = res.body();
+                    if (body == null)
+                    {
+                        future.complete(new HashSet<>());
+                        return;
+                    }
+
+                    String bodyString = body.string();
+                    log.debug("[DMM] Response: {}", bodyString);
+
+                    // Parse response - expecting {"dmm": [345, 346, ...]}
+                    Set<Integer> worlds = new HashSet<>();
+                    JsonObject json = gson.fromJson(bodyString, JsonObject.class);
+                    
+                    if (json.has("dmm") && json.get("dmm").isJsonArray())
+                    {
+                        for (var element : json.getAsJsonArray("dmm"))
+                        {
+                            worlds.add(element.getAsInt());
+                        }
+                    }
+                    
+                    future.complete(worlds);
+                }
+                catch (Exception e)
+                {
+                    log.debug("[DMM] Error parsing DMM worlds response: {}", e.getMessage());
+                    future.complete(new HashSet<>());
+                }
+            }
+        });
+
+        return future;
+    }
 
 }

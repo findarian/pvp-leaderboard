@@ -87,7 +87,25 @@ public class PvPLeaderboardPlugin extends Plugin
 	// Accessor for DashboardPanel to get local player name for debug logs
 	public String getLocalPlayerName()
 	{
-		try { return client != null && client.getLocalPlayer() != null ? client.getLocalPlayer().getName() : null; } catch (Exception ignore) { return null; }
+		if (client == null)
+		{
+			return null;
+		}
+
+		try
+		{
+			var localPlayer = client.getLocalPlayer();
+			if (localPlayer == null)
+			{
+				return null;
+			}
+			return localPlayer.getName();
+		}
+		catch (Exception e)
+		{
+			log.debug("Failed to get local player name", e);
+			return null;
+		}
 	}
 
 	// Helper for overlays to get displayed rank from overlay cache

@@ -61,8 +61,7 @@ public class FightMonitor
     private static final int OUT_OF_COMBAT_TICKS = 16;
     private int gcTicksCounter = 0;
 
-    // MMR tracking for notifications
-    private volatile Double preFightMmr = null;
+    // MMR tracking - no longer using pre-fight profile, using match history API instead
 
     @Inject
     public FightMonitor(
@@ -104,7 +103,6 @@ public class FightMonitor
         shardPresence.clear();
         lastCombatActivityTick = 0;
         lastExactOpponentName = null;
-        preFightMmr = null;
         try { log.debug("[Fight] state reset; suppressTicks={}", suppressFightStartTicks); } catch (Exception ignore) {}
     }
     
@@ -127,7 +125,6 @@ public class FightMonitor
             opponent = null;
             fightStartTime = 0;
             suppressFightStartTicks = 2;
-            preFightMmr = null;
         }
         else
         {
@@ -394,6 +391,14 @@ public class FightMonitor
         final String resolvedOpponent = (opponentName != null) ? opponentName : "Unknown";
         final long dmgOut = entry.damageDealt.get();  // Read from FightEntry
 
+        // Determine the bucket this fight will be classified as (server-side logic)
+        final String startSpellbookName = getSpellbookName(startSb);
+        final String endSpellbookName = getSpellbookName(currentSpellbook);
+        final String fightBucket = determineBucket(world, wasMulti, startSpellbookName, endSpellbookName);
+        
+        log.debug("[MatchSubmit] Determined bucket: {} (world={} multi={} startSb={} endSb={})", 
+            fightBucket, world, wasMulti, startSpellbookName, endSpellbookName);
+
         // Async Submission
         java.util.concurrent.CompletableFuture.runAsync(() -> {
             try {
@@ -403,8 +408,8 @@ public class FightMonitor
             }
         }, scheduler);
 
-        // Schedule API refreshes (includes MMR notification)
-        scheduleApiRefreshes(resolvedOpponent);
+        // Schedule API refreshes (includes MMR notification) - pass the fight bucket
+        scheduleApiRefreshes(resolvedOpponent, fightBucket);
     }
 
     private void submitMatchResult(String result, long fightEndTime, String playerId, String opponentId, int world,
@@ -438,99 +443,234 @@ public class FightMonitor
         });
     }
 
-    private void scheduleApiRefreshes(String opponentName) {
-        log.debug("[PostFight] Scheduling API refresh in 15s for self and opponent={}", opponentName);
+    private void scheduleApiRefreshes(String opponentName, String fightBucket) {
+        log.debug("[PostFight] Scheduling API refresh in 5s for self and opponent={} fightBucket={}", opponentName, fightBucket);
         
-        // Store pre-fight MMR before the refresh happens
-        final Double storedPreFightMmr = preFightMmr;
+        // Get the user's configured display bucket for rank display
+        final String displayBucket = getConfigBucketKey();
         
         scheduler.schedule(() -> {
             try {
-                String bucket = "overall";
                 String selfName = getLocalPlayerName();
-                log.debug("[PostFight] Executing API refresh: self={} opponent={} bucket={}", selfName, opponentName, bucket);
+                log.debug("[PostFight] Executing API refresh: self={} opponent={} displayBucket={} fightBucket={}", 
+                    selfName, opponentName, displayBucket, fightBucket);
                 
-                // Refresh self rank using profile API with MMR notification
                 if (selfName != null) {
-                    fetchProfileWithMmrNotification(selfName, bucket, 3, storedPreFightMmr);
+                    // Refresh rank display using the user's configured bucket
+                    fetchTierWithRetry(selfName, displayBucket, 3);
+                    
+                    // Get MMR delta from match history (more accurate than profile diff)
+                    // First attempt at 5s, second attempt at 15s if first fails (1 retry with 10s delay)
+                    if (config.showMmrChangeNotification() && opponentName != null) {
+                        fetchMmrDeltaFromMatchHistory(selfName, opponentName, displayBucket, 1);
+                    }
                 } else {
                     log.debug("[PostFight] selfName is null, skipping self refresh");
                 }
                 
-                // Refresh opponent rank
+                // Refresh opponent rank using the user's display bucket
                 if (opponentName != null) {
-                    fetchTierWithRetry(opponentName, bucket, 3);
+                    fetchTierWithRetry(opponentName, displayBucket, 3);
                 } else {
                     log.debug("[PostFight] opponentName is null, skipping opponent refresh");
                 }
             } catch(Exception e){
                 log.debug("[PostFight] API refresh exception: {}", e.getMessage());
             }
-        }, 15L, java.util.concurrent.TimeUnit.SECONDS);
+        }, 5L, java.util.concurrent.TimeUnit.SECONDS);
     }
 
     /**
-     * Fetch profile for self with MMR change notification support.
+     * Fetch MMR delta from match history API.
+     * This is more accurate than calculating from profile differences.
+     * First attempt at ~5s after fight, second (final) attempt at ~15s if first fails.
      */
-    private void fetchProfileWithMmrNotification(String playerName, String bucket, int retriesLeft, Double oldMmr) {
-        log.debug("[PostFight] fetchProfileWithMmrNotification: player={} bucket={} retriesLeft={} oldMmr={}", 
-            playerName, bucket, retriesLeft, oldMmr);
+    private void fetchMmrDeltaFromMatchHistory(String selfName, String opponentName, String displayBucket, int retriesLeft) {
+        log.debug("[PostFight] Fetching MMR delta from match history: self={} opponent={} retriesLeft={}", 
+            selfName, opponentName, retriesLeft);
         
-        pvpDataService.getUserProfile(playerName, null, true).thenAccept(profile -> {
-            if (profile != null) {
-                // Extract and set tier in overlay
-                String tier = extractTierFromProfile(profile);
-                if (tier != null && rankOverlay != null) {
-                    rankOverlay.setRankFromApi(playerName, tier);
-                    log.debug("[PostFight] Set rank from API: player={} tier={}", playerName, tier);
-                }
+        // Fetch more matches to handle multi-kill scenarios (up to 10 kills in quick succession)
+        // Bypass cache to ensure we get fresh data with the new match
+        pvpDataService.getPlayerMatches(selfName, null, 15, true).thenAccept(response -> {
+            if (response != null && response.has("matches") && response.get("matches").isJsonArray()) {
+                var matches = response.getAsJsonArray("matches");
                 
-                // Handle MMR change notification
-                if (oldMmr != null && config.showMmrChangeNotification() && rankOverlay != null) {
-                    if (profile.has("mmr") && !profile.get("mmr").isJsonNull()) {
-                        double newMmr = profile.get("mmr").getAsDouble();
-                        rankOverlay.onMmrUpdated(newMmr, oldMmr);
-                        log.debug("[PostFight] MMR notification triggered: old={} new={} delta={}", 
-                            oldMmr, newMmr, newMmr - oldMmr);
+                // Find the most recent match against this opponent
+                for (var element : matches) {
+                    if (!element.isJsonObject()) continue;
+                    JsonObject match = element.getAsJsonObject();
+                    
+                    String matchOpponent = match.has("opponent_id") && !match.get("opponent_id").isJsonNull() 
+                        ? match.get("opponent_id").getAsString() : null;
+                    
+                    // Check if this match is against our opponent (case-insensitive)
+                    if (matchOpponent != null && matchOpponent.equalsIgnoreCase(opponentName)) {
+                        // Found the match - extract MMR delta and bucket
+                        if (match.has("rating_change") && match.get("rating_change").isJsonObject()) {
+                            JsonObject ratingChange = match.getAsJsonObject("rating_change");
+                            
+                            if (ratingChange.has("mmr_delta") && !ratingChange.get("mmr_delta").isJsonNull()) {
+                                double mmrDelta = ratingChange.get("mmr_delta").getAsDouble();
+                                
+                                // Get the actual bucket from the match
+                                String matchBucket = match.has("bucket") && !match.get("bucket").isJsonNull()
+                                    ? match.get("bucket").getAsString() : "nh";
+                                
+                                // Determine if we should show bucket label
+                                String bucketLabel = null;
+                                if (!matchBucket.equalsIgnoreCase(displayBucket) || "overall".equalsIgnoreCase(displayBucket)) {
+                                    bucketLabel = getBucketDisplayName(matchBucket);
+                                }
+                                
+                                // Check result to determine if delta should be negative
+                                String result = match.has("result") && !match.get("result").isJsonNull()
+                                    ? match.get("result").getAsString() : "win";
+                                if ("loss".equalsIgnoreCase(result)) {
+                                    mmrDelta = -Math.abs(mmrDelta);
+                                }
+                                
+                                log.debug("[PostFight] Found match in history: opponent={} bucket={} mmrDelta={} result={} bucketLabel={}", 
+                                    matchOpponent, matchBucket, mmrDelta, result, bucketLabel);
+                                
+                                // Trigger the notification
+                                if (rankOverlay != null) {
+                                    rankOverlay.showMmrDelta(mmrDelta, bucketLabel);
+                                }
+                                return;
+                            }
+                        }
+                        
+                        log.debug("[PostFight] Found match but no rating_change data");
+                        return;
                     }
                 }
+                
+                // Match not found yet - retry if we have retries left (retry after 10s so total is ~15s)
+                if (retriesLeft > 0) {
+                    log.debug("[PostFight] Match not found in history, retrying in 10s ({} left)", retriesLeft - 1);
+                    scheduler.schedule(() -> fetchMmrDeltaFromMatchHistory(selfName, opponentName, displayBucket, retriesLeft - 1),
+                        10L, java.util.concurrent.TimeUnit.SECONDS);
+                } else {
+                    log.debug("[PostFight] Match not found in history after all retries, skipping MMR notification");
+                }
             } else if (retriesLeft > 0) {
-                log.debug("[PostFight] profile is null for player={}, retrying ({} left)", playerName, retriesLeft - 1);
-                scheduler.schedule(() -> fetchProfileWithMmrNotification(playerName, bucket, retriesLeft - 1, oldMmr), 
-                    2L, java.util.concurrent.TimeUnit.SECONDS);
+                log.debug("[PostFight] No matches in response, retrying in 10s ({} left)", retriesLeft - 1);
+                scheduler.schedule(() -> fetchMmrDeltaFromMatchHistory(selfName, opponentName, displayBucket, retriesLeft - 1),
+                    10L, java.util.concurrent.TimeUnit.SECONDS);
             } else {
-                log.debug("[PostFight] FAILED: profile is null for player={}, no retries left", playerName);
+                log.debug("[PostFight] Failed to get matches after all retries");
             }
         }).exceptionally(ex -> {
             if (retriesLeft > 0) {
-                log.debug("[PostFight] Exception for player={}: {}, retrying ({} left)", playerName, ex.getMessage(), retriesLeft - 1);
-                scheduler.schedule(() -> fetchProfileWithMmrNotification(playerName, bucket, retriesLeft - 1, oldMmr), 
-                    2L, java.util.concurrent.TimeUnit.SECONDS);
+                log.debug("[PostFight] Match history exception: {}, retrying in 10s ({} left)", ex.getMessage(), retriesLeft - 1);
+                scheduler.schedule(() -> fetchMmrDeltaFromMatchHistory(selfName, opponentName, displayBucket, retriesLeft - 1),
+                    10L, java.util.concurrent.TimeUnit.SECONDS);
             } else {
-                log.debug("[PostFight] FAILED with exception for player={}: {}, no retries left", playerName, ex.getMessage());
+                log.debug("[PostFight] Match history failed after all retries: {}", ex.getMessage());
             }
             return null;
         });
     }
 
     /**
-     * Extract tier string from user profile response.
+     * Get the bucket key from user config for API calls.
      */
-    private String extractTierFromProfile(JsonObject profile) {
+    private String getConfigBucketKey() {
+        if (config == null) return "overall";
+        var bucket = config.rankBucket();
+        if (bucket == null) return "overall";
+        switch (bucket) {
+            case NH: return "nh";
+            case VENG: return "veng";
+            case MULTI: return "multi";
+            case DMM: return "dmm";
+            case OVERALL:
+            default: return "overall";
+        }
+    }
+
+    /**
+     * Extract tier string from user profile response for a specific bucket.
+     */
+    private String extractTierFromProfile(JsonObject profile, String bucket) {
         if (profile == null) return null;
+        
+        // Try bucket-specific data first
+        if (bucket != null && !bucket.isEmpty() && !"overall".equalsIgnoreCase(bucket)) {
+            if (profile.has("buckets") && profile.get("buckets").isJsonObject()) {
+                JsonObject buckets = profile.getAsJsonObject("buckets");
+                if (buckets.has(bucket) && buckets.get(bucket).isJsonObject()) {
+                    JsonObject bucketData = buckets.getAsJsonObject(bucket);
+                    String tier = extractTierFromBucketData(bucketData);
+                    if (tier != null) return tier;
+                }
+            }
+        }
+        
+        // Fallback to top-level (overall) data
+        return extractTierFromBucketData(profile);
+    }
+
+    /**
+     * Extract tier from a bucket data object.
+     */
+    private String extractTierFromBucketData(JsonObject data) {
+        if (data == null) return null;
         
         String rank = null;
         int division = 0;
         
-        if (profile.has("rank") && !profile.get("rank").isJsonNull()) {
-            rank = profile.get("rank").getAsString();
+        if (data.has("rank") && !data.get("rank").isJsonNull()) {
+            rank = data.get("rank").getAsString();
         }
-        if (profile.has("division") && !profile.get("division").isJsonNull()) {
-            division = profile.get("division").getAsInt();
+        if (data.has("division") && !data.get("division").isJsonNull()) {
+            division = data.get("division").getAsInt();
         }
         
         if (rank != null && !rank.isEmpty()) {
             return division > 0 ? rank + " " + division : rank;
+        }
+        return null;
+    }
+
+    /**
+     * Extract MMR from user profile response for a specific bucket.
+     */
+    private Double extractMmrFromProfile(JsonObject profile, String bucket) {
+        return extractDoubleFieldFromProfile(profile, bucket, "mmr");
+    }
+
+    /**
+     * Extract Sigma (TrueSkill uncertainty) from user profile response for a specific bucket.
+     * Each bucket maintains separate TrueSkill values since they act as separate leaderboards.
+     */
+    private Double extractSigmaFromProfile(JsonObject profile, String bucket) {
+        return extractDoubleFieldFromProfile(profile, bucket, "sigma");
+    }
+
+    /**
+     * Generic helper to extract a Double field from user profile for a specific bucket.
+     * Tries bucket-specific data first, falls back to top-level.
+     */
+    private Double extractDoubleFieldFromProfile(JsonObject profile, String bucket, String fieldName) {
+        if (profile == null || fieldName == null) return null;
+        
+        // Try bucket-specific data first
+        if (bucket != null && !bucket.isEmpty() && !"overall".equalsIgnoreCase(bucket)) {
+            if (profile.has("buckets") && profile.get("buckets").isJsonObject()) {
+                JsonObject buckets = profile.getAsJsonObject("buckets");
+                if (buckets.has(bucket) && buckets.get(bucket).isJsonObject()) {
+                    JsonObject bucketData = buckets.getAsJsonObject(bucket);
+                    if (bucketData.has(fieldName) && !bucketData.get(fieldName).isJsonNull()) {
+                        return bucketData.get(fieldName).getAsDouble();
+                    }
+                }
+            }
+        }
+        
+        // Fallback to top-level field
+        if (profile.has(fieldName) && !profile.get(fieldName).isJsonNull()) {
+            return profile.get(fieldName).getAsDouble();
         }
         return null;
     }
@@ -573,19 +713,6 @@ public class FightMonitor
             v.lastActivityMs = System.currentTimeMillis();
             return v;
         });
-
-        // Store pre-fight MMR for self (only once per fight session)
-        if (preFightMmr == null && config.showMmrChangeNotification()) {
-            String selfName = getLocalPlayerName();
-            if (selfName != null) {
-                pvpDataService.getUserProfile(selfName, null).thenAccept(profile -> {
-                    if (profile != null && profile.has("mmr") && !profile.get("mmr").isJsonNull()) {
-                        preFightMmr = profile.get("mmr").getAsDouble();
-                        log.debug("[Fight] Stored pre-fight MMR for {}: {}", selfName, preFightMmr);
-                    }
-                });
-            }
-        }
 
         if (!shardPresence.containsKey(opponentName))
         {
@@ -675,7 +802,25 @@ public class FightMonitor
     
     private String getLocalPlayerName()
     {
-        try { return client != null && client.getLocalPlayer() != null ? client.getLocalPlayer().getName() : null; } catch (Exception ignore) { return null; }
+        if (client == null)
+        {
+            return null;
+        }
+
+        try
+        {
+            var localPlayer = client.getLocalPlayer();
+            if (localPlayer == null)
+            {
+                return null;
+            }
+            return localPlayer.getName();
+        }
+        catch (Exception e)
+        {
+            log.debug("Failed to get local player name", e);
+            return null;
+        }
     }
 
     private String getSpellbookName(int spellbook)
@@ -686,6 +831,57 @@ public class FightMonitor
             case 2: return "Lunar";
             case 3: return "Arceuus";
             default: return "Unknown";
+        }
+    }
+
+    /**
+     * Determine the bucket for a fight based on server-side logic.
+     * Priority: DMM > Multi > Veng > NH
+     * 
+     * @param world The world number
+     * @param wasInMulti Whether the fight was in multi-combat
+     * @param startSpellbook The spellbook name at fight start
+     * @param endSpellbook The spellbook name at fight end
+     * @return The bucket name: "dmm", "multi", "veng", or "nh"
+     */
+    private String determineBucket(int world, boolean wasInMulti, String startSpellbook, String endSpellbook)
+    {
+        // 1. DMM check - uses cached DMM worlds from PvPDataService
+        if (pvpDataService.isDmmWorld(world))
+        {
+            return "dmm";
+        }
+
+        // 2. Multi check
+        if (wasInMulti)
+        {
+            return "multi";
+        }
+
+        // 3. Veng check - both start AND end spellbook must be Lunar
+        if ("Lunar".equals(startSpellbook) && "Lunar".equals(endSpellbook))
+        {
+            return "veng";
+        }
+
+        // 4. Default to NH
+        return "nh";
+    }
+
+    /**
+     * Get the display name for a bucket (capitalized for UI).
+     */
+    private String getBucketDisplayName(String bucket)
+    {
+        if (bucket == null) return "NH";
+        switch (bucket.toLowerCase())
+        {
+            case "dmm": return "DMM";
+            case "multi": return "Multi";
+            case "veng": return "Veng";
+            case "nh": return "NH";
+            case "overall": return "Overall";
+            default: return bucket.toUpperCase();
         }
     }
     
