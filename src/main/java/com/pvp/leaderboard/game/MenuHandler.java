@@ -89,7 +89,9 @@ public class MenuHandler
             cleaned = cleaned.replaceAll("\\s*\\(level-\\d+\\)$", "");
             // Remove any parenthetical annotation like (Skill 1234)
             cleaned = cleaned.replaceAll("\\([^)]*\\)", "");
-            String playerName = Text.toJagexName(cleaned).replace('\u00A0',' ').trim().replaceAll("\\s+"," ");
+            // Normalize without converting underscores/hyphens to spaces
+            // (RuneScape treats space, underscore, hyphen as equivalent, but we preserve original format)
+            String playerName = cleaned.replace('\u00A0', ' ').trim().replaceAll("\\s+", " ");
 
             if (dashboardPanel != null) {
                 dashboardPanel.loadMatchHistory(playerName);
