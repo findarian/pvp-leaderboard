@@ -36,7 +36,6 @@ tasks.withType(JavaCompile).configureEach {
 }
 
 tasks.register('shadowJar', Jar) {
-	dependsOn configurations.testRuntimeClasspath
 	manifest {
 		attributes('Main-Class': 'com.pvp.leaderboard.PvPLeaderboardPluginTest', 'Multi-Release': true)
 	}
@@ -45,7 +44,8 @@ tasks.register('shadowJar', Jar) {
 	from sourceSets.main.output
 	from sourceSets.test.output
 	from {
-		configurations.testRuntimeClasspath.collect { file ->
+		// Use lenient resolution to skip missing native JARs
+		configurations.testRuntimeClasspath.resolvedConfiguration.lenientConfiguration.files.collect { file ->
 			file.isDirectory() ? file : zipTree(file)
 		}
 	}

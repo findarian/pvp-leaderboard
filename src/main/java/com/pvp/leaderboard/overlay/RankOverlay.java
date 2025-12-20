@@ -29,6 +29,9 @@ public class RankOverlay extends Overlay
     // Displayed ranks cache
     private final ConcurrentHashMap<String, String> displayedRanks = new ConcurrentHashMap<>();
     private final Map<String, Long> displayedRanksTimestamp = new ConcurrentHashMap<>();
+    
+    // API-set ranks that should persist until shard cache refreshes with matching data
+    private final ConcurrentHashMap<String, String> apiSetRanks = new ConcurrentHashMap<>();
 
     // Config change tracking
     private String lastBucketKey = null;
@@ -114,6 +117,7 @@ public class RankOverlay extends Overlay
 
     /**
      * Set rank from API response.
+     * This rank will persist until the shard cache refreshes with matching data.
      */
     public void setRankFromApi(String playerName, String rank)
     {
@@ -124,8 +128,10 @@ public class RankOverlay extends Overlay
         String key = NameUtils.canonicalKey(playerName);
         displayedRanks.put(key, rank);
         displayedRanksTimestamp.put(key, System.currentTimeMillis());
+        // Track this as an API-set rank - persists until shard cache confirms with same rank
+        apiSetRanks.put(key, rank);
         pvpDataService.clearShardNegativeCache(playerName);
-        log.debug("[Overlay] setRankFromApi: key={} rank={}", key, rank);
+        log.debug("[Overlay] setRankFromApi: key={} rank={} (will persist until shard confirms)", key, rank);
     }
 
     /**
@@ -230,6 +236,7 @@ public class RankOverlay extends Overlay
         {
             displayedRanks.clear();
             displayedRanksTimestamp.clear();
+            apiSetRanks.clear();  // Clear API overrides when config changes
             lastBucketKey = currentBucket;
             lastDisplayMode = currentMode;
             selfRankAttempted = false;
@@ -300,6 +307,7 @@ public class RankOverlay extends Overlay
     {
         String bucket = bucketKey(config.rankBucket());
         PvPLeaderboardConfig.RankDisplayMode mode = config.rankDisplayMode();
+        String key = NameUtils.canonicalKey(selfName);
 
         pvpDataService.getShardRankByName(selfName, bucket)
             .thenAccept(sr -> {
@@ -309,23 +317,47 @@ public class RankOverlay extends Overlay
                     return;
                 }
 
-                String rank;
+                String shardRank;
                 if (mode == PvPLeaderboardConfig.RankDisplayMode.RANK_NUMBER)
                 {
-                    rank = sr.rank > 0 ? "Rank " + sr.rank : null;
+                    shardRank = sr.rank > 0 ? "Rank " + sr.rank : null;
                 }
                 else
                 {
-                    rank = sr.tier;
+                    shardRank = sr.tier;
                 }
 
-                if (rank != null)
+                if (shardRank != null)
                 {
-                    String key = NameUtils.canonicalKey(selfName);
-                    displayedRanks.put(key, rank);
-                    displayedRanksTimestamp.put(key, System.currentTimeMillis());
-                    nextSelfRankAllowedAtMs = System.currentTimeMillis() + 60_000L;
-                    log.debug("[Overlay] Self rank fetched: {} = {}", selfName, rank);
+                    long fetchCompletedAt = System.currentTimeMillis();
+                    
+                    // Check if there's an API-set rank that should persist
+                    String apiRank = apiSetRanks.get(key);
+                    if (apiRank != null)
+                    {
+                        if (apiRank.equals(shardRank))
+                        {
+                            // Shard cache has refreshed with matching data - clear the API override
+                            apiSetRanks.remove(key);
+                            displayedRanks.put(key, shardRank);
+                            displayedRanksTimestamp.put(key, fetchCompletedAt);
+                            log.debug("[Overlay] Shard cache refreshed for {}: {} (API override cleared)", selfName, shardRank);
+                        }
+                        else
+                        {
+                            // Shard has stale data - preserve the API-set rank
+                            log.debug("[Overlay] Preserving API rank for {}: {} (shard has stale: {})", 
+                                selfName, apiRank, shardRank);
+                        }
+                    }
+                    else
+                    {
+                        // No API override - use shard data
+                        displayedRanks.put(key, shardRank);
+                        displayedRanksTimestamp.put(key, fetchCompletedAt);
+                        log.debug("[Overlay] Self rank fetched: {} = {}", selfName, shardRank);
+                    }
+                    nextSelfRankAllowedAtMs = fetchCompletedAt + 60_000L;
                 }
             })
             .exceptionally(ex -> {

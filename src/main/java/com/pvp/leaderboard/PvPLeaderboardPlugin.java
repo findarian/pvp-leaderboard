@@ -226,9 +226,9 @@ public class PvPLeaderboardPlugin extends Plugin
 					{
 						rankOverlay.resetLookupStateOnWorldHop();
 					}
-					// Nudge self rank refresh after a short delay so overlay repopulates post-hop
-					// Use tick-based scheduling: wait 3 ticks (approx 1.8s)
-					pendingSelfRankLookupTicks = 3;
+					// Nudge self rank refresh after delay to sync with post-match API updates
+					// Use tick-based scheduling: wait 8 ticks (approx 5s) to match scheduleApiRefreshes timing
+					pendingSelfRankLookupTicks = 8;
 				}
 				catch (Exception ignore) {}
 			}
