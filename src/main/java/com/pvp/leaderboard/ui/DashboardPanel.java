@@ -14,6 +14,7 @@ import net.runelite.client.util.LinkBrowser;
 
 import javax.swing.*;
 import java.awt.*;
+import java.util.concurrent.CompletableFuture;
 
 public class DashboardPanel extends PluginPanel
 {
@@ -208,13 +209,34 @@ public class DashboardPanel extends PluginPanel
             String normalizedId = currentMatchesPlayerId;
             loadPlayerStats(normalizedId);
 
-            pvpDataService.getPlayerMatches(normalizedId, null, MATCHES_PAGE_SIZE).thenAccept(jsonResponse -> {
+            // Determine if this is "self" lookup - use acct-based query for accurate match history
+            // across name changes; use name-based query for searching other players
+            String selfName = plugin != null ? plugin.getLocalPlayerName() : null;
+            String selfNameNormalized = normalizePlayerId(selfName);
+            boolean isSelf = selfNameNormalized != null && selfNameNormalized.equalsIgnoreCase(normalizedId);
+            
+            CompletableFuture<JsonObject> matchesFuture;
+            if (isSelf) {
+                // Self lookup - use acct SHA for accurate history across name changes
+                String selfAcctSha = pvpDataService.getSelfAcctSha();
+                if (selfAcctSha != null && !selfAcctSha.isEmpty()) {
+                    matchesFuture = pvpDataService.getPlayerMatchesByAcct(selfAcctSha, null, MATCHES_PAGE_SIZE, false);
+                } else {
+                    // Fallback to name-based if acct SHA not available
+                    matchesFuture = pvpDataService.getPlayerMatches(normalizedId, null, MATCHES_PAGE_SIZE);
+                }
+            } else {
+                // Other player lookup - use name-based query
+                matchesFuture = pvpDataService.getPlayerMatches(normalizedId, null, MATCHES_PAGE_SIZE);
+            }
+
+            matchesFuture.thenAccept(jsonResponse -> {
                 if (jsonResponse == null) return;
                 
-                        JsonArray matches = jsonResponse.has("matches") && jsonResponse.get("matches").isJsonArray() ? jsonResponse.getAsJsonArray("matches") : new JsonArray();
+                JsonArray matches = jsonResponse.has("matches") && jsonResponse.get("matches").isJsonArray() ? jsonResponse.getAsJsonArray("matches") : new JsonArray();
                 // String nextToken = jsonResponse.has("next_token") && !jsonResponse.get("next_token").isJsonNull() ? jsonResponse.get("next_token").getAsString() : null;
 
-                        SwingUtilities.invokeLater(() -> {
+                SwingUtilities.invokeLater(() -> {
                     updateUiWithMatches(matches);
                 });
             });

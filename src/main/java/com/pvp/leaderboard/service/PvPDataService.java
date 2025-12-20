@@ -228,6 +228,153 @@ public class PvPDataService
 		return future;
 	}
 
+	/**
+	 * Fetch match history by account SHA256 hash (derived from UUID).
+	 * This returns ALL matches across ALL account names for this identity.
+	 * Use this for accurate MMR delta lookups even after name changes.
+	 * 
+	 * @param acctSha SHA256 hash of the player's UUID
+	 * @param nextToken Pagination token (null for first page)
+	 * @param limit Max matches to return
+	 * @param bypassCache If true, skip cache and always fetch fresh data
+	 */
+	public CompletableFuture<JsonObject> getPlayerMatchesByAcct(String acctSha, String nextToken, int limit, boolean bypassCache)
+	{
+		CompletableFuture<JsonObject> future = new CompletableFuture<>();
+
+		if (acctSha == null || acctSha.isEmpty()) {
+			future.complete(new JsonObject());
+			return future;
+		}
+
+		String acctShaLower = acctSha.toLowerCase();
+
+		// Check cache (only for first page, i.e. no nextToken, and if not bypassing)
+		if (!bypassCache && (nextToken == null || nextToken.isEmpty())) {
+			String cacheKey = "matches:acct:" + acctShaLower + ":" + limit;
+			MatchesCacheEntry cached = matchesCache.get(cacheKey);
+			if (cached != null && System.currentTimeMillis() - cached.getTimestamp() <= MATCHES_CACHE_TTL_MS) {
+				future.complete(cached.getResponse().deepCopy());
+				return future;
+			}
+		}
+
+		HttpUrl urlObj = HttpUrl.parse(API_BASE_URL + "/matches");
+		if (urlObj == null) {
+			future.completeExceptionally(new IOException("Invalid base URL"));
+			return future;
+		}
+		
+		// Use 'acct' parameter instead of 'player_id' for SHA256-based lookup
+		HttpUrl.Builder urlBuilder = urlObj.newBuilder()
+			.addQueryParameter("acct", acctShaLower)
+			.addQueryParameter("limit", String.valueOf(limit));
+
+		if (nextToken != null && !nextToken.isEmpty()) {
+			urlBuilder.addQueryParameter("next_token", nextToken);
+		}
+
+		Request.Builder requestBuilder = new Request.Builder()
+			.url(urlBuilder.build())
+			.get();
+
+		// Add client UUID header for API authentication/tracking
+		String clientUuid = clientIdentityService.getClientUniqueId();
+		if (clientUuid != null && !clientUuid.isEmpty()) {
+			requestBuilder.addHeader("X-Client-Unique-Id", clientUuid);
+		}
+
+		Request request = requestBuilder.build();
+		log.debug("[API] Fetching matches by acct: {}", acctShaLower);
+
+		okHttpClient.newCall(request).enqueue(new Callback()
+		{
+			@Override
+			public void onFailure(Call call, IOException e)
+			{
+				// Try serving stale cache if available
+				if (nextToken == null || nextToken.isEmpty()) {
+					String cacheKey = "matches:acct:" + acctShaLower + ":" + limit;
+					MatchesCacheEntry cached = matchesCache.get(cacheKey);
+					if (cached != null) {
+						future.complete(cached.getResponse().deepCopy());
+						return;
+					}
+				}
+				future.completeExceptionally(e);
+			}
+
+			@Override
+			public void onResponse(Call call, Response response) throws IOException
+			{
+				try (Response res = response)
+				{
+					if (!res.isSuccessful())
+					{
+						// Try serving stale cache if available
+						if (nextToken == null || nextToken.isEmpty()) {
+							String cacheKey = "matches:acct:" + acctShaLower + ":" + limit;
+							MatchesCacheEntry cached = matchesCache.get(cacheKey);
+							if (cached != null) {
+								future.complete(cached.getResponse().deepCopy());
+								return;
+							}
+						}
+						future.completeExceptionally(new IOException("API call failed with status: " + res.code()));
+						return;
+					}
+
+					ResponseBody body = res.body();
+					if (body == null)
+					{
+						future.complete(new JsonObject());
+						return;
+					}
+
+					try
+					{
+						String bodyString;
+						try {
+							bodyString = body.string();
+						} catch (IOException cacheEx) {
+							future.complete(new JsonObject());
+							return;
+						}
+						JsonObject json = gson.fromJson(bodyString, JsonObject.class);
+						if (nextToken == null || nextToken.isEmpty()) {
+							String cacheKey = "matches:acct:" + acctShaLower + ":" + limit;
+							matchesCache.put(cacheKey, new MatchesCacheEntry(json.deepCopy(), System.currentTimeMillis()));
+						}
+						future.complete(json);
+					}
+					catch (JsonSyntaxException e)
+					{
+						future.completeExceptionally(e);
+					}
+				}
+			}
+		});
+
+		return future;
+	}
+
+	/**
+	 * Get the account SHA256 hash for the current client's UUID.
+	 * Returns null if UUID is not available.
+	 */
+	public String getSelfAcctSha()
+	{
+		try {
+			String uuid = clientIdentityService.getClientUniqueId();
+			if (uuid != null && !uuid.isEmpty()) {
+				return generateAcctSha(uuid);
+			}
+		} catch (Exception e) {
+			log.debug("[API] Failed to generate self acct SHA: {}", e.getMessage());
+		}
+		return null;
+	}
+
 	public CompletableFuture<JsonObject> getUserProfile(String playerName, String clientUniqueId)
 	{
 		return getUserProfile(playerName, clientUniqueId, false);

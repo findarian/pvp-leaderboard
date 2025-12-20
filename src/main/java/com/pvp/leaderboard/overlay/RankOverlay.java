@@ -466,13 +466,13 @@ public class RankOverlay extends Overlay
         int alpha = (int) (255 * (1.0f - progress));
         int floatOffset = (int) (progress * 30); // Float up 30 pixels
 
-        // Format text: +1.3 (Multi) or -3.2 (NH) when bucket label present
+        // Format text: +1.3 MMR (NH) when bucket label present (auto-switched)
         // Otherwise: +1.3 MMR
         String sign = mmrDelta >= 0 ? "+" : "";
         String text;
         if (bucketLabel != null && !bucketLabel.isEmpty())
         {
-            text = String.format("%s%.1f (%s)", sign, mmrDelta, bucketLabel);
+            text = String.format("%s%.1f MMR (%s)", sign, mmrDelta, bucketLabel);
         }
         else
         {

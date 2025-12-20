@@ -143,6 +143,18 @@ public interface PvPLeaderboardConfig extends Config
 		return RankBucket.OVERALL;
 	}
 
+	@ConfigItem(
+		keyName = "autoSwitchBucket",
+		name = "Auto-switch Leaderboard",
+		description = "Automatically switch leaderboard to match your last fight style (overrides manual selection)",
+		section = overlaySection,
+		position = 3
+	)
+	default boolean autoSwitchBucket()
+	{
+		return true;
+	}
+
 	// ==================== Visual Settings ====================
 
 	@ConfigItem(
