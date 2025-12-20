@@ -312,7 +312,19 @@ public class FightMonitor
                 touchFight(opponentName);
                 inFight = true;
                 if (!inFight) startFight(opponentName);
-                if (client.getVarbitValue(Varbits.MULTICOMBAT_AREA) == 1) wasInMulti = true;
+                
+                // Check if LOCAL player is in multi - if so, mark this fight as multi
+                // This ensures if YOU ever enter multi during the fight, it counts as multi
+                // But if opponent dies in multi while you stayed in singles, it's a singles kill
+                boolean localPlayerInMulti = client.getVarbitValue(Varbits.MULTICOMBAT_AREA) == 1;
+                if (localPlayerInMulti) {
+                    wasInMulti = true;
+                    // Also update the per-opponent FightEntry
+                    FightEntry fe = activeFights.get(opponentName);
+                    if (fe != null) {
+                        fe.markMultiIfNeeded(true);
+                    }
+                }
                 
                 // if (isNewFight)
                 // {
@@ -866,12 +878,16 @@ public class FightMonitor
         if (opponentName == null || opponentName.isEmpty()) return;
         long ts = System.currentTimeMillis() / 1000;
         int sb = client.getVarbitValue(Varbits.SPELLBOOK);
-        boolean multi = client.getVarbitValue(Varbits.MULTICOMBAT_AREA) == 1;
+        boolean localPlayerInMulti = client.getVarbitValue(Varbits.MULTICOMBAT_AREA) == 1;
         int currentTick = client.getTickCount();
         activeFights.compute(opponentName, (k, v) -> {
-            if (v == null) return new FightEntry(ts, sb, multi, currentTick);
+            if (v == null) return new FightEntry(ts, sb, localPlayerInMulti, currentTick);
+            // Update activity timestamps
             v.lastActivityMs = System.currentTimeMillis();
             v.lastActivityTick = currentTick;
+            // If LOCAL player is now in multi, mark this fight as multi
+            // (only tracks if WE enter multi, not if opponent enters multi)
+            v.markMultiIfNeeded(localPlayerInMulti);
             return v;
         });
 
@@ -1025,8 +1041,12 @@ public class FightMonitor
      * Determine the bucket for a fight based on server-side logic.
      * Priority: DMM > Multi > Veng > NH
      * 
+     * Multi-combat classification:
+     * - If YOU (local player) ever entered multi during the fight, it's a "multi" fight
+     * - If you stayed in singles but opponent died in multi, it's still a "singles" kill (NH/Veng)
+     * 
      * @param world The world number
-     * @param wasInMulti Whether the fight was in multi-combat
+     * @param wasInMulti Whether the LOCAL player was ever in multi-combat during this fight
      * @param startSpellbook The spellbook name at fight start
      * @param endSpellbook The spellbook name at fight end
      * @return The bucket name: "dmm", "multi", "veng", or "nh"
@@ -1091,7 +1111,7 @@ public class FightMonitor
     private static class FightEntry {
         final long startTs;
         final int startSpellbook;
-        final boolean wasInMulti;
+        volatile boolean wasInMulti;  // Mutable: set true if LOCAL player ever enters multi during this fight
         volatile long lastActivityMs;
         volatile int lastActivityTick;  // Track per-opponent combat activity in game ticks
         volatile boolean finalized = false;
@@ -1106,6 +1126,16 @@ public class FightMonitor
             wasInMulti = multi;
             lastActivityMs = System.currentTimeMillis();
             lastActivityTick = currentTick;
+        }
+        
+        /**
+         * Mark this fight as multi if the local player entered multi-combat area.
+         * Only updates to true (never reverts to singles once multi is flagged).
+         */
+        void markMultiIfNeeded(boolean isInMulti) {
+            if (isInMulti && !wasInMulti) {
+                wasInMulti = true;
+            }
         }
         
         void addDamageDealt(long amount, int currentTick) {
