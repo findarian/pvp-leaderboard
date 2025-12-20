@@ -475,14 +475,32 @@ public class FightMonitor
         final String selfName = getLocalPlayerName();
         final String idTokenSafe = cognitoAuthService.getStoredIdToken();
 
-        final long startTs = entry.startTs;
+        // Ensure valid timestamps - never send 0
+        // If start wasn't captured, set it to 60 seconds before end
+        // If end is somehow 0, set it to 60 seconds after start
+        long startTs = entry.startTs;
+        long endTs = now;
         
-        // Skip submission if start timestamp wasn't captured (fight was already in progress)
-        if (startTs <= 0)
+        if (startTs <= 0 && endTs > 0)
         {
-            log.debug("[MatchSubmit] Skipping - fight start not captured (startTs={}). Plugin likely started tracking mid-fight.", startTs);
-            return;
+            startTs = endTs - 60;
+            log.debug("[MatchSubmit] Start timestamp missing, using endTs-60: startTs={}", startTs);
         }
+        else if (endTs <= 0 && startTs > 0)
+        {
+            endTs = startTs + 60;
+            log.debug("[MatchSubmit] End timestamp missing, using startTs+60: endTs={}", endTs);
+        }
+        else if (startTs <= 0 && endTs <= 0)
+        {
+            // Both missing - use current time and 60 seconds ago
+            endTs = System.currentTimeMillis() / 1000;
+            startTs = endTs - 60;
+            log.debug("[MatchSubmit] Both timestamps missing, using now and now-60: startTs={} endTs={}", startTs, endTs);
+        }
+        
+        final long finalStartTs = startTs;
+        final long finalEndTs = endTs;
         final int startSb = entry.startSpellbook;
         final boolean wasMulti = entry.wasInMulti;
 
@@ -553,7 +571,7 @@ public class FightMonitor
         // Async Submission
         java.util.concurrent.CompletableFuture.runAsync(() -> {
             try {
-                submitMatchResult(result, now, selfName, resolvedOpponent, world, startTs, startSb, currentSpellbook, wasMulti, idTokenSafe, dmgOut);
+                submitMatchResult(result, finalEndTs, selfName, resolvedOpponent, world, finalStartTs, startSb, currentSpellbook, wasMulti, idTokenSafe, dmgOut);
             } catch (Exception e) {
                 log.debug("[MatchSubmit] EXCEPTION in async submission: {}", e.getMessage(), e);
             }
