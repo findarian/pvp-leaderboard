@@ -928,19 +928,56 @@ public class FightMonitor
     
     // --- Helpers ---
 
+    /**
+     * Resolve who attacked us when we receive inbound damage.
+     * 
+     * CRITICAL: This method should ONLY return existing fight opponents.
+     * We do NOT start new fights from inbound damage because:
+     * - getInteracting() returns true for non-combat actions (trading, item use, following)
+     * - We cannot distinguish player damage from NPC damage by hitsplat alone
+     * - If someone attacks us first, THEY will track the fight from their side
+     * 
+     * New fights are ONLY started via outbound damage (when we attack someone).
+     * This ensures we only track fights where we actually participated in combat.
+     * 
+     * @param localPlayer The local player who received damage
+     * @return The name of an existing fight opponent, or null if none found
+     */
     private String resolveInboundAttacker(Player localPlayer)
     {
         List<Player> players = client.getPlayers();
-        if (players != null) {
-            for (Player other : players) {
-                if (other != null && other != localPlayer && other.getInteracting() == localPlayer) {
-                    return other.getName();
-                }
+        if (players == null) {
+            return existingFightAttacker();
+        }
+
+        // Only return players we already have an active fight with
+        // This ensures inbound damage is only tracked for fights WE initiated via outbound damage
+        for (Player other : players) {
+            if (other == null || other == localPlayer) continue;
+            
+            String otherName = other.getName();
+            if (otherName != null && activeFights.containsKey(otherName)) {
+                // Existing fight opponent - track their damage to us
+                return otherName;
             }
         }
+        
+        // No existing fight opponent found
+        // DO NOT identify new attackers from inbound damage - this causes false positives:
+        // - Trading partner identified as attacker when we take NPC damage
+        // - Player using items on us identified as attacker
+        // - Nearby player in multi-combat identified incorrectly
+        return null;
+    }
+    
+    /**
+     * Get an existing fight attacker from the most recent active fight.
+     * Only returns names of players we already have active fights with.
+     */
+    private String existingFightAttacker()
+    {
         String recent = mostRecentActiveOpponent();
-        if (recent != null) return recent;
-        return lastExactOpponentName;
+        return recent;  // Returns null if no active fights, which is correct
     }
 
     private String mostRecentActiveOpponent()

@@ -197,18 +197,21 @@ public class PvPLeaderboardPlugin extends Plugin
 		{
 			if (gameStateChanged.getGameState() == GameState.LOGGED_IN)
 			{
-				// Default lookup to local player and populate panel
+				// Only load self data if panel is NOT already viewing someone else
+				// This prevents overwriting user's search when they login/hop worlds
 				try
 				{
 					if (client.getLocalPlayer() != null && dashboardPanel != null)
 					{
 						String self = client.getLocalPlayer().getName();
 						if (self != null && !self.trim().isEmpty()) {
-							dashboardPanel.loadMatchHistory(self);
+							// Only load self if no one is currently being viewed
+							// If user searched for another player, don't overwrite it
+							dashboardPanel.loadMatchHistoryIfNotViewing(self);
 						}
 					}
 
-					// Use tick-based scheduling: wait 10 ticks (approx 6.0s) for initial load/sync
+					// Use tick-based scheduling: wait 10 ticks (approx 6.0s) for initial rank overlay sync
 					pendingSelfRankLookupTicks = 10;
 				}
 				catch (Exception ignore) {}
@@ -226,8 +229,7 @@ public class PvPLeaderboardPlugin extends Plugin
 					{
 						rankOverlay.resetLookupStateOnWorldHop();
 					}
-					// Nudge self rank refresh after delay to sync with post-match API updates
-					// Use tick-based scheduling: wait 8 ticks (approx 5s) to match scheduleApiRefreshes timing
+					// Schedule self rank overlay refresh only - don't refresh panel
 					pendingSelfRankLookupTicks = 8;
 				}
 				catch (Exception ignore) {}
@@ -247,7 +249,7 @@ public class PvPLeaderboardPlugin extends Plugin
 			// Delegate logic to FightMonitor
 			fightMonitor.handleGameTick(tick);
 
-			// Handle pending self-rank lookups (tick-based delay logic)
+			// Handle pending self-rank lookups (tick-based delay logic) - for overlay only
 			if (pendingSelfRankLookupTicks > 0)
 			{
 				pendingSelfRankLookupTicks--;
@@ -260,15 +262,7 @@ public class PvPLeaderboardPlugin extends Plugin
 						if (client.getLocalPlayer() != null)
 						{
 							rankOverlay.scheduleSelfRankRefresh(0L);
-							// Also refresh dashboard if needed
-							if (dashboardPanel != null)
-							{
-								String self = client.getLocalPlayer().getName();
-								if (self != null)
-								{
-									dashboardPanel.loadMatchHistory(self);
-								}
-							}
+							// Don't refresh dashboard on tick - only refreshes on explicit search or after 1 hour
 						}
 						else
 						{

@@ -38,8 +38,10 @@ public class DashboardPanel extends PluginPanel
     // State
     private String currentMatchesPlayerId = null;
     private JsonArray allMatches = null;
+    private long lastRefreshTimestamp = 0;
     
     private static final int MATCHES_PAGE_SIZE = 100;
+    private static final long STALE_DATA_THRESHOLD_MS = 60L * 60L * 1000L; // 1 hour
     
     public DashboardPanel(PvPLeaderboardConfig config, PvPLeaderboardPlugin plugin, PvPDataService pvpDataService, CognitoAuthService cognitoAuthService)
     {
@@ -193,10 +195,48 @@ public class DashboardPanel extends PluginPanel
 
     // --- Data Loading ---
     
+    /**
+     * Loads match history only if this is a new player search or data is stale (>1 hour old).
+     * Called from game events - will skip refresh if data is fresh.
+     */
+    public void loadMatchHistoryIfNeeded(String playerId)
+    {
+        String normalizedId = normalizePlayerId(playerId);
+        boolean isSamePlayer = normalizedId != null && normalizedId.equalsIgnoreCase(currentMatchesPlayerId);
+        boolean isDataFresh = (System.currentTimeMillis() - lastRefreshTimestamp) < STALE_DATA_THRESHOLD_MS;
+        
+        // Skip if same player and data is fresh
+        if (isSamePlayer && isDataFresh) {
+            return;
+        }
+        
+        loadMatchHistory(playerId);
+    }
+    
+    /**
+     * Loads match history only if NO player is currently being viewed.
+     * This prevents game events from overwriting a user's active search.
+     * Called on login/world hop - will not switch away from user's search.
+     */
+    public void loadMatchHistoryIfNotViewing(String playerId)
+    {
+        // If user is already viewing someone (searched for a player), don't overwrite
+        if (currentMatchesPlayerId != null && !currentMatchesPlayerId.isEmpty()) {
+            return;
+        }
+        
+        // No one currently viewed - load the requested player (usually self)
+        loadMatchHistory(playerId);
+    }
+    
+    /**
+     * Forces a full refresh of match history. Called from explicit user actions (search, refresh button).
+     */
     public void loadMatchHistory(String playerId)
     {
         currentMatchesPlayerId = normalizePlayerId(playerId);
         playerNameLabel.setText(playerId); // Update header immediately
+        lastRefreshTimestamp = System.currentTimeMillis();
         
         // Update the search box (needed for pvp lookup right-click menu)
         if (loginPanel != null) {
