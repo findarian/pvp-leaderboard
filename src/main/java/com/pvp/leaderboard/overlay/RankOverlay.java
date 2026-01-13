@@ -1,5 +1,6 @@
 package com.pvp.leaderboard.overlay;
 
+import com.pvp.leaderboard.cache.LookedUpPlayerCache;
 import com.pvp.leaderboard.config.PvPLeaderboardConfig;
 import com.pvp.leaderboard.game.PlayerRankEvent;
 import com.pvp.leaderboard.service.PvPDataService;
@@ -25,13 +26,18 @@ public class RankOverlay extends Overlay
     private final Client client;
     private final PvPLeaderboardConfig config;
     private final PvPDataService pvpDataService;
+    private final LookedUpPlayerCache lookedUpPlayerCache;
 
-    // Displayed ranks cache
+    // Displayed ranks cache (for self)
     private final ConcurrentHashMap<String, String> displayedRanks = new ConcurrentHashMap<>();
     private final Map<String, Long> displayedRanksTimestamp = new ConcurrentHashMap<>();
     
     // API-set ranks that should persist until shard cache refreshes with matching data
     private final ConcurrentHashMap<String, String> apiSetRanks = new ConcurrentHashMap<>();
+    
+    // Combat tracking for "hide rank out of combat" feature
+    // Tracks when self was last in combat (milliseconds)
+    private volatile long selfLastCombatMs = 0L;
 
     // Config change tracking
     private String lastBucketKey = null;
@@ -63,16 +69,46 @@ public class RankOverlay extends Overlay
             this.bucketLabel = bucketLabel;
         }
     }
-
+    
     @Inject
-    public RankOverlay(Client client, PvPLeaderboardConfig config, PvPDataService pvpDataService)
+    public RankOverlay(Client client, PvPLeaderboardConfig config, PvPDataService pvpDataService, LookedUpPlayerCache lookedUpPlayerCache)
     {
         this.client = client;
         this.config = config;
         this.pvpDataService = pvpDataService;
+        this.lookedUpPlayerCache = lookedUpPlayerCache;
+        // Always use DYNAMIC for snap-to-player rendering
         setPosition(OverlayPosition.DYNAMIC);
         setLayer(OverlayLayer.ABOVE_SCENE);
         setPriority(Overlay.PRIORITY_HIGHEST);
+    }
+
+    // Fixed height constants for consistent rank positioning regardless of equipment
+    // Using fixed values prevents "jumping" when players wear different helmets/hats
+    private static final int HEAD_HEIGHT = 220;      // At head level (just above player name)
+    private static final int ABOVE_HEAD_HEIGHT = 260; // Above head (higher than head position)
+
+    /**
+     * Get the height offset for rendering rank based on position setting.
+     * Uses fixed height constants instead of player.getLogicalHeight() to ensure
+     * consistent positioning regardless of what equipment the player is wearing.
+     * 
+     * @return The height offset to use with getCanvasTextLocation
+     */
+    private int getHeightOffsetForPosition()
+    {
+        PvPLeaderboardConfig.RankPosition pos = config.rankPosition();
+        
+        switch (pos)
+        {
+            case FEET:
+                return 0; // At feet level
+            case HEAD:
+                return HEAD_HEIGHT; // At head level (just above player name)
+            case ABOVE_HEAD:
+            default:
+                return ABOVE_HEAD_HEIGHT; // Above head (higher than head position)
+        }
     }
 
     @Subscribe
@@ -220,6 +256,99 @@ public class RankOverlay extends Overlay
         return previousMmr;
     }
 
+    /**
+     * Add a player to the looked-up players cache with all their bucket ranks.
+     * Called when "PvP lookup" is clicked on a player.
+     * The rank will be displayed above their head for the duration specified in config.
+     * Also resets the visibility timer so all ranks stay visible.
+     * 
+     * @param playerName The player's name
+     * @param bucketRanks Map of bucket name to rank (e.g., "nh" -> "Dragon 2", "veng" -> "Gold 1")
+     */
+    public void addLookedUpPlayer(String playerName, Map<String, String> bucketRanks)
+    {
+        lookedUpPlayerCache.addPlayer(playerName, bucketRanks);
+        // Reset the visibility timer - looking someone up keeps all ranks visible
+        resetVisibilityTimer();
+    }
+
+    /**
+     * Reset the visibility timer.
+     * Called when combat occurs or when a player is looked up.
+     * This keeps all ranks (self and looked-up players) visible for the configured duration.
+     */
+    public void resetVisibilityTimer()
+    {
+        selfLastCombatMs = System.currentTimeMillis();
+        log.debug("[Overlay] Visibility timer reset");
+    }
+
+    /**
+     * Refresh a looked-up player's rank for a specific bucket after a fight.
+     * This resets the cache timer and updates the rank for that bucket.
+     * 
+     * @param playerName The player's name
+     * @param bucket The bucket to update (e.g., "nh", "veng")
+     * @param newRank The new rank for that bucket
+     */
+    public void refreshLookedUpPlayer(String playerName, String bucket, String newRank)
+    {
+        lookedUpPlayerCache.refreshPlayer(playerName, bucket, newRank);
+    }
+
+    /**
+     * Check if a player is in the looked-up cache (and not expired).
+     */
+    public boolean isPlayerLookedUp(String playerName)
+    {
+        return lookedUpPlayerCache.isPlayerCached(playerName);
+    }
+
+    /**
+     * Get the cached rank for a looked-up player for the specified bucket.
+     * Returns null if player is not in cache, is expired, or has no rank for that bucket.
+     */
+    public String getLookedUpRank(String playerName, String bucket)
+    {
+        return lookedUpPlayerCache.getRank(playerName, bucket);
+    }
+
+    /**
+     * Update the visibility timer when in combat.
+     * Called by FightMonitor when in combat.
+     * This is universal - affects display of all ranks (self and looked-up players).
+     */
+    public void updateSelfCombatTime()
+    {
+        resetVisibilityTimer();
+    }
+
+    /**
+     * Update the visibility timer when in combat with a specific player.
+     * Called by FightMonitor when in combat with a specific player.
+     * Note: Visibility timer is universal, so this just resets the timer.
+     */
+    public void updatePlayerCombatTime(String playerName)
+    {
+        resetVisibilityTimer();
+    }
+
+    /**
+     * Check if ranks should be shown based on combat timeout.
+     * This is universal - applies to both self rank and looked-up player ranks.
+     * Returns true if ranks should be shown, false if they should be hidden.
+     */
+    private boolean shouldShowRanks()
+    {
+        if (!config.hideRankOutOfCombat())
+        {
+            return true; // Feature disabled, always show
+        }
+        long timeoutMs = config.hideRankAfterMinutes() * 60L * 1000L;
+        long now = System.currentTimeMillis();
+        return (now - selfLastCombatMs) <= timeoutMs;
+    }
+
     @Override
     public Dimension render(Graphics2D graphics)
     {
@@ -228,7 +357,7 @@ public class RankOverlay extends Overlay
             return new Dimension(0, 0);
         }
 
-        // Handle config changes
+        // Handle bucket/mode config changes
         String currentBucket = bucketKey(config.rankBucket());
         PvPLeaderboardConfig.RankDisplayMode currentMode = config.rankDisplayMode();
 
@@ -237,6 +366,7 @@ public class RankOverlay extends Overlay
             displayedRanks.clear();
             displayedRanksTimestamp.clear();
             apiSetRanks.clear();  // Clear API overrides when config changes
+            // Note: lookedUpPlayerCache stores all bucket ranks, so no need to re-fetch on bucket change
             lastBucketKey = currentBucket;
             lastDisplayMode = currentMode;
             selfRankAttempted = false;
@@ -275,13 +405,23 @@ public class RankOverlay extends Overlay
         String nameKey = NameUtils.canonicalKey(localName);
         String cachedRank = displayedRanks.get(nameKey);
 
-        // Render rank above local player
-        Point nameLocation = localPlayer.getCanvasTextLocation(graphics, localName, localPlayer.getLogicalHeight() + 40);
-        if (nameLocation != null && cachedRank != null)
+        // Check if we should show ranks (combat timeout)
+        boolean showRanks = shouldShowRanks();
+
+        // Render ranks above looked-up players FIRST (so self rank appears on top)
+        if (config.showLookedUpRanks() && showRanks)
+        {
+            renderLookedUpPlayerRanks(graphics, localPlayer);
+        }
+
+        // Render self rank at the configured snap position (rendered last to appear on top)
+        int heightOffset = getHeightOffsetForPosition();
+        Point nameLocation = localPlayer.getCanvasTextLocation(graphics, localName, heightOffset);
+        if (nameLocation != null && cachedRank != null && showRanks)
         {
             FontMetrics fm = graphics.getFontMetrics();
 
-            Point headLoc = localPlayer.getCanvasTextLocation(graphics, "", localPlayer.getLogicalHeight() + 40);
+            Point headLoc = localPlayer.getCanvasTextLocation(graphics, "", heightOffset);
             int x, y;
             if (headLoc != null)
             {
@@ -301,6 +441,68 @@ public class RankOverlay extends Overlay
         renderMmrChangeNotification(graphics, localPlayer);
 
         return new Dimension(0, 0);
+    }
+
+    /**
+     * Render ranks above all nearby players who have been looked up.
+     * Uses the current bucket setting to display the appropriate rank.
+     */
+    private void renderLookedUpPlayerRanks(Graphics2D g, Player localPlayer)
+    {
+        if (lookedUpPlayerCache.isEmpty())
+        {
+            return;
+        }
+
+        String localName = localPlayer.getName();
+        String currentBucket = bucketKey(config.rankBucket());
+
+        // Iterate through all visible players
+        for (Player player : client.getPlayers())
+        {
+            if (player == null || player == localPlayer)
+            {
+                continue;
+            }
+
+            String playerName = player.getName();
+            if (playerName == null)
+            {
+                continue;
+            }
+
+            // Skip if this is the local player (already rendered above)
+            if (playerName.equals(localName))
+            {
+                continue;
+            }
+
+            // Get cache entry (handles expiration internally)
+            LookedUpPlayerCache.Entry entry = lookedUpPlayerCache.getEntry(playerName);
+            if (entry == null)
+            {
+                continue;
+            }
+
+            // Get the rank for the current bucket
+            String rank = entry.getRankForBucket(currentBucket);
+            if (rank == null || rank.trim().isEmpty())
+            {
+                // No rank for this bucket - don't display anything
+                continue;
+            }
+
+            // Use the same position setting as self rank (opponents default to ABOVE_HEAD in FREE mode)
+            int heightOffset = getHeightOffsetForPosition();
+            Point headLoc = player.getCanvasTextLocation(g, "", heightOffset);
+            if (headLoc != null)
+            {
+                FontMetrics fm = g.getFontMetrics();
+                int x = headLoc.getX() + config.rankOffsetX();
+                int y = headLoc.getY() - fm.getAscent() - 2 + config.rankOffsetY();
+                renderRankText(g, rank, x, y, Math.max(10, config.rankTextSize()));
+            }
+        }
     }
 
     private void fetchRankForSelf(String selfName)

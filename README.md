@@ -13,7 +13,7 @@ This plugin is able to detect smurfs and alt accounts and prevents other people 
 
 ## Configuration
 Open RuneLite configuration for the plugin:
-“pvp lookup” menu toggle (default OFF).
+"PvP lookup" menu toggle (default OFF).
  - You will see this option when right clicking players, and it will open up the side panel for the plugin and submit a request to get a player's rank in each style and their recent match history
 
 MMR change

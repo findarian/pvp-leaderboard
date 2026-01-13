@@ -340,6 +340,13 @@ public class FightMonitor
                 {
                     int currentTick = client.getTickCount();
                     
+                    // Update combat timestamps for "hide rank out of combat" feature
+                    if (rankOverlay != null)
+                    {
+                        rankOverlay.updateSelfCombatTime();
+                        rankOverlay.updatePlayerCombatTime(opponentName);
+                    }
+                    
                     if (hitPlayer == localPlayer)
                     {
                         // Damage received from opponent
@@ -871,6 +878,9 @@ public class FightMonitor
                 log.debug("[PostFight] SUCCESS: tier={} for player={}", tier, playerName);
                 if (rankOverlay != null) {
                     rankOverlay.setRankFromApi(playerName, tier);
+                    // Also refresh the looked-up player cache for this bucket if they're in it
+                    // This ensures fight results update the cached rank and reset the 1-hour timer
+                    rankOverlay.refreshLookedUpPlayer(playerName, bucket, tier);
                 }
             } else if (retriesLeft > 0) {
                 log.debug("[PostFight] tier is null for player={}, retrying ({} left)", playerName, retriesLeft - 1);

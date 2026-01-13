@@ -105,6 +105,34 @@ public interface PvPLeaderboardConfig extends Config
 		}
 	}
 
+	enum RankPosition
+	{
+		FEET
+		{
+			@Override
+			public String toString()
+			{
+				return "Feet";
+			}
+		},
+		HEAD
+		{
+			@Override
+			public String toString()
+			{
+				return "Head";
+			}
+		},
+		ABOVE_HEAD
+		{
+			@Override
+			public String toString()
+			{
+				return "Above Head";
+			}
+		}
+	}
+
 	// ==================== Overlay Settings ====================
 
 	@ConfigItem(
@@ -155,14 +183,63 @@ public interface PvPLeaderboardConfig extends Config
 		return true;
 	}
 
+	@ConfigItem(
+		keyName = "showLookedUpRanks",
+		name = "Show looked-up player ranks",
+		description = "Display ranks above players you've looked up via 'PvP lookup' (cached for 6 hours)",
+		section = overlaySection,
+		position = 4
+	)
+	default boolean showLookedUpRanks()
+	{
+		return true;
+	}
+
+	@ConfigItem(
+		keyName = "hideRankOutOfCombat",
+		name = "Hide ranks when out of combat",
+		description = "When enabled, all ranks (yours and looked-up players) disappear after not being in combat",
+		section = overlaySection,
+		position = 5
+	)
+	default boolean hideRankOutOfCombat()
+	{
+		return true;
+	}
+
+	@ConfigItem(
+		keyName = "hideRankAfterMinutes",
+		name = "Hide ranks after (minutes)",
+		description = "Minutes out of combat before all ranks disappear (1-360)",
+		section = overlaySection,
+		position = 6
+	)
+	@Range(min = 1, max = 360)
+	default int hideRankAfterMinutes()
+	{
+		return 15;
+	}
+
 	// ==================== Visual Settings ====================
+
+	@ConfigItem(
+		keyName = "rankPosition",
+		name = "Rank Position",
+		description = "Where to display the rank relative to your character",
+		section = visualSection,
+		position = 0
+	)
+	default RankPosition rankPosition()
+	{
+		return RankPosition.ABOVE_HEAD;
+	}
 
 	@ConfigItem(
 		keyName = "rankTextSize",
 		name = "Rank Text Size",
 		description = "Text size for rank display",
 		section = visualSection,
-		position = 0
+		position = 1
 	)
 	@Range(min = 10, max = 48)
 	default int rankTextSize()
@@ -175,7 +252,7 @@ public interface PvPLeaderboardConfig extends Config
 		name = "Rank Offset X",
 		description = "Horizontal offset for rank display (pixels)",
 		section = visualSection,
-		position = 1
+		position = 2
 	)
 	@Range(min = -100, max = 100)
 	default int rankOffsetX()
@@ -188,7 +265,7 @@ public interface PvPLeaderboardConfig extends Config
 		name = "Rank Offset Y",
 		description = "Vertical offset for rank display (pixels)",
 		section = visualSection,
-		position = 2
+		position = 3
 	)
 	@Range(min = -100, max = 100)
 	default int rankOffsetY()
@@ -201,7 +278,7 @@ public interface PvPLeaderboardConfig extends Config
 		name = "Colorblind Mode",
 		description = "Makes all rank text white for better visibility",
 		section = visualSection,
-		position = 3
+		position = 4
 	)
 	default boolean colorblindMode()
 	{
@@ -265,8 +342,8 @@ public interface PvPLeaderboardConfig extends Config
 
 	@ConfigItem(
 		keyName = "enablePvpLookupMenu",
-		name = "Enable 'pvp lookup' right-click",
-		description = "Adds the 'pvp lookup' option to player right-click menu",
+		name = "Enable 'PvP lookup' right-click",
+		description = "Adds the 'PvP lookup' option to player right-click menu",
 		section = otherSection,
 		position = 0
 	)
