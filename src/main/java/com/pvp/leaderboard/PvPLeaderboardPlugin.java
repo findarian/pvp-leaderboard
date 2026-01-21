@@ -8,6 +8,7 @@ import com.pvp.leaderboard.overlay.RankOverlay;
 import com.pvp.leaderboard.service.ClientIdentityService;
 import com.pvp.leaderboard.service.CognitoAuthService;
 import com.pvp.leaderboard.service.PvPDataService;
+import com.pvp.leaderboard.service.WhitelistService;
 import com.pvp.leaderboard.ui.DashboardPanel;
 import javax.inject.Inject;
 import lombok.extern.slf4j.Slf4j;
@@ -75,9 +76,13 @@ public class PvPLeaderboardPlugin extends Plugin
 	@Inject
 	private FightMonitor fightMonitor;
 
+	@Inject
+	private WhitelistService whitelistService;
+
 	private DashboardPanel dashboardPanel;
 	private NavigationButton navButton;
 	private int pendingSelfRankLookupTicks = -1;
+	private boolean pendingHeartbeatStart = false;
 
 	public String getClientUniqueId()
 	{
@@ -137,7 +142,7 @@ public class PvPLeaderboardPlugin extends Plugin
 		eventBus.register(rankOverlay);
 
 		// Init menu handler with RankOverlay
-		menuHandler.init(dashboardPanel, rankOverlay, navButton);
+		menuHandler.init(dashboardPanel, navButton);
 
 		// Init fight monitor with RankOverlay for MMR notifications
 		fightMonitor.init(rankOverlay);
@@ -197,29 +202,19 @@ public class PvPLeaderboardPlugin extends Plugin
 		{
 			if (gameStateChanged.getGameState() == GameState.LOGGED_IN)
 			{
-				// Only load self data if panel is NOT already viewing someone else
-				// This prevents overwriting user's search when they login/hop worlds
-				try
-				{
-					if (client.getLocalPlayer() != null && dashboardPanel != null)
-					{
-						String self = client.getLocalPlayer().getName();
-						if (self != null && !self.trim().isEmpty()) {
-							// Only load self if no one is currently being viewed
-							// If user searched for another player, don't overwrite it
-							dashboardPanel.loadMatchHistoryIfNotViewing(self);
-						}
-					}
-
-					// Use tick-based scheduling: wait 10 ticks (approx 6.0s) for initial rank overlay sync
-					pendingSelfRankLookupTicks = 10;
-				}
-				catch (Exception ignore) {}
+				// Use tick-based scheduling: wait 10 ticks (approx 6.0s) for player to fully load
+				// This handles the delay between LOGGED_IN state and player actually being ready
+				pendingSelfRankLookupTicks = 10;
+				pendingHeartbeatStart = true;
+				log.debug("[Plugin] LOGGED_IN - scheduling delayed init in 10 ticks");
 			}
 			else if (gameStateChanged.getGameState() == GameState.LOGIN_SCREEN)
 			{
 				// Fully clear fight state on logout
 				fightMonitor.resetFightState();
+				// Stop heartbeats
+				whitelistService.onLogout();
+				pendingHeartbeatStart = false;
 			}
 			else if (gameStateChanged.getGameState() == GameState.HOPPING || gameStateChanged.getGameState() == GameState.LOADING)
 			{
@@ -249,25 +244,41 @@ public class PvPLeaderboardPlugin extends Plugin
 			// Delegate logic to FightMonitor
 			fightMonitor.handleGameTick(tick);
 
-			// Handle pending self-rank lookups (tick-based delay logic) - for overlay only
+			// Handle pending init after login (tick-based delay for player to be ready)
 			if (pendingSelfRankLookupTicks > 0)
 			{
 				pendingSelfRankLookupTicks--;
 				if (pendingSelfRankLookupTicks == 0)
 				{
 					pendingSelfRankLookupTicks = -1;
-					if (rankOverlay != null)
+					
+					if (client.getLocalPlayer() != null)
 					{
-						// Check if local player is ready before scheduling, otherwise retry briefly
-						if (client.getLocalPlayer() != null)
+						String self = client.getLocalPlayer().getName();
+						
+						if (self != null && !self.trim().isEmpty())
 						{
-							rankOverlay.scheduleSelfRankRefresh(0L);
-							// Don't refresh dashboard on tick - only refreshes on explicit search or after 1 hour
-						}
-						else
-						{
-							// Not ready yet, retry in 5 ticks
-							pendingSelfRankLookupTicks = 5;
+							log.debug("[Plugin] Init complete for: {}", self);
+							
+							// Load dashboard data
+							if (dashboardPanel != null)
+							{
+								dashboardPanel.loadMatchHistoryIfNotViewing(self);
+							}
+							
+							// Schedule self rank refresh for overlay
+							if (rankOverlay != null)
+							{
+								rankOverlay.scheduleSelfRankRefresh(0L);
+							}
+							
+							// Start heartbeat (fires now, then every 5 mins)
+							if (pendingHeartbeatStart)
+							{
+								log.debug("[Plugin] Starting heartbeat for: {}", self);
+								whitelistService.onLogin(self);
+								pendingHeartbeatStart = false;
+							}
 						}
 					}
 				}

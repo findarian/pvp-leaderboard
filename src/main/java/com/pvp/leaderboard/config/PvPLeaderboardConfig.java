@@ -33,9 +33,16 @@ public interface PvPLeaderboardConfig extends Config
 	String notificationSection = "notifications";
 
 	@ConfigSection(
+		name = "Display Ranks",
+		description = "Settings for displaying ranks to and from other players",
+		position = 3
+	)
+	String whitelistSection = "whitelist";
+
+	@ConfigSection(
 		name = "Other",
 		description = "Other settings",
-		position = 3
+		position = 4
 	)
 	String otherSection = "other";
 
@@ -184,23 +191,11 @@ public interface PvPLeaderboardConfig extends Config
 	}
 
 	@ConfigItem(
-		keyName = "showLookedUpRanks",
-		name = "Show looked-up player ranks",
-		description = "Display ranks above players you've looked up via 'PvP lookup' (cached for 6 hours)",
+		keyName = "hideRankOutOfCombat",
+		name = "Hide rank when out of combat",
+		description = "When enabled, your rank disappears after not being in combat",
 		section = overlaySection,
 		position = 4
-	)
-	default boolean showLookedUpRanks()
-	{
-		return true;
-	}
-
-	@ConfigItem(
-		keyName = "hideRankOutOfCombat",
-		name = "Hide ranks when out of combat",
-		description = "When enabled, all ranks (yours and looked-up players) disappear after not being in combat",
-		section = overlaySection,
-		position = 5
 	)
 	default boolean hideRankOutOfCombat()
 	{
@@ -209,10 +204,10 @@ public interface PvPLeaderboardConfig extends Config
 
 	@ConfigItem(
 		keyName = "hideRankAfterMinutes",
-		name = "Hide ranks after (minutes)",
-		description = "Minutes out of combat before all ranks disappear (1-360)",
+		name = "Hide rank after (minutes)",
+		description = "Minutes out of combat before your rank disappears (1-360)",
 		section = overlaySection,
-		position = 6
+		position = 5
 	)
 	@Range(min = 1, max = 360)
 	default int hideRankAfterMinutes()
@@ -348,6 +343,32 @@ public interface PvPLeaderboardConfig extends Config
 		position = 0
 	)
 	default boolean enablePvpLookupMenu()
+	{
+		return true;
+	}
+
+	// ==================== Whitelist Settings ====================
+
+	@ConfigItem(
+		keyName = "showRankToOthers",
+		name = "Show your rank to others",
+		description = "When enabled, your username is shared so others can see your rank above your head",
+		section = whitelistSection,
+		position = 0
+	)
+	default boolean showRankToOthers()
+	{
+		return true;
+	}
+
+	@ConfigItem(
+		keyName = "enableWhitelistRanks",
+		name = "Display other players ranks",
+		description = "Show ranks above other players who have opted in",
+		section = whitelistSection,
+		position = 1
+	)
+	default boolean enableWhitelistRanks()
 	{
 		return true;
 	}
