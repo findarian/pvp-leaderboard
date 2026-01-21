@@ -365,10 +365,12 @@ public class RankOverlay extends Overlay
             displayedRanks.clear();
             displayedRanksTimestamp.clear();
             apiSetRanks.clear();  // Clear API overrides when config changes
+            whitelistPlayerCache.clearLookupCache();  // Re-evaluate players for new bucket
             lastBucketKey = currentBucket;
             lastDisplayMode = currentMode;
             selfRankAttempted = false;
             nextSelfRankAllowedAtMs = 0L;
+            log.debug("[Overlay] Bucket/mode changed to {} / {} - caches cleared", currentBucket, currentMode);
         }
 
         // Get local player
