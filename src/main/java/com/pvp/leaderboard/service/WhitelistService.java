@@ -50,7 +50,7 @@ public class WhitelistService
     
     private static final int MAX_RETRIES = 5;
     private static final long RETRY_DELAY_MS = 15_000L; // 15 seconds
-    private static final long WHITELIST_REFRESH_MS = 60L * 60L * 1000L; // 1 hour
+    private static final long WHITELIST_REFRESH_MS = (9L * 60L + 30L) * 1000L; // 9 minutes 30 seconds
     private static final long HEARTBEAT_INTERVAL_MS = 5L * 60L * 1000L; // 5 minutes
     
     private final OkHttpClient okHttpClient;
@@ -324,9 +324,9 @@ public class WhitelistService
         fetchInProgress.set(false);
         retryCount.set(0);
         
-        log.debug("[Whitelist] Fetch successful, {} players loaded. Next fetch in 1 hour.", cache.size());
+        log.debug("[Whitelist] Fetch successful, {} players loaded. Next fetch in 9:30.", cache.size());
         
-        // Schedule next fetch in 1 hour
+        // Schedule next fetch
         scheduler.schedule(this::startFetch, WHITELIST_REFRESH_MS, TimeUnit.MILLISECONDS);
     }
     
@@ -351,7 +351,7 @@ public class WhitelistService
             fetchInProgress.set(false);
             retryCount.set(0);
             
-            log.debug("[Whitelist] Max retries reached. Next attempt in 1 hour.");
+            log.debug("[Whitelist] Max retries reached. Next attempt in 9:30.");
             scheduler.schedule(this::startFetch, WHITELIST_REFRESH_MS, TimeUnit.MILLISECONDS);
         }
     }
@@ -430,7 +430,6 @@ public class WhitelistService
         if (!buckets.isEmpty())
         {
             result.put(name, new WhitelistPlayerCache.PlayerRanks(buckets));
-            log.debug("[Whitelist] Parsed player: {} with {} buckets", name, buckets.size());
         }
     }
     

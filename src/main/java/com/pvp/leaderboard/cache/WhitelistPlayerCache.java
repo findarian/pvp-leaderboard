@@ -80,6 +80,11 @@ public class WhitelistPlayerCache
     // Player name (canonical/lowercase) -> PlayerRanks (all buckets)
     private final Map<String, PlayerRanks> playerRanks = new ConcurrentHashMap<>();
     
+    // Lookup cache: tracks when each player was last looked up to prevent spam
+    // Key: canonical player name, Value: timestamp of last lookup
+    private final Map<String, Long> lookupCache = new ConcurrentHashMap<>();
+    private static final long LOOKUP_CACHE_TTL_MS = 10 * 60 * 1000L; // 10 minutes
+    
     @Inject
     public WhitelistPlayerCache()
     {
@@ -105,32 +110,79 @@ public class WhitelistPlayerCache
     
     /**
      * Get rank for a specific bucket. No fallback - returns null if bucket not found.
+     * Uses a 10-minute lookup cache to prevent spam lookups every frame.
      */
     public BucketRank getRank(String playerName, String bucket)
     {
+        String key = canonicalize(playerName);
+        long now = System.currentTimeMillis();
+        
+        // Check if we've looked up this player recently
+        Long lastLookup = lookupCache.get(key);
+        boolean isNewLookup = (lastLookup == null || now - lastLookup >= LOOKUP_CACHE_TTL_MS);
+        
         PlayerRanks ranks = getRanks(playerName);
-        if (ranks == null) return null;
-        return ranks.getBucket(bucket);
+        
+        if (ranks == null)
+        {
+            if (isNewLookup)
+            {
+                lookupCache.put(key, now);
+                log.debug("[WhitelistCache] Lookup: {} - not on whitelist (cached for 10min)", playerName);
+            }
+            return null;
+        }
+        
+        BucketRank bucketRank = ranks.getBucket(bucket);
+        
+        if (isNewLookup)
+        {
+            lookupCache.put(key, now);
+            if (bucketRank != null)
+            {
+                log.debug("[WhitelistCache] Lookup: {} [{}] - found: {} (rank #{})", 
+                    playerName, bucket, bucketRank.tier, bucketRank.rank);
+            }
+            else
+            {
+                log.debug("[WhitelistCache] Lookup: {} [{}] - no rank for this bucket", playerName, bucket);
+            }
+        }
+        
+        return bucketRank;
+    }
+    
+    /**
+     * Clear the lookup cache. Called when whitelist data is refreshed.
+     */
+    public void clearLookupCache()
+    {
+        lookupCache.clear();
+        log.debug("[WhitelistCache] Lookup cache cleared");
     }
     
     /**
      * Load whitelist data. Only call this on successful fetch.
-     * Replaces all existing data.
+     * Replaces all existing data and clears the lookup cache.
      */
     public void loadWhitelist(Map<String, PlayerRanks> newData)
     {
         if (newData == null || newData.isEmpty())
         {
+            log.debug("[WhitelistCache] Load called with empty data - preserving existing cache ({} players)", playerRanks.size());
             return; // Don't clear existing data if nothing was fetched
         }
         
+        int oldSize = playerRanks.size();
         playerRanks.clear();
+        lookupCache.clear(); // Clear lookup cache so players get re-looked up with new data
+        
         for (Map.Entry<String, PlayerRanks> entry : newData.entrySet())
         {
             playerRanks.put(canonicalize(entry.getKey()), entry.getValue());
         }
         
-        log.debug("[WhitelistCache] Loaded {} players", playerRanks.size());
+        log.debug("[WhitelistCache] Cache updated: {} -> {} players (lookup cache cleared)", oldSize, playerRanks.size());
     }
     
     /**
