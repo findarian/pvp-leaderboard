@@ -260,6 +260,11 @@ public class PvPLeaderboardPlugin extends Plugin
 						{
 							log.debug("[Plugin] Init complete for: {}", self);
 							
+							// Force refresh DMM worlds on every login so they're cached before any fights occur
+							// This prevents a race condition where the first DMM fight would be
+							// incorrectly classified because the async fetch hadn't completed yet
+							pvpDataService.refreshDmmWorlds();
+							
 							// Load dashboard data
 							if (dashboardPanel != null)
 							{

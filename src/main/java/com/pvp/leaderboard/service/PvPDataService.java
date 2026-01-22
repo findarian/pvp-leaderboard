@@ -921,10 +921,38 @@ public class PvPDataService
     /**
      * Check if a world is a DMM world.
      * Uses cached DMM world list with 1-hour TTL.
+     * On first call with empty cache, blocks briefly to ensure accurate detection.
      */
     public boolean isDmmWorld(int world)
     {
-        refreshDmmWorldsIfNeeded();
+        // If cache is empty and we haven't fetched yet, do a blocking fetch
+        // This ensures the first fight on a DMM world is correctly detected
+        if (dmmWorldsCache.isEmpty() && dmmWorldsCacheTimestamp == 0L && !dmmWorldsFetchInProgress)
+        {
+            log.debug("[DMM] Cache empty on first check, doing synchronous fetch");
+            try
+            {
+                // Block for up to 3 seconds to get the DMM worlds list
+                Set<Integer> worlds = fetchDmmWorlds().get(3, java.util.concurrent.TimeUnit.SECONDS);
+                if (worlds != null && !worlds.isEmpty())
+                {
+                    dmmWorldsCache = worlds;
+                    dmmWorldsCacheTimestamp = System.currentTimeMillis();
+                    log.debug("[DMM] Synchronous fetch succeeded: {}", worlds);
+                }
+            }
+            catch (Exception e)
+            {
+                log.debug("[DMM] Synchronous fetch failed/timed out: {}", e.getMessage());
+                // Mark timestamp so we don't keep blocking on every call
+                dmmWorldsCacheTimestamp = System.currentTimeMillis();
+            }
+        }
+        else
+        {
+            // Normal async refresh for subsequent calls
+            refreshDmmWorldsIfNeeded();
+        }
         return dmmWorldsCache.contains(world);
     }
 
@@ -935,6 +963,18 @@ public class PvPDataService
     {
         refreshDmmWorldsIfNeeded();
         return new HashSet<>(dmmWorldsCache);
+    }
+
+    /**
+     * Force refresh DMM worlds from the API.
+     * Call this on login to ensure fresh data.
+     */
+    public void refreshDmmWorlds()
+    {
+        log.debug("[DMM] Force refreshing DMM worlds on login");
+        // Reset timestamp to force refresh
+        dmmWorldsCacheTimestamp = 0L;
+        refreshDmmWorldsIfNeeded();
     }
 
     /**
