@@ -85,6 +85,9 @@ public class WhitelistPlayerCache
     private final Map<String, Long> lookupCache = new ConcurrentHashMap<>();
     private static final long LOOKUP_CACHE_TTL_MS = 10 * 60 * 1000L; // 10 minutes
     
+    // Timestamp of last successful whitelist refresh (used for comparing freshness vs API-fetched data)
+    private volatile long lastRefreshMs = 0L;
+    
     @Inject
     public WhitelistPlayerCache()
     {
@@ -182,7 +185,18 @@ public class WhitelistPlayerCache
             playerRanks.put(canonicalize(entry.getKey()), entry.getValue());
         }
         
-        log.debug("[WhitelistCache] Cache updated: {} -> {} players (lookup cache cleared)", oldSize, playerRanks.size());
+        lastRefreshMs = System.currentTimeMillis();
+        log.debug("[WhitelistCache] Cache updated: {} -> {} players (lookup cache cleared, refreshMs={})", 
+            oldSize, playerRanks.size(), lastRefreshMs);
+    }
+    
+    /**
+     * Get timestamp of last successful whitelist refresh.
+     * Used to compare freshness against API-fetched data.
+     */
+    public long getLastRefreshMs()
+    {
+        return lastRefreshMs;
     }
     
     /**

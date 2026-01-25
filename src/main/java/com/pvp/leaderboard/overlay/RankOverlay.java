@@ -440,13 +440,17 @@ public class RankOverlay extends Overlay
     
     /**
      * Render ranks for whitelisted players in the scene.
-     * Data comes from cache (fetched separately by WhitelistService).
+     * Only shows ranks for players on the whitelist (opt-in system).
+     * Uses whichever data was fetched most recently:
+     *   - API-fetched rank from a fight (stored in displayedRanks with timestamp)
+     *   - Whitelist cache (refreshed every ~9.5 minutes)
      * Uses current bucket setting, with fallback to overall if bucket not found.
      */
     private void renderWhitelistPlayers(Graphics2D graphics, Player localPlayer, String bucket,
                                         PvPLeaderboardConfig.RankDisplayMode mode, int heightOffset)
     {
         String localName = localPlayer.getName();
+        long whitelistRefreshMs = whitelistPlayerCache.getLastRefreshMs();
         
         for (Player player : client.getPlayers())
         {
@@ -455,20 +459,51 @@ public class RankOverlay extends Overlay
             String playerName = player.getName();
             if (playerName == null || playerName.equals(localName)) continue;
             
-            // Get rank from cache for current bucket (falls back to overall)
-            WhitelistPlayerCache.BucketRank rank = whitelistPlayerCache.getRank(playerName, bucket);
-            if (rank == null) continue;
+            // Only show ranks for whitelisted players (opt-in system)
+            if (!whitelistPlayerCache.isWhitelisted(playerName)) continue;
             
-            // Format for display
-            String displayRank;
-            if (mode == PvPLeaderboardConfig.RankDisplayMode.RANK_NUMBER)
+            String displayRank = null;
+            String nameKey = NameUtils.canonicalKey(playerName);
+            
+            // Get API-fetched rank and its timestamp
+            String apiRank = displayedRanks.get(nameKey);
+            Long apiTimestamp = displayedRanksTimestamp.get(nameKey);
+            
+            // Get whitelist cache rank
+            WhitelistPlayerCache.BucketRank whitelistRank = whitelistPlayerCache.getRank(playerName, bucket);
+            String formattedWhitelistRank = null;
+            if (whitelistRank != null)
             {
-                displayRank = rank.rank > 0 ? "Rank " + rank.rank : null;
+                if (mode == PvPLeaderboardConfig.RankDisplayMode.RANK_NUMBER)
+                {
+                    formattedWhitelistRank = whitelistRank.rank > 0 ? "Rank " + whitelistRank.rank : null;
+                }
+                else
+                {
+                    formattedWhitelistRank = whitelistRank.getFormattedTier();
+                }
             }
-            else
+            
+            // Use whichever was fetched most recently
+            if (apiRank != null && apiTimestamp != null)
             {
-                displayRank = rank.getFormattedTier();
+                if (whitelistRefreshMs > apiTimestamp && formattedWhitelistRank != null)
+                {
+                    // Whitelist was refreshed after API fetch - use whitelist (newer)
+                    displayRank = formattedWhitelistRank;
+                }
+                else
+                {
+                    // API fetch is more recent - use API data
+                    displayRank = apiRank;
+                }
             }
+            else if (formattedWhitelistRank != null)
+            {
+                // No API data - use whitelist cache
+                displayRank = formattedWhitelistRank;
+            }
+            
             if (displayRank == null) continue;
             
             // Get player's screen position
