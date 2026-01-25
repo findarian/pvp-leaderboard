@@ -652,10 +652,9 @@ public class FightMonitor
                     log.debug("[PostFight] opponentName is null, skipping opponent refresh");
                 }
                 
-                // Trigger overlay refresh after API calls complete
-                if (rankOverlay != null) {
-                    rankOverlay.scheduleSelfRankRefresh(0L);
-                }
+                // NOTE: No need to call scheduleSelfRankRefresh here.
+                // fetchTierWithRetry already calls setRankFromApi which updates displayedRanks directly.
+                // Calling scheduleSelfRankRefresh would just trigger another redundant API call.
             } catch(Exception e){
                 log.debug("[PostFight] API refresh exception: {}", e.getMessage());
             }
