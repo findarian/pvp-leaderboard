@@ -322,7 +322,29 @@ public class DashboardPanel extends PluginPanel
             pvpDataService.getUserProfile(playerId, clientUniqueId).thenAccept(stats -> {
                 if (stats == null) return;
                 SwingUtilities.invokeLater(() -> updateProgressBars(stats));
-                        });
+                
+                // Extract and pass cumulative stats to PerformanceStatsPanel
+                if (stats.has("cumulative_stats")) {
+                    JsonObject cs = stats.getAsJsonObject("cumulative_stats");
+                    SwingUtilities.invokeLater(() -> {
+                        performanceStatsPanel.setCumulativeStats(cs);
+                    });
+                }
+                
+                // Extract and pass opponent rank stats to PerformanceStatsPanel
+                // Prefer new per-bucket format, fallback to flat format
+                if (stats.has("opponent_rank_stats_by_bucket")) {
+                    JsonObject ors = stats.getAsJsonObject("opponent_rank_stats_by_bucket");
+                    SwingUtilities.invokeLater(() -> {
+                        performanceStatsPanel.setOpponentRankStats(ors);
+                    });
+                } else if (stats.has("opponent_rank_stats")) {
+                    JsonObject ors = stats.getAsJsonObject("opponent_rank_stats");
+                    SwingUtilities.invokeLater(() -> {
+                        performanceStatsPanel.setOpponentRankStats(ors);
+                    });
+                }
+            });
         } catch (Exception ignore) {}
     }
     
