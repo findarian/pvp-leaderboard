@@ -587,7 +587,7 @@ public class FightMonitor
         // Schedule API refreshes in 5s (gives backend time to process the match)
         // Uses the determined bucket (fight bucket if auto-switch, manual selection otherwise)
         // Show bucket label in MMR notification when fight bucket differs from user's selection
-        scheduleApiRefreshes(resolvedOpponent, apiRefreshBucket, showBucketInMmr);
+        scheduleApiRefreshes(resolvedOpponent, apiRefreshBucket, showBucketInMmr, finalEndTs);
     }
 
     private void submitMatchResult(String result, long fightEndTime, String playerId, String opponentId, int world,
@@ -621,9 +621,9 @@ public class FightMonitor
         });
     }
 
-    private void scheduleApiRefreshes(String opponentName, String displayBucket, boolean showBucketInMmr) {
-        log.debug("[PostFight] Scheduling API refresh in 5s for self and opponent={} bucket={} showBucket={}", 
-            opponentName, displayBucket, showBucketInMmr);
+    private void scheduleApiRefreshes(String opponentName, String displayBucket, boolean showBucketInMmr, long submittedMatchEndTs) {
+        log.debug("[PostFight] Scheduling API refresh in 5s for self and opponent={} bucket={} showBucket={} matchTs={}", 
+            opponentName, displayBucket, showBucketInMmr, submittedMatchEndTs);
         
         scheduler.schedule(() -> {
             try {
@@ -639,7 +639,7 @@ public class FightMonitor
                     // First attempt at 5s, second attempt at 15s if first fails (1 retry with 10s delay)
                     // Only show bucket label in notification if we auto-switched
                     if (config.showMmrChangeNotification() && opponentName != null) {
-                        fetchMmrDeltaFromMatchHistory(selfName, opponentName, displayBucket, showBucketInMmr, 1);
+                        fetchMmrDeltaFromMatchHistory(selfName, opponentName, displayBucket, showBucketInMmr, 1, submittedMatchEndTs);
                     }
                 } else {
                     log.debug("[PostFight] selfName is null, skipping self refresh");
@@ -668,10 +668,11 @@ public class FightMonitor
      * First attempt at ~5s after fight, second (final) attempt at ~15s if first fails.
      * 
      * @param showBucketLabel If true, include bucket name in MMR notification (used when auto-switch occurred)
+     * @param submittedMatchEndTs The fight_end_ts of the submitted match, used to validate we got the correct match
      */
-    private void fetchMmrDeltaFromMatchHistory(String selfName, String opponentName, String displayBucket, boolean showBucketLabel, int retriesLeft) {
-        log.debug("[PostFight] Fetching MMR delta from match history: self={} opponent={} showBucket={} retriesLeft={}", 
-            selfName, opponentName, showBucketLabel, retriesLeft);
+    private void fetchMmrDeltaFromMatchHistory(String selfName, String opponentName, String displayBucket, boolean showBucketLabel, int retriesLeft, long submittedMatchEndTs) {
+        log.debug("[PostFight] Fetching MMR delta from match history: self={} opponent={} showBucket={} retriesLeft={} submittedTs={}", 
+            selfName, opponentName, showBucketLabel, retriesLeft, submittedMatchEndTs);
         
         // Use account SHA for accurate match history across name changes
         // This ensures MMR delta is correct even if the player changed their name
@@ -703,6 +704,23 @@ public class FightMonitor
                     
                     // Check if this match is against our opponent (case-insensitive)
                     if (matchOpponent != null && matchOpponent.equalsIgnoreCase(opponentName)) {
+                        // Validate match timestamp is within 10 seconds of when we submitted
+                        // This prevents grabbing an old match if the new one isn't processed yet
+                        long matchWhen = match.has("when") && !match.get("when").isJsonNull() 
+                            ? match.get("when").getAsLong() : 0;
+                        long timeDiff = Math.abs(matchWhen - submittedMatchEndTs);
+                        
+                        if (timeDiff > 10) {
+                            log.debug("[PostFight] Match timestamp mismatch: matchWhen={} submittedTs={} diff={}s (>10s), skipping this match", 
+                                matchWhen, submittedMatchEndTs, timeDiff);
+                            // This is likely an old match, not the one we just submitted
+                            // Continue searching or retry later
+                            continue;
+                        }
+                        
+                        log.debug("[PostFight] Match timestamp validated: matchWhen={} submittedTs={} diff={}s", 
+                            matchWhen, submittedMatchEndTs, timeDiff);
+                        
                         // Found the match - extract MMR delta and bucket
                         if (match.has("rating_change") && match.get("rating_change").isJsonObject()) {
                             JsonObject ratingChange = match.getAsJsonObject("rating_change");
@@ -743,14 +761,14 @@ public class FightMonitor
                 // Match not found yet - retry if we have retries left (retry after 10s so total is ~15s)
                 if (retriesLeft > 0) {
                     log.debug("[PostFight] Match not found in history, retrying in 10s ({} left)", retriesLeft - 1);
-                    scheduler.schedule(() -> fetchMmrDeltaFromMatchHistory(selfName, opponentName, displayBucket, showBucketLabel, retriesLeft - 1),
+                    scheduler.schedule(() -> fetchMmrDeltaFromMatchHistory(selfName, opponentName, displayBucket, showBucketLabel, retriesLeft - 1, submittedMatchEndTs),
                         10L, java.util.concurrent.TimeUnit.SECONDS);
                 } else {
                     log.debug("[PostFight] Match not found in history after all retries, skipping MMR notification");
                 }
             } else if (retriesLeft > 0) {
                 log.debug("[PostFight] No matches in response, retrying in 10s ({} left)", retriesLeft - 1);
-                scheduler.schedule(() -> fetchMmrDeltaFromMatchHistory(selfName, opponentName, displayBucket, showBucketLabel, retriesLeft - 1),
+                scheduler.schedule(() -> fetchMmrDeltaFromMatchHistory(selfName, opponentName, displayBucket, showBucketLabel, retriesLeft - 1, submittedMatchEndTs),
                     10L, java.util.concurrent.TimeUnit.SECONDS);
             } else {
                 log.debug("[PostFight] Failed to get matches after all retries");
@@ -758,7 +776,7 @@ public class FightMonitor
         }).exceptionally(ex -> {
             if (retriesLeft > 0) {
                 log.debug("[PostFight] Match history exception: {}, retrying in 10s ({} left)", ex.getMessage(), retriesLeft - 1);
-                scheduler.schedule(() -> fetchMmrDeltaFromMatchHistory(selfName, opponentName, displayBucket, showBucketLabel, retriesLeft - 1),
+                scheduler.schedule(() -> fetchMmrDeltaFromMatchHistory(selfName, opponentName, displayBucket, showBucketLabel, retriesLeft - 1, submittedMatchEndTs),
                     10L, java.util.concurrent.TimeUnit.SECONDS);
             } else {
                 log.debug("[PostFight] Match history failed after all retries: {}", ex.getMessage());

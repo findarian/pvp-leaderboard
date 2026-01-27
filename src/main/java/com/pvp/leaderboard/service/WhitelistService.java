@@ -19,6 +19,7 @@ import java.io.IOException;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -69,6 +70,7 @@ public class WhitelistService
     // Heartbeat state
     private volatile long lastHeartbeatMs = 0L;
     private volatile String currentUsername = null;
+    private volatile ScheduledFuture<?> scheduledHeartbeat = null;
     
     @Inject
     public WhitelistService(OkHttpClient okHttpClient, Gson gson, PvPLeaderboardConfig config,
@@ -99,6 +101,9 @@ public class WhitelistService
         this.currentUsername = username.trim();
         log.debug("[Heartbeat] Player logged in: {} - starting heartbeat cycle", currentUsername);
         
+        // Cancel any existing heartbeat schedule to prevent chain accumulation
+        cancelScheduledHeartbeat();
+        
         // Send immediate heartbeat on login
         log.debug("[Heartbeat] Sending initial heartbeat on login");
         sendHeartbeat();
@@ -127,6 +132,21 @@ public class WhitelistService
     {
         log.debug("[Heartbeat] Player logged out - stopping heartbeat cycle");
         currentUsername = null;
+        cancelScheduledHeartbeat();
+    }
+    
+    /**
+     * Cancel any scheduled heartbeat to prevent chain accumulation.
+     */
+    private void cancelScheduledHeartbeat()
+    {
+        ScheduledFuture<?> scheduled = scheduledHeartbeat;
+        if (scheduled != null && !scheduled.isDone())
+        {
+            scheduled.cancel(false);
+            log.debug("[Heartbeat] Cancelled existing scheduled heartbeat");
+        }
+        scheduledHeartbeat = null;
     }
     
     /**
@@ -135,7 +155,7 @@ public class WhitelistService
     private void scheduleHeartbeat()
     {
         log.debug("[Heartbeat] Scheduling next heartbeat in {} minutes", HEARTBEAT_INTERVAL_MS / 60000);
-        scheduler.schedule(() -> {
+        scheduledHeartbeat = scheduler.schedule(() -> {
             if (currentUsername != null)
             {
                 log.debug("[Heartbeat] Scheduled heartbeat triggered for user: {}", currentUsername);
