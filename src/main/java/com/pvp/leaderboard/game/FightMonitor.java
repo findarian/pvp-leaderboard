@@ -390,6 +390,7 @@ public class FightMonitor
 
     public void handleActorDeath(ActorDeath event)
     {
+        long t0 = System.nanoTime();
         try
         {
             if (!(event.getActor() instanceof Player)) return;
@@ -398,44 +399,30 @@ public class FightMonitor
 
             if (player == localPlayer)
             {
-                // Self death - find who killed us
-                // Priority: whoever dealt the most damage to us gets the kill credit
-                // This is the best approximation since the actual killer might have the plugin
-                // and would submit the correct result from their side
                 String killer = findKillerByDamage();
                 
-                // Fallbacks if no damage was tracked
                 if (killer == null) killer = findActualKiller(localPlayer);
                 if (killer == null) killer = opponent;
                 if (killer == null) killer = mostRecentActiveOpponent();
 
-                // Log the killer determination for debugging
-                // log.debug("[Death] Self death - killer={} (determined by most damage received)", killer);
-
-                // Submit loss against the killer
                 if (killer != null)
                 {
                     endFightFor(killer, "loss");
                 }
                 
-                // Clear remaining fights without submitting (we died, they didn't kill us)
                 for (String remaining : new ArrayList<>(activeFights.keySet()))
                 {
                     clearFightFor(remaining);
                 }
                 
-                // Ensure full reset after self-death
                 resetFightState();
             }
             else
             {
-                // Other player death
                 String name = player.getName();
                 if (name != null)
                 {
                     FightEntry fe = activeFights.get(name);
-                    // Only count as a win if we have an active fight AND dealt actual damage
-                    // This prevents counting kills where we just clicked on someone but didn't attack
                     if (fe != null && fe.damageDealt.get() > 0)
                     {
                         endFightFor(name, "win");
@@ -445,7 +432,15 @@ public class FightMonitor
         }
         catch (Exception e)
         {
-            // log.debug("Uncaught exception in FightMonitor.onActorDeath", e);
+            log.debug("[Death] Exception in handleActorDeath: {}", e.getMessage(), e);
+        }
+        finally
+        {
+            long elapsed = (System.nanoTime() - t0) / 1_000_000;
+            if (elapsed > 5)
+            {
+                log.debug("[Death][PERF] handleActorDeath took {}ms (>5ms threshold)", elapsed);
+            }
         }
     }
 
@@ -474,7 +469,8 @@ public class FightMonitor
 
     private void finalizeFight(String opponentName, String result, FightEntry entry)
     {
-        if (entry == null) return;  // Require valid FightEntry for accurate data
+        long t0 = System.nanoTime();
+        if (entry == null) return;
         
         final int currentSpellbook = client.getVarbitValue(Varbits.SPELLBOOK);
         final int world = client.getWorld();
@@ -540,13 +536,14 @@ public class FightMonitor
             
             if (fightBucketEnum != null)
             {
-                // Always switch to the fight bucket, even if user manually changed it
-                // This ensures the leaderboard always reflects the current fight style
                 if (fightBucketDiffers)
                 {
                     log.debug("[AutoSwitch] Switching leaderboard from {} to {}", currentBucket, fightBucketEnum);
-                    configManager.setConfiguration("PvPLeaderboard", "rankBucket", fightBucketEnum.name());
-                    showBucketInMmr = true;  // Show bucket label since we switched
+                    // Defer config write off the game thread — setConfiguration triggers
+                    // config change listeners, panel rebuilds, and disk I/O synchronously
+                    final PvPLeaderboardConfig.RankBucket targetBucket = fightBucketEnum;
+                    scheduler.execute(() -> configManager.setConfiguration("PvPLeaderboard", "rankBucket", targetBucket.name()));
+                    showBucketInMmr = true;
                 }
                 else
                 {
@@ -575,22 +572,19 @@ public class FightMonitor
             }
         }
 
-        // Async Submission
-        java.util.concurrent.CompletableFuture.runAsync(() -> {
-            try {
-                submitMatchResult(result, finalEndTs, selfName, resolvedOpponent, world, finalStartTs, startSb, currentSpellbook, wasMulti, idTokenSafe, dmgOut);
-            } catch (Exception e) {
-                log.debug("[MatchSubmit] EXCEPTION in async submission: {}", e.getMessage(), e);
-            }
-        }, scheduler);
+        // Async Submission — chain MMR fetch off the 202 response
+        final String finalApiRefreshBucket = apiRefreshBucket;
+        final boolean finalShowBucketInMmr = showBucketInMmr;
+        submitMatchAndFetchMmr(result, finalEndTs, selfName, resolvedOpponent, world, finalStartTs, startSb, currentSpellbook, wasMulti, idTokenSafe, dmgOut, finalApiRefreshBucket, finalShowBucketInMmr);
 
-        // Schedule API refreshes in 5s (gives backend time to process the match)
-        // Uses the determined bucket (fight bucket if auto-switch, manual selection otherwise)
-        // Show bucket label in MMR notification when fight bucket differs from user's selection
-        scheduleApiRefreshes(resolvedOpponent, apiRefreshBucket, showBucketInMmr, finalEndTs);
+        // Tier refreshes for overlay (don't depend on match being processed)
+        scheduleTierRefreshes(resolvedOpponent, apiRefreshBucket);
+        
+        long elapsed = (System.nanoTime() - t0) / 1_000_000;
+        log.debug("[Death][PERF] finalizeFight took {}ms for opponent={} result={}", elapsed, opponentName, result);
     }
 
-    private void submitMatchResult(String result, long fightEndTime, String playerId, String opponentId, int world,
+    private CompletableFuture<Boolean> submitMatchResult(String result, long fightEndTime, String playerId, String opponentId, int world,
                                    long fightStartTs, int fightStartSpellbookLocal, int fightEndSpellbookLocal,
                                    boolean wasInMultiLocal, String idTokenLocal, long damageToOpponentLocal)
     {
@@ -612,51 +606,73 @@ public class FightMonitor
         log.debug("[MatchSubmit] Submitting: player={} opponent={} result={} world={} startTs={} endTs={} dmgOut={} multi={} hasToken={}",
                 playerId, opponentId, result, world, fightStartTs, fightEndTime, damageToOpponentLocal, wasInMultiLocal, (idTokenLocal != null && !idTokenLocal.isEmpty()));
 
-        matchResultService.submitMatchResult(match).thenAccept(success -> {
+        return matchResultService.submitMatchResult(match).thenApply(success -> {
             if (success) {
                 log.debug("[MatchSubmit] SUCCESS: match submitted for player={} vs opponent={} result={}", playerId, opponentId, result);
             } else {
                 log.debug("[MatchSubmit] FAILED: match submission failed for player={} vs opponent={} result={}", playerId, opponentId, result);
             }
+            return success;
         });
     }
 
-    private void scheduleApiRefreshes(String opponentName, String displayBucket, boolean showBucketInMmr, long submittedMatchEndTs) {
-        log.debug("[PostFight] Scheduling API refresh in 5s for self and opponent={} bucket={} showBucket={} matchTs={}", 
-            opponentName, displayBucket, showBucketInMmr, submittedMatchEndTs);
-        
+    /**
+     * Submit the match, then chain the MMR delta fetch off the 202 response.
+     * This ensures the fetch always happens AFTER the server acknowledges the submission,
+     * regardless of scheduler congestion from other plugins.
+     */
+    private void submitMatchAndFetchMmr(String result, long endTs, String selfName, String opponent, int world,
+                                         long startTs, int startSb, int endSb, boolean wasMulti,
+                                         String idToken, long dmgOut, String displayBucket, boolean showBucketInMmr) {
+        log.debug("[PostFight] Submitting match and chaining MMR fetch for opponent={}", opponent);
+
+        CompletableFuture<Boolean> submissionFuture = CompletableFuture.supplyAsync(() -> {
+            try {
+                return submitMatchResult(result, endTs, selfName, opponent, world, startTs, startSb, endSb, wasMulti, idToken, dmgOut);
+            } catch (Exception e) {
+                log.debug("[MatchSubmit] EXCEPTION in async submission: {}", e.getMessage(), e);
+                return CompletableFuture.completedFuture(false);
+            }
+        }, scheduler).thenCompose(f -> f);
+
+        submissionFuture.thenAccept(success -> {
+            if (config.showMmrChangeNotification() && opponent != null && selfName != null) {
+                long delay = 1L;
+                log.debug("[PostFight] Submission done (success={}), scheduling MMR fetch in {}s for opponent={}", success, delay, opponent);
+                scheduler.schedule(() -> {
+                    fetchMmrDeltaFromMatchHistory(selfName, opponent, displayBucket, showBucketInMmr, 25, endTs);
+                }, delay, java.util.concurrent.TimeUnit.SECONDS);
+            }
+        }).exceptionally(ex -> {
+            log.debug("[PostFight] Submission future failed, scheduling fallback MMR fetch: {}", ex.getMessage());
+            if (config.showMmrChangeNotification() && opponent != null && selfName != null) {
+                scheduler.schedule(() -> {
+                    fetchMmrDeltaFromMatchHistory(selfName, opponent, displayBucket, showBucketInMmr, 25, endTs);
+                }, 1L, java.util.concurrent.TimeUnit.SECONDS);
+            }
+            return null;
+        });
+    }
+
+    /**
+     * Refresh tier/rank display for self and opponent.
+     * Runs 5s after fight end — independent of match submission.
+     */
+    private void scheduleTierRefreshes(String opponentName, String displayBucket) {
         scheduler.schedule(() -> {
             try {
                 String selfName = getLocalPlayerName();
-                log.debug("[PostFight] Executing API refresh: self={} opponent={} bucket={}", 
+                log.debug("[PostFight] Executing tier refresh: self={} opponent={} bucket={}", 
                     selfName, opponentName, displayBucket);
                 
                 if (selfName != null) {
-                    // Refresh rank display using the specified bucket
                     fetchTierWithRetry(selfName, displayBucket, 3);
-                    
-                    // Get MMR delta from match history (more accurate than profile diff)
-                    // First attempt at 5s, second attempt at 15s if first fails (1 retry with 10s delay)
-                    // Only show bucket label in notification if we auto-switched
-                    if (config.showMmrChangeNotification() && opponentName != null) {
-                        fetchMmrDeltaFromMatchHistory(selfName, opponentName, displayBucket, showBucketInMmr, 1, submittedMatchEndTs);
-                    }
-                } else {
-                    log.debug("[PostFight] selfName is null, skipping self refresh");
                 }
-                
-                // Refresh opponent rank using the same bucket
                 if (opponentName != null) {
                     fetchTierWithRetry(opponentName, displayBucket, 3);
-                } else {
-                    log.debug("[PostFight] opponentName is null, skipping opponent refresh");
                 }
-                
-                // NOTE: No need to call scheduleSelfRankRefresh here.
-                // fetchTierWithRetry already calls setRankFromApi which updates displayedRanks directly.
-                // Calling scheduleSelfRankRefresh would just trigger another redundant API call.
-            } catch(Exception e){
-                log.debug("[PostFight] API refresh exception: {}", e.getMessage());
+            } catch (Exception e) {
+                log.debug("[PostFight] Tier refresh exception: {}", e.getMessage());
             }
         }, 5L, java.util.concurrent.TimeUnit.SECONDS);
     }
@@ -694,7 +710,20 @@ public class FightMonitor
             if (response != null && response.has("matches") && response.get("matches").isJsonArray()) {
                 var matches = response.getAsJsonArray("matches");
                 
-                // Find the most recent match against this opponent
+                log.debug("[PostFight] Got {} matches from history, looking for opponent='{}' near ts={}", 
+                    matches.size(), opponentName, submittedMatchEndTs);
+                
+                // Log first few matches for diagnostics
+                int diagCount = Math.min(matches.size(), 5);
+                for (int i = 0; i < diagCount; i++) {
+                    if (!matches.get(i).isJsonObject()) continue;
+                    JsonObject m = matches.get(i).getAsJsonObject();
+                    String mOpp = m.has("opponent_id") && !m.get("opponent_id").isJsonNull() ? m.get("opponent_id").getAsString() : "?";
+                    long mWhen = m.has("when") && !m.get("when").isJsonNull() ? m.get("when").getAsLong() : 0;
+                    boolean hasRating = m.has("rating_change") && m.get("rating_change").isJsonObject();
+                    log.debug("[PostFight]   match[{}]: opponent='{}' when={} hasRatingChange={}", i, mOpp, mWhen, hasRating);
+                }
+                
                 for (var element : matches) {
                     if (!element.isJsonObject()) continue;
                     JsonObject match = element.getAsJsonObject();
@@ -702,10 +731,7 @@ public class FightMonitor
                     String matchOpponent = match.has("opponent_id") && !match.get("opponent_id").isJsonNull() 
                         ? match.get("opponent_id").getAsString() : null;
                     
-                    // Check if this match is against our opponent (case-insensitive)
                     if (matchOpponent != null && matchOpponent.equalsIgnoreCase(opponentName)) {
-                        // Validate match timestamp is within 10 seconds of when we submitted
-                        // This prevents grabbing an old match if the new one isn't processed yet
                         long matchWhen = match.has("when") && !match.get("when").isJsonNull() 
                             ? match.get("when").getAsLong() : 0;
                         long timeDiff = Math.abs(matchWhen - submittedMatchEndTs);
@@ -713,29 +739,23 @@ public class FightMonitor
                         if (timeDiff > 10) {
                             log.debug("[PostFight] Match timestamp mismatch: matchWhen={} submittedTs={} diff={}s (>10s), skipping this match", 
                                 matchWhen, submittedMatchEndTs, timeDiff);
-                            // This is likely an old match, not the one we just submitted
-                            // Continue searching or retry later
                             continue;
                         }
                         
                         log.debug("[PostFight] Match timestamp validated: matchWhen={} submittedTs={} diff={}s", 
                             matchWhen, submittedMatchEndTs, timeDiff);
                         
-                        // Found the match - extract MMR delta and bucket
                         if (match.has("rating_change") && match.get("rating_change").isJsonObject()) {
                             JsonObject ratingChange = match.getAsJsonObject("rating_change");
                             
                             if (ratingChange.has("mmr_delta") && !ratingChange.get("mmr_delta").isJsonNull()) {
                                 double mmrDelta = ratingChange.get("mmr_delta").getAsDouble();
                                 
-                                // Get the actual bucket from the match
                                 String matchBucket = match.has("bucket") && !match.get("bucket").isJsonNull()
                                     ? match.get("bucket").getAsString() : "nh";
                                 
-                                // Only show bucket label if we auto-switched to a different bucket
                                 String bucketLabel = showBucketLabel ? getBucketDisplayName(matchBucket) : null;
                                 
-                                // Check result to determine if delta should be negative
                                 String result = match.has("result") && !match.get("result").isJsonNull()
                                     ? match.get("result").getAsString() : "win";
                                 if ("loss".equalsIgnoreCase(result)) {
@@ -745,7 +765,6 @@ public class FightMonitor
                                 log.debug("[PostFight] Found match in history: opponent={} bucket={} mmrDelta={} result={} bucketLabel={}", 
                                     matchOpponent, matchBucket, mmrDelta, result, bucketLabel);
                                 
-                                // Trigger the notification
                                 if (rankOverlay != null) {
                                     rankOverlay.showMmrDelta(mmrDelta, bucketLabel);
                                 }
@@ -758,26 +777,25 @@ public class FightMonitor
                     }
                 }
                 
-                // Match not found yet - retry if we have retries left (retry after 10s so total is ~15s)
                 if (retriesLeft > 0) {
-                    log.debug("[PostFight] Match not found in history, retrying in 10s ({} left)", retriesLeft - 1);
+                    log.debug("[PostFight] Match not found in history, retrying in 2s ({} left)", retriesLeft - 1);
                     scheduler.schedule(() -> fetchMmrDeltaFromMatchHistory(selfName, opponentName, displayBucket, showBucketLabel, retriesLeft - 1, submittedMatchEndTs),
-                        10L, java.util.concurrent.TimeUnit.SECONDS);
+                        2L, java.util.concurrent.TimeUnit.SECONDS);
                 } else {
                     log.debug("[PostFight] Match not found in history after all retries, skipping MMR notification");
                 }
             } else if (retriesLeft > 0) {
-                log.debug("[PostFight] No matches in response, retrying in 10s ({} left)", retriesLeft - 1);
+                log.debug("[PostFight] No matches in response, retrying in 2s ({} left)", retriesLeft - 1);
                 scheduler.schedule(() -> fetchMmrDeltaFromMatchHistory(selfName, opponentName, displayBucket, showBucketLabel, retriesLeft - 1, submittedMatchEndTs),
-                    10L, java.util.concurrent.TimeUnit.SECONDS);
+                    2L, java.util.concurrent.TimeUnit.SECONDS);
             } else {
                 log.debug("[PostFight] Failed to get matches after all retries");
             }
         }).exceptionally(ex -> {
             if (retriesLeft > 0) {
-                log.debug("[PostFight] Match history exception: {}, retrying in 10s ({} left)", ex.getMessage(), retriesLeft - 1);
+                log.debug("[PostFight] Match history exception: {}, retrying in 2s ({} left)", ex.getMessage(), retriesLeft - 1);
                 scheduler.schedule(() -> fetchMmrDeltaFromMatchHistory(selfName, opponentName, displayBucket, showBucketLabel, retriesLeft - 1, submittedMatchEndTs),
-                    10L, java.util.concurrent.TimeUnit.SECONDS);
+                    2L, java.util.concurrent.TimeUnit.SECONDS);
             } else {
                 log.debug("[PostFight] Match history failed after all retries: {}", ex.getMessage());
             }

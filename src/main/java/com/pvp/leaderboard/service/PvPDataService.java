@@ -9,6 +9,7 @@ import com.pvp.leaderboard.cache.UserStatsCache;
 import com.pvp.leaderboard.config.PvPLeaderboardConfig;
 import com.pvp.leaderboard.util.RankUtils;
 import lombok.extern.slf4j.Slf4j;
+import okhttp3.CacheControl;
 import okhttp3.Call;
 import okhttp3.Callback;
 import okhttp3.HttpUrl;
@@ -76,7 +77,6 @@ public class PvPDataService
         if (playerName == null) return;
         String canonicalName = playerName.trim().replaceAll("\\s+", " ").toLowerCase();
         missingPlayerUntilMs.remove(canonicalName);
-        // debug("[Cache] Cleared shard negative cache for {}", canonicalName);
     }
 
     // User Profile Caching
@@ -87,11 +87,11 @@ public class PvPDataService
     private static final long MATCHES_CACHE_TTL_MS = 1L * 60L * 1000L; // 1 minute
     private final ConcurrentHashMap<String, MatchesCacheEntry> matchesCache = new ConcurrentHashMap<>();
 
-    // DMM Worlds Caching (1 hour TTL)
-    private static final long DMM_WORLDS_CACHE_TTL_MS = 60L * 60L * 1000L; // 1 hour
-    private volatile Set<Integer> dmmWorldsCache = new HashSet<>();
-    private volatile long dmmWorldsCacheTimestamp = 0L;
-    private volatile boolean dmmWorldsFetchInProgress = false;
+    // DMM Worlds Caching — commented out while DMM is inactive, re-enable with API fetch
+    // private static final long DMM_WORLDS_CACHE_TTL_MS = 60L * 60L * 1000L;
+    // private volatile Set<Integer> dmmWorldsCache = new HashSet<>();
+    // private volatile long dmmWorldsCacheTimestamp = 0L;
+    // private volatile boolean dmmWorldsFetchInProgress = false;
 
 	@Inject
 	public PvPDataService(OkHttpClient okHttpClient, Gson gson, CognitoAuthService authService, PvPLeaderboardConfig config, ClientIdentityService clientIdentityService)
@@ -146,6 +146,10 @@ public class PvPDataService
 		Request.Builder requestBuilder = new Request.Builder()
 			.url(urlBuilder.build())
 			.get();
+
+		if (bypassCache) {
+			requestBuilder.cacheControl(CacheControl.FORCE_NETWORK);
+		}
 		
 		// Add client UUID header for API authentication/tracking
 		String clientUuid = clientIdentityService.getClientUniqueId();
@@ -206,7 +210,6 @@ public class PvPDataService
 						try {
 							bodyString = body.string();
 						} catch (IOException cacheEx) {
-							// Windows cache file locking issue - request succeeded but cache failed
 							future.complete(new JsonObject());
 							return;
 						}
@@ -278,6 +281,10 @@ public class PvPDataService
 			.url(urlBuilder.build())
 			.get();
 
+		if (bypassCache) {
+			requestBuilder.cacheControl(CacheControl.FORCE_NETWORK);
+		}
+
 		// Add client UUID header for API authentication/tracking
 		String clientUuid = clientIdentityService.getClientUniqueId();
 		if (clientUuid != null && !clientUuid.isEmpty()) {
@@ -285,14 +292,16 @@ public class PvPDataService
 		}
 
 		Request request = requestBuilder.build();
-		log.debug("[API] Fetching matches by acct: {}", acctShaLower);
+		log.debug("[MatchesAPI] acct request URL: {} bypassCache={}", request.url(), bypassCache);
+		final long reqStart = System.nanoTime();
 
 		okHttpClient.newCall(request).enqueue(new Callback()
 		{
 			@Override
 			public void onFailure(Call call, IOException e)
 			{
-				// Try serving stale cache if available
+				long ms = (System.nanoTime() - reqStart) / 1_000_000;
+				log.debug("[MatchesAPI] acct request FAILED after {}ms: {}", ms, e.getMessage());
 				if (nextToken == null || nextToken.isEmpty()) {
 					String cacheKey = "matches:acct:" + acctShaLower + ":" + limit;
 					MatchesCacheEntry cached = matchesCache.get(cacheKey);
@@ -307,11 +316,12 @@ public class PvPDataService
 			@Override
 			public void onResponse(Call call, Response response) throws IOException
 			{
+				long ms = (System.nanoTime() - reqStart) / 1_000_000;
 				try (Response res = response)
 				{
 					if (!res.isSuccessful())
 					{
-						// Try serving stale cache if available
+						log.debug("[MatchesAPI] acct response HTTP {} after {}ms", res.code(), ms);
 						if (nextToken == null || nextToken.isEmpty()) {
 							String cacheKey = "matches:acct:" + acctShaLower + ":" + limit;
 							MatchesCacheEntry cached = matchesCache.get(cacheKey);
@@ -327,6 +337,7 @@ public class PvPDataService
 					ResponseBody body = res.body();
 					if (body == null)
 					{
+						log.debug("[MatchesAPI] acct response empty body after {}ms", ms);
 						future.complete(new JsonObject());
 						return;
 					}
@@ -340,6 +351,7 @@ public class PvPDataService
 							future.complete(new JsonObject());
 							return;
 						}
+						log.debug("[MatchesAPI] acct response OK in {}ms, bodyLen={}", ms, bodyString.length());
 						JsonObject json = gson.fromJson(bodyString, JsonObject.class);
 						if (nextToken == null || nextToken.isEmpty()) {
 							String cacheKey = "matches:acct:" + acctShaLower + ":" + limit;
@@ -370,7 +382,7 @@ public class PvPDataService
 				return generateAcctSha(uuid);
 			}
 		} catch (Exception e) {
-			log.debug("[API] Failed to generate self acct SHA: {}", e.getMessage());
+			// ignored
 		}
 		return null;
 	}
@@ -383,19 +395,16 @@ public class PvPDataService
 	public CompletableFuture<JsonObject> getUserProfile(String playerName, String clientUniqueId, boolean forceRefresh)
 	{
 		CompletableFuture<JsonObject> future = new CompletableFuture<>();
-		log.debug("[API] getUserProfile called: player={} forceRefresh={}", playerName, forceRefresh);
 
 		String cacheKey = "user:" + playerName;
 		UserStatsCache cached = userStatsCache.get(cacheKey);
 		if (!forceRefresh && cached != null && System.currentTimeMillis() - cached.getTimestamp() <= USER_CACHE_TTL_MS) {
-			log.debug("[API] getUserProfile: returning cached data for player={}", playerName);
 			future.complete(cached.getStats().deepCopy());
 			return future;
 		}
 
 		HttpUrl urlObj = HttpUrl.parse(API_BASE_URL + "/user");
 		if (urlObj == null) {
-			log.debug("[API] getUserProfile: invalid base URL");
 			future.completeExceptionally(new IOException("Invalid base URL"));
 			return future;
 		}
@@ -413,17 +422,14 @@ public class PvPDataService
 		}
 		
 		Request request = requestBuilder.build();
-		log.debug("[API] getUserProfile: making HTTP request to {}", url);
 
 		okHttpClient.newCall(request).enqueue(new Callback()
 		{
 			@Override
 			public void onFailure(Call call, IOException e)
 			{
-				log.debug("[API] getUserProfile onFailure: player={} error={}", playerName, e.getMessage());
 				UserStatsCache stale = userStatsCache.get(cacheKey);
 				if (stale != null) {
-					log.debug("[API] getUserProfile: using stale cache on failure for player={}", playerName);
 					future.complete(stale.getStats().deepCopy());
 					return;
 				}
@@ -435,15 +441,12 @@ public class PvPDataService
 			{
 				try (Response res = response)
 				{
-					log.debug("[API] getUserProfile onResponse: player={} code={}", playerName, res.code());
 					if (!res.isSuccessful())
 					{
 						if (res.code() == 404) {
-							log.debug("[API] getUserProfile: 404 not found for player={}", playerName);
 							future.complete(null);
 							return;
 						}
-						log.debug("[API] getUserProfile: HTTP error {} for player={}", res.code(), playerName);
 						future.completeExceptionally(new IOException("API error: " + res.code()));
 						return;
 					}
@@ -452,28 +455,29 @@ public class PvPDataService
 					try {
 						bodyString = body != null ? body.string() : "{}";
 					} catch (IOException cacheEx) {
-						log.debug("[API] getUserProfile: cache error during body read for player={}: {}", playerName, cacheEx.getMessage());
 						// Windows cache file locking issue - request succeeded but cache failed
 						// Try to serve stale cache if available
 						UserStatsCache stale = userStatsCache.get(cacheKey);
 						if (stale != null) {
-							log.debug("[API] getUserProfile: using stale cache after cache error for player={}", playerName);
 							future.complete(stale.getStats().deepCopy());
 							return;
 						}
-						log.debug("[API] getUserProfile: no stale cache, returning null for player={}", playerName);
 						future.complete(null);
 						return;
 					}
-					log.debug("[API] getUserProfile SUCCESS: player={} bodyLength={}", playerName, bodyString.length());
-					log.debug("[API] getUserProfile RESPONSE: player={} body={}", playerName, bodyString);
 					JsonObject json = gson.fromJson(bodyString, JsonObject.class);
+					
+					// Detect soft 404: API returns 200 with {"message": "player not found"}
+					if (json.has("message") && !json.has("player_id") && !json.has("player_name") && !json.has("mmr")) {
+						future.complete(null);
+						return;
+					}
+					
 					userStatsCache.put(cacheKey, new UserStatsCache(json.deepCopy(), System.currentTimeMillis()));
 					future.complete(json);
 				}
 				catch (JsonSyntaxException e)
 				{
-					log.debug("[API] getUserProfile: JSON parse error for player={}: {}", playerName, e.getMessage());
 					future.completeExceptionally(e);
 				}
 			}
@@ -489,21 +493,16 @@ public class PvPDataService
      */
     public CompletableFuture<String> getTierFromProfile(String playerName, String bucket)
     {
-        log.debug("[API] getTierFromProfile called: player={} bucket={}", playerName, bucket);
-        
         // Force refresh to get fresh data after a fight, but keep cached data as fallback
         String cacheKey = "user:" + playerName;
         UserStatsCache cachedData = userStatsCache.get(cacheKey);
-        log.debug("[API] getTierFromProfile: cachedData exists={}", cachedData != null);
         
         return getUserProfile(playerName, null, true).thenApply(profile -> {
             if (profile == null) {
-                log.debug("[API] getTierFromProfile: profile is null for player={}", playerName);
                 // Try fallback to cached data if available
                 if (cachedData != null) {
                     JsonObject cachedProfile = cachedData.getStats();
                     if (cachedProfile != null) {
-                        log.debug("[API] getTierFromProfile: using cached fallback for player={}", playerName);
                         // Try bucket-specific data first
                         if (cachedProfile.has("buckets") && cachedProfile.get("buckets").isJsonObject()) {
                             JsonObject buckets = cachedProfile.getAsJsonObject("buckets");
@@ -511,22 +510,16 @@ public class PvPDataService
                                 JsonObject bucketData = buckets.getAsJsonObject(bucket);
                                 String tier = extractTierFromUserResponse(bucketData, playerName, bucket);
                                 if (tier != null) {
-                                    log.debug("[API] getTierFromProfile: cached bucket tier={} for player={}", tier, playerName);
                                     return tier;
                                 }
                             }
                         }
                         // Fallback to top-level
-                        String tier = extractTierFromUserResponse(cachedProfile, playerName, "overall");
-                        log.debug("[API] getTierFromProfile: cached top-level tier={} for player={}", tier, playerName);
-                        return tier;
+                        return extractTierFromUserResponse(cachedProfile, playerName, "overall");
                     }
                 }
-                log.debug("[API] getTierFromProfile: no cached data, returning null for player={}", playerName);
                 return null;
             }
-            
-            log.debug("[API] getTierFromProfile: got profile for player={}, keys={}", playerName, profile.keySet());
             
             // Try bucket-specific data first (in "buckets" object)
             if (profile.has("buckets") && profile.get("buckets").isJsonObject()) {
@@ -535,7 +528,6 @@ public class PvPDataService
                     JsonObject bucketData = buckets.getAsJsonObject(bucket);
                     String tier = extractTierFromUserResponse(bucketData, playerName, bucket);
                     if (tier != null) {
-                        log.debug("[API] getTierFromProfile SUCCESS: bucket tier={} for player={}", tier, playerName);
                         return tier;
                     }
                 }
@@ -544,11 +536,9 @@ public class PvPDataService
             // Fallback to top-level rank/division fields (for overall bucket)
             String tier = extractTierFromUserResponse(profile, playerName, "overall");
             if (tier != null) {
-                log.debug("[API] getTierFromProfile SUCCESS: top-level tier={} for player={}", tier, playerName);
                 return tier;
             }
             
-            log.debug("[API] getTierFromProfile: no rank found in profile for player={} bucket={}", playerName, bucket);
             return null;
         });
     }
@@ -576,7 +566,6 @@ public class PvPDataService
         if (rank != null && !rank.isEmpty()) {
             // Combine rank and division (e.g., "Dragon 3")
             String tier = division > 0 ? rank + " " + division : rank;
-            // debug("[API] extractTierFromUserResponse SUCCESS player={} bucket={} tier={}", playerName, bucket, tier);
             return tier;
         }
         return null;
@@ -588,7 +577,6 @@ public class PvPDataService
      */
 	public CompletableFuture<String> getPlayerTier(String playerName, String bucket)
 	{
-		// debug("[API] getPlayerTier called for player={} bucket={}", playerName, bucket);
         // Delegate to getTierFromProfile which uses /user endpoint correctly
         return getTierFromProfile(playerName, bucket);
 	}
@@ -613,7 +601,6 @@ public class PvPDataService
         // Check for existing in-flight lookup - if one exists, return it instead of starting a new one
         CompletableFuture<ShardRank> existingLookup = inFlightLookups.get(lookupKey);
         if (existingLookup != null) {
-            // debug("[Lookup] Dedup: reusing in-flight lookup for '{}' bucket={}", canonicalName, bucketPath);
             return existingLookup;
         }
         
@@ -624,7 +611,6 @@ public class PvPDataService
         CompletableFuture<ShardRank> previousLookup = inFlightLookups.putIfAbsent(lookupKey, future);
         if (previousLookup != null) {
             // Another thread beat us to it - use their future instead
-            // debug("[Lookup] Dedup: race detected, reusing in-flight lookup for '{}' bucket={}", canonicalName, bucketPath);
             return previousLookup;
         }
         
@@ -635,7 +621,6 @@ public class PvPDataService
             // Check Negative Cache first (1 hour block)
             Long missingUntil = missingPlayerUntilMs.get(canonicalName);
             if (missingUntil != null && System.currentTimeMillis() < missingUntil) {
-                // debug("[Lookup] Negative cache hit for {} (blocked until {})", canonicalName, missingUntil);
                 future.complete(null);
                 return future;
             }
@@ -646,13 +631,10 @@ public class PvPDataService
                 : canonicalName.toLowerCase();
             String url = SHARD_BASE_URL + "/" + bucketPath + "/" + shardKey + ".json";
 
-            // debug("[Lookup] Player: {} -> Shard: {} -> URL: {}", canonicalName, shardKey, url);
-
             // 4. Fetch/Get Cached Shard
             getShard(url).thenCompose(shardJson -> {
                 if (shardJson == null) {
-                    // debug("[Lookup] Shard download failed/empty for {}", url);
-                    // THIS: Also mark player as missing for 1 hour when shard doesn't exist
+                    // Also mark player as missing for 1 hour when shard doesn't exist
                     missingPlayerUntilMs.put(canonicalName, System.currentTimeMillis() + MISSING_PLAYER_BACKOFF_MS);
                     future.complete(null);
                     return CompletableFuture.completedFuture(null);
@@ -661,7 +643,6 @@ public class PvPDataService
                 // 5. Look for Name in name_rank_info_map
                 JsonObject nameMap = shardJson.getAsJsonObject("name_rank_info_map");
                 if (nameMap == null || !nameMap.has(canonicalName)) {
-                    // debug("[Lookup] Player '{}' NOT FOUND in shard {}", canonicalName, shardKey);
                     // Mark missing (1 Hour TTL)
                     missingPlayerUntilMs.put(canonicalName, System.currentTimeMillis() + MISSING_PLAYER_BACKOFF_MS);
                     future.complete(null);
@@ -673,7 +654,6 @@ public class PvPDataService
                 // Scenario B: Redirect
                 if (entry.has("redirect")) {
                     String accountSha = entry.get("redirect").getAsString();
-                    // debug("[Lookup] Redirect found for '{}' -> SHA: {}", canonicalName, accountSha);
                     // FIX: Complete the outer future with the redirect result
                     resolveRedirect(accountSha, bucketPath).thenAccept(result -> {
                         future.complete(result);
@@ -685,19 +665,16 @@ public class PvPDataService
                 }
                 
                 // Scenario A: Direct Hit
-                // debug("[Lookup] Direct hit for '{}'", canonicalName);
                 ShardRank rank = parseRankObject(entry);
                 future.complete(rank);
                 return CompletableFuture.completedFuture(null);
                 
             }).exceptionally(ex -> {
-                // debug("Exception in getShardRankByName: {}", ex.getMessage());
                 future.complete(null);
                 return null;
             });
             
         } catch (Exception e) {
-            // debug("Error in getShardRankByName: {}", e.getMessage());
             future.complete(null);
         }
 		return future;
@@ -715,7 +692,6 @@ public class PvPDataService
         CompletableFuture<ShardRank> future = new CompletableFuture<>();
         
         if (depth >= 10) {
-            // debug("[Redirect] Max depth (10) reached for {}, aborting", accountSha);
             future.complete(null);
             return future;
         }
@@ -728,8 +704,6 @@ public class PvPDataService
         // 1. Calc Shard from SHA (first 2 chars)
         String shardKey = accountSha.substring(0, 2);
         String url = SHARD_BASE_URL + "/" + bucket + "/" + shardKey + ".json";
-        
-        // debug("[Redirect] depth={} SHA={} -> Shard={}", depth, accountSha, shardKey);
 
         // 2. Fetch/Get Cached Shard
         getShard(url).thenAccept(shardJson -> {
@@ -746,16 +720,13 @@ public class PvPDataService
                 // Check for chained redirect
                 if (entry.has("redirect")) {
                     String nextSha = entry.get("redirect").getAsString();
-                    // debug("[Redirect] Chain redirect to {}", nextSha);
                     resolveRedirectWithDepth(nextSha, bucket, depth + 1)
                         .thenAccept(future::complete);
                     return;
                 }
                 
-                // debug("[Redirect] Found SHA entry at depth {}", depth);
                 future.complete(parseRankObject(entry));
             } else {
-                // debug("[Redirect] SHA entry NOT FOUND in shard");
                 future.complete(null);
             }
         }).exceptionally(ex -> {
@@ -801,7 +772,6 @@ public class PvPDataService
         // 1. Check Memory Cache
         ShardEntry cached = shardCache.get(url);
         if (cached != null && (now - cached.getTimestamp() < SHARD_CACHE_EXPIRY_MS)) {
-            // debug("[Cache] HIT for {}", url);
             future.complete(cached.getPayload());
             return future;
         }
@@ -809,21 +779,18 @@ public class PvPDataService
         // 2. Check Negative Cache (Fail Until)
         Long failUntil = shardFailUntil.get(url);
         if (failUntil != null && now < failUntil) {
-            // debug("[Cache] Negative/Fail HIT for {}", url);
             future.complete(null);
             return future;
         }
 
         // 3. Download
 		Request request = new Request.Builder().url(url).get().build();
-		// debug("[Network] Downloading shard: {}", url);
 
 		okHttpClient.newCall(request).enqueue(new Callback()
 		{
 			@Override
 			public void onFailure(Call call, IOException e)
 			{
-                // debug("[Network] Fail: {}", e.getMessage());
                 shardFailUntil.put(url, System.currentTimeMillis() + SHARD_FAIL_BACKOFF_MS);
 				future.completeExceptionally(e);
 			}
@@ -834,7 +801,6 @@ public class PvPDataService
 				try (Response res = response)
 				{
 					if (!res.isSuccessful()) {
-                        // debug("[Network] HTTP Error: {}", res.code());
                         shardFailUntil.put(url, System.currentTimeMillis() + SHARD_FAIL_BACKOFF_MS);
 						future.complete(null);
 						return;
@@ -868,7 +834,6 @@ public class PvPDataService
                     
                     future.complete(json);
 				} catch (Exception e) {
-                    // debug("[Network] Parse Error: {}", e.getMessage());
                     future.complete(null);
                 }
 			}
@@ -918,165 +883,134 @@ public class PvPDataService
 		return hexString.toString();
 	}
 
+    private static final int DMM_WORLD = 345;
+
     /**
      * Check if a world is a DMM world.
-     * Uses cached DMM world list with 1-hour TTL.
-     * On first call with empty cache, blocks briefly to ensure accurate detection.
+     * DMM is currently inactive — hardcoded to world 345 only.
+     * Re-enable the API fetch below when the next DMM season starts.
      */
     public boolean isDmmWorld(int world)
     {
-        // If cache is empty and we haven't fetched yet, do a blocking fetch
-        // This ensures the first fight on a DMM world is correctly detected
-        if (dmmWorldsCache.isEmpty() && dmmWorldsCacheTimestamp == 0L && !dmmWorldsFetchInProgress)
-        {
-            log.debug("[DMM] Cache empty on first check, doing synchronous fetch");
-            try
-            {
-                // Block for up to 3 seconds to get the DMM worlds list
-                Set<Integer> worlds = fetchDmmWorlds().get(3, java.util.concurrent.TimeUnit.SECONDS);
-                if (worlds != null && !worlds.isEmpty())
-                {
-                    dmmWorldsCache = worlds;
-                    dmmWorldsCacheTimestamp = System.currentTimeMillis();
-                    log.debug("[DMM] Synchronous fetch succeeded: {}", worlds);
-                }
-            }
-            catch (Exception e)
-            {
-                log.debug("[DMM] Synchronous fetch failed/timed out: {}", e.getMessage());
-                // Mark timestamp so we don't keep blocking on every call
-                dmmWorldsCacheTimestamp = System.currentTimeMillis();
-            }
-        }
-        else
-        {
-            // Normal async refresh for subsequent calls
-            refreshDmmWorldsIfNeeded();
-        }
-        return dmmWorldsCache.contains(world);
+        return world == DMM_WORLD;
     }
 
     /**
-     * Get the set of DMM worlds (cached).
+     * Get the set of DMM worlds.
      */
     public Set<Integer> getDmmWorlds()
     {
-        refreshDmmWorldsIfNeeded();
-        return new HashSet<>(dmmWorldsCache);
+        Set<Integer> worlds = new HashSet<>();
+        worlds.add(DMM_WORLD);
+        return worlds;
     }
 
     /**
-     * Force refresh DMM worlds from the API.
-     * Call this on login to ensure fresh data.
+     * No-op while DMM is inactive. Re-enable when next DMM season starts.
      */
     public void refreshDmmWorlds()
     {
-        log.debug("[DMM] Force refreshing DMM worlds on login");
-        // Reset timestamp to force refresh
-        dmmWorldsCacheTimestamp = 0L;
-        refreshDmmWorldsIfNeeded();
     }
 
-    /**
-     * Refresh DMM worlds cache if expired or empty.
+    /*
+     * ====================================================================
+     * DMM API fetch code — commented out while DMM is inactive.
+     * Un-comment and restore isDmmWorld/getDmmWorlds/refreshDmmWorlds
+     * when the next DMM season starts.
+     * ====================================================================
+     *
+     * private void refreshDmmWorldsIfNeeded()
+     * {
+     *     long now = System.currentTimeMillis();
+     *     if (now - dmmWorldsCacheTimestamp < DMM_WORLDS_CACHE_TTL_MS && !dmmWorldsCache.isEmpty())
+     *     {
+     *         return;
+     *     }
+     *
+     *     if (dmmWorldsFetchInProgress)
+     *     {
+     *         return;
+     *     }
+     *
+     *     dmmWorldsFetchInProgress = true;
+     *     fetchDmmWorlds().whenComplete((worlds, ex) -> {
+     *         dmmWorldsFetchInProgress = false;
+     *         if (worlds != null && !worlds.isEmpty())
+     *         {
+     *             dmmWorldsCache = worlds;
+     *             dmmWorldsCacheTimestamp = System.currentTimeMillis();
+     *             log.debug("[DMM] Updated DMM worlds cache: {}", worlds);
+     *         }
+     *         else if (ex != null)
+     *         {
+     *             log.debug("[DMM] Failed to fetch DMM worlds: {}", ex.getMessage());
+     *         }
+     *     });
+     * }
+     *
+     * private CompletableFuture<Set<Integer>> fetchDmmWorlds()
+     * {
+     *     CompletableFuture<Set<Integer>> future = new CompletableFuture<>();
+     *
+     *     String url = API_BASE_URL + "/config/worlds";
+     *     Request request = new Request.Builder().url(url).get().build();
+     *
+     *     log.debug("[DMM] Fetching DMM worlds from {}", url);
+     *
+     *     okHttpClient.newCall(request).enqueue(new Callback()
+     *     {
+     *         @Override
+     *         public void onFailure(Call call, IOException e)
+     *         {
+     *             log.debug("[DMM] Network failure fetching DMM worlds: {}", e.getMessage());
+     *             future.complete(new HashSet<>());
+     *         }
+     *
+     *         @Override
+     *         public void onResponse(Call call, Response response) throws IOException
+     *         {
+     *             try (Response res = response)
+     *             {
+     *                 if (!res.isSuccessful())
+     *                 {
+     *                     log.debug("[DMM] HTTP error {} fetching DMM worlds", res.code());
+     *                     future.complete(new HashSet<>());
+     *                     return;
+     *                 }
+     *
+     *                 ResponseBody body = res.body();
+     *                 if (body == null)
+     *                 {
+     *                     future.complete(new HashSet<>());
+     *                     return;
+     *                 }
+     *
+     *                 String bodyString = body.string();
+     *                 log.debug("[DMM] Response: {}", bodyString);
+     *
+     *                 Set<Integer> worlds = new HashSet<>();
+     *                 JsonObject json = gson.fromJson(bodyString, JsonObject.class);
+     *
+     *                 if (json.has("dmm") && json.get("dmm").isJsonArray())
+     *                 {
+     *                     for (var element : json.getAsJsonArray("dmm"))
+     *                     {
+     *                         worlds.add(element.getAsInt());
+     *                     }
+     *                 }
+     *
+     *                 future.complete(worlds);
+     *             }
+     *             catch (Exception e)
+     *             {
+     *                 log.debug("[DMM] Error parsing DMM worlds response: {}", e.getMessage());
+     *                 future.complete(new HashSet<>());
+     *             }
+     *         }
+     *     });
+     *
+     *     return future;
+     * }
      */
-    private void refreshDmmWorldsIfNeeded()
-    {
-        long now = System.currentTimeMillis();
-        if (now - dmmWorldsCacheTimestamp < DMM_WORLDS_CACHE_TTL_MS && !dmmWorldsCache.isEmpty())
-        {
-            return; // Cache still valid
-        }
-
-        if (dmmWorldsFetchInProgress)
-        {
-            return; // Already fetching
-        }
-
-        dmmWorldsFetchInProgress = true;
-        fetchDmmWorlds().whenComplete((worlds, ex) -> {
-            dmmWorldsFetchInProgress = false;
-            if (worlds != null && !worlds.isEmpty())
-            {
-                dmmWorldsCache = worlds;
-                dmmWorldsCacheTimestamp = System.currentTimeMillis();
-                log.debug("[DMM] Updated DMM worlds cache: {}", worlds);
-            }
-            else if (ex != null)
-            {
-                log.debug("[DMM] Failed to fetch DMM worlds: {}", ex.getMessage());
-            }
-        });
-    }
-
-    /**
-     * Fetch DMM worlds from the API endpoint.
-     * Endpoint: /config/worlds
-     * Response: {"dmm": [345, 346, ...]}
-     */
-    private CompletableFuture<Set<Integer>> fetchDmmWorlds()
-    {
-        CompletableFuture<Set<Integer>> future = new CompletableFuture<>();
-
-        String url = API_BASE_URL + "/config/worlds";
-        Request request = new Request.Builder().url(url).get().build();
-
-        log.debug("[DMM] Fetching DMM worlds from {}", url);
-
-        okHttpClient.newCall(request).enqueue(new Callback()
-        {
-            @Override
-            public void onFailure(Call call, IOException e)
-            {
-                log.debug("[DMM] Network failure fetching DMM worlds: {}", e.getMessage());
-                future.complete(new HashSet<>());
-            }
-
-            @Override
-            public void onResponse(Call call, Response response) throws IOException
-            {
-                try (Response res = response)
-                {
-                    if (!res.isSuccessful())
-                    {
-                        log.debug("[DMM] HTTP error {} fetching DMM worlds", res.code());
-                        future.complete(new HashSet<>());
-                        return;
-                    }
-
-                    ResponseBody body = res.body();
-                    if (body == null)
-                    {
-                        future.complete(new HashSet<>());
-                        return;
-                    }
-
-                    String bodyString = body.string();
-                    log.debug("[DMM] Response: {}", bodyString);
-
-                    // Parse response - expecting {"dmm": [345, 346, ...]}
-                    Set<Integer> worlds = new HashSet<>();
-                    JsonObject json = gson.fromJson(bodyString, JsonObject.class);
-                    
-                    if (json.has("dmm") && json.get("dmm").isJsonArray())
-                    {
-                        for (var element : json.getAsJsonArray("dmm"))
-                        {
-                            worlds.add(element.getAsInt());
-                        }
-                    }
-                    
-                    future.complete(worlds);
-                }
-                catch (Exception e)
-                {
-                    log.debug("[DMM] Error parsing DMM worlds response: {}", e.getMessage());
-                    future.complete(new HashSet<>());
-                }
-            }
-        });
-
-        return future;
-    }
 
 }

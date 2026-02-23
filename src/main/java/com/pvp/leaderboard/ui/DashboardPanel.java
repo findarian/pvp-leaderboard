@@ -238,7 +238,7 @@ public class DashboardPanel extends PluginPanel
         playerNameLabel.setText(playerId); // Update header immediately
         lastRefreshTimestamp = System.currentTimeMillis();
         
-        // Update the search box (needed for pvp lookup right-click menu)
+        // Update the search box (needed for PvP lookup right-click menu)
         if (loginPanel != null) {
             loginPanel.setPluginSearchText(playerId);
         }
@@ -271,16 +271,22 @@ public class DashboardPanel extends PluginPanel
             }
 
             matchesFuture.thenAccept(jsonResponse -> {
-                if (jsonResponse == null) return;
+                if (jsonResponse == null)
+                {
+                    return;
+                }
                 
                 JsonArray matches = jsonResponse.has("matches") && jsonResponse.get("matches").isJsonArray() ? jsonResponse.getAsJsonArray("matches") : new JsonArray();
-                // String nextToken = jsonResponse.has("next_token") && !jsonResponse.get("next_token").isJsonNull() ? jsonResponse.get("next_token").getAsString() : null;
 
                 SwingUtilities.invokeLater(() -> {
                     updateUiWithMatches(matches);
                 });
+            }).exceptionally(ex -> {
+                return null;
             });
-        } catch (Exception ignore) {}
+        } catch (Exception ex) {
+            // ignored
+        }
     }
 
     private void updateUiWithMatches(JsonArray matches) {
@@ -320,32 +326,17 @@ public class DashboardPanel extends PluginPanel
             String clientUniqueId = (plugin != null) ? plugin.getClientUniqueId() : null;
             
             pvpDataService.getUserProfile(playerId, clientUniqueId).thenAccept(stats -> {
-                if (stats == null) return;
+                if (stats == null)
+                {
+                    return;
+                }
                 SwingUtilities.invokeLater(() -> updateProgressBars(stats));
-                
-                // Extract and pass cumulative stats to PerformanceStatsPanel
-                if (stats.has("cumulative_stats")) {
-                    JsonObject cs = stats.getAsJsonObject("cumulative_stats");
-                    SwingUtilities.invokeLater(() -> {
-                        performanceStatsPanel.setCumulativeStats(cs);
-                    });
-                }
-                
-                // Extract and pass opponent rank stats to PerformanceStatsPanel
-                // Prefer new per-bucket format, fallback to flat format
-                if (stats.has("opponent_rank_stats_by_bucket")) {
-                    JsonObject ors = stats.getAsJsonObject("opponent_rank_stats_by_bucket");
-                    SwingUtilities.invokeLater(() -> {
-                        performanceStatsPanel.setOpponentRankStats(ors);
-                    });
-                } else if (stats.has("opponent_rank_stats")) {
-                    JsonObject ors = stats.getAsJsonObject("opponent_rank_stats");
-                    SwingUtilities.invokeLater(() -> {
-                        performanceStatsPanel.setOpponentRankStats(ors);
-                    });
-                }
+            }).exceptionally(ex -> {
+                return null;
             });
-        } catch (Exception ignore) {}
+        } catch (Exception ex) {
+            // ignored
+        }
     }
     
     private void updateProgressBars(JsonObject stats)
@@ -354,7 +345,10 @@ public class DashboardPanel extends PluginPanel
         if (stats.has("player_name")) playerName = stats.get("player_name").getAsString();
         else if (stats.has("player_id")) playerName = stats.get("player_id").getAsString();
         
-        if (playerName != null) updatePlayerStats(stats, playerName);
+        if (playerName != null)
+        {
+            updatePlayerStats(stats, playerName);
+        }
     }
     
     private void updatePlayerStats(JsonObject stats, String playerName)
@@ -392,7 +386,8 @@ public class DashboardPanel extends PluginPanel
         double pct = 0.0;
         
         if (bucketObj.has("mmr")) {
-            RankInfo ri = RankUtils.rankLabelAndProgressFromMMR(bucketObj.get("mmr").getAsDouble());
+            double mmr = bucketObj.get("mmr").getAsDouble();
+            RankInfo ri = RankUtils.rankLabelAndProgressFromMMR(mmr);
             if (ri != null) { rankLabel = ri.rank; division = ri.division; pct = ri.progress; }
         }
         if (bucketObj.has("rank_progress")) {
@@ -401,8 +396,7 @@ public class DashboardPanel extends PluginPanel
         }
         if (bucketObj.has("rank")) {
              String r = bucketObj.get("rank").getAsString();
-             if (!r.isEmpty()) rankLabel = r; // Simple parse if needed
-             // Reuse existing RankUtils parsing if complex, simplified here
+             if (!r.isEmpty()) rankLabel = r;
         }
         if (bucketObj.has("division")) division = bucketObj.get("division").getAsInt();
         
@@ -419,7 +413,8 @@ public class DashboardPanel extends PluginPanel
                      try {
                          int rank = get();
                          if (rank > 0) rankProgressPanel.updateBucket(bucketKey, fRank, fDiv, fPct, rank);
-                    } catch (Exception ignore) {}
+                    } catch (Exception ignore) {
+                    }
                 }
             }.execute();
             }
@@ -465,26 +460,21 @@ public class DashboardPanel extends PluginPanel
                 int finalDiv = latest.has("player_division") ? latest.get("player_division").getAsInt() : (est != null ? est.division : 0);
                 double pct = (est != null ? est.progress : 0.0);
                 
-                // Only fetch rank number for currently selected rank bucket
-                String currentBucket = "overall";
-                if (bucket.equals(currentBucket))
+                // Fetch rank number async for ALL buckets to avoid erasing
+                // rank # that was already set by the /user API path
+                new SwingWorker<Integer, Void>()
                 {
-                SwingWorker<Integer, Void> worker = new SwingWorker<Integer, Void>()
-                {
-                        @Override protected Integer doInBackground() { return getRankNumberFromLeaderboard(playerName, bucket); }
-                        @Override protected void done() {
-                            try {
+                    @Override protected Integer doInBackground() { return getRankNumberFromLeaderboard(playerName, bucket); }
+                    @Override protected void done() {
+                        try {
                             int rankNumber = get();
+                            if (rankNumber > 0) {
                                 rankProgressPanel.updateBucket(bucket, finalRank, finalDiv, pct, rankNumber);
-                            } catch (Exception e) {
-                                rankProgressPanel.updateBucket(bucket, finalRank, finalDiv, pct, -1);
+                            }
+                        } catch (Exception ignore) {
                         }
                     }
-                };
-                worker.execute();
-                } else {
-                    rankProgressPanel.updateBucket(bucket, finalRank, finalDiv, pct, -1);
-                }
+                }.execute();
             }
         }
     }
@@ -495,13 +485,16 @@ public class DashboardPanel extends PluginPanel
     {
         try {
             String canonBucket = bucket == null ? "overall" : bucket.toLowerCase();
-            // Single path - shard contains world_rank
-            ShardRank sr = pvpDataService.getShardRankByName(playerName, canonBucket).get();
+            ShardRank sr = pvpDataService.getShardRankByName(playerName, canonBucket)
+                .get(5, java.util.concurrent.TimeUnit.SECONDS);
             return sr != null && sr.rank > 0 ? sr.rank : -1;
-        } catch (Exception ignore) { return -1; }
+        } catch (Exception ex) {
+            return -1;
+        }
     }
 
     private static String normalizePlayerId(String name) {
         return name != null ? name.trim().replaceAll("\\s+", " ").toLowerCase() : null;
     }
 }
+

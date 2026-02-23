@@ -54,59 +54,64 @@ public class CognitoAuthService {
 
 
     public CompletableFuture<Boolean> login() {
-        return CompletableFuture.supplyAsync(() -> {
-            try {
-                // Generate PKCE
-                String verifier = generatePKCEVerifier();
-                String challenge = generatePKCEChallenge(verifier);
-                if (configManager != null) {
-                    configManager.setConfiguration("PvPLeaderboard", "pkce_verifier", verifier);
-                } else {
-                    transientVerifier = verifier;
-                }
+        CompletableFuture<Boolean> result = new CompletableFuture<>();
+        try {
+            // Generate PKCE
+            String verifier = generatePKCEVerifier();
+            String challenge = generatePKCEChallenge(verifier);
+            if (configManager != null) {
+                configManager.setConfiguration("PvPLeaderboard", "pkce_verifier", verifier);
+            } else {
+                transientVerifier = verifier;
+            }
 
-                // Start local HTTP server to capture callback
-                CompletableFuture<String> codeFuture = new CompletableFuture<>();
-                startCallbackServer(codeFuture);
+            // Start local HTTP server to capture callback
+            CompletableFuture<String> codeFuture = new CompletableFuture<>();
+            startCallbackServer(codeFuture);
 
-                // Open browser to login with random OAuth state
-                String state = generateRandomState();
-                if (configManager != null) {
-                    configManager.setConfiguration("PvPLeaderboard", "oauth_state", state);
-                } else {
-                    transientState = state;
-                }
-                String loginUrl = String.format(
-                    "https://%s/login?client_id=%s&response_type=code&scope=openid+email+profile&redirect_uri=%s&code_challenge_method=S256&code_challenge=%s&state=%s",
-                    COGNITO_DOMAIN, CLIENT_ID, URLEncoder.encode(REDIRECT_URI, "UTF-8"), challenge, URLEncoder.encode(state, "UTF-8")
-                );
-                LinkBrowser.browse(loginUrl);
+            // Open browser to login with random OAuth state
+            String state = generateRandomState();
+            if (configManager != null) {
+                configManager.setConfiguration("PvPLeaderboard", "oauth_state", state);
+            } else {
+                transientState = state;
+            }
+            String loginUrl = String.format(
+                "https://%s/login?client_id=%s&response_type=code&scope=openid+email+profile&redirect_uri=%s&code_challenge_method=S256&code_challenge=%s&state=%s",
+                COGNITO_DOMAIN, CLIENT_ID, URLEncoder.encode(REDIRECT_URI, "UTF-8"), challenge, URLEncoder.encode(state, "UTF-8")
+            );
+            LinkBrowser.browse(loginUrl);
 
-                // Wait for code up to 10s; on timeout, fail silently and allow re-login
-                String code = null;
-                try {
-                    code = codeFuture.get(10, java.util.concurrent.TimeUnit.SECONDS);
-                } catch (java.util.concurrent.TimeoutException te) {
-                    // Timeout: stop server and return false without UI popups
-                    stopCallbackServer();
-                    clearTokens();
-                    return false;
+            // Timeout the code callback after 10s without blocking a thread
+            ScheduledFuture<?> timeout = scheduler.schedule(() -> {
+                if (!codeFuture.isDone()) {
+                    codeFuture.complete(null);
                 }
+            }, 10, TimeUnit.SECONDS);
+
+            codeFuture.thenCompose(code -> {
+                timeout.cancel(false);
                 stopCallbackServer();
                 if (code == null || code.isEmpty()) {
-                    // Ensure auth artifacts are cleared on failure
                     clearTokens();
-                    return false;
+                    return CompletableFuture.completedFuture(false);
                 }
-                exchangeCodeForTokens(code.trim());
-                ensureRefreshScheduler();
-                return true;
-            } catch (Exception e) {
+                return exchangeCodeForTokens(code.trim()).thenApply(v -> {
+                    ensureRefreshScheduler();
+                    return true;
+                });
+            }).exceptionally(ex -> {
                 stopCallbackServer();
                 clearTokens();
                 return false;
-            }
-        }, scheduler);
+            }).thenAccept(result::complete);
+
+        } catch (Exception e) {
+            stopCallbackServer();
+            clearTokens();
+            result.complete(false);
+        }
+        return result;
     }
     
     private void startCallbackServer(CompletableFuture<String> codeFuture) throws IOException {
@@ -155,68 +160,73 @@ public class CognitoAuthService {
         httpServer = null;
     }
     
-    private void exchangeCodeForTokens(String code) throws Exception {
-        String verifier = null;
-        if (configManager != null) {
-            Object v = configManager.getConfiguration("PvPLeaderboard", "pkce_verifier");
-            verifier = v != null ? String.valueOf(v) : null;
-        } else {
-            verifier = transientVerifier;
-        }
-        // Form-encode ALL values
-        String postData =
-            "grant_type=" + URLEncoder.encode("authorization_code", "UTF-8") +
-            "&client_id=" + URLEncoder.encode(CLIENT_ID, "UTF-8") +
-            "&code=" + URLEncoder.encode(code, "UTF-8") +
-            "&redirect_uri=" + URLEncoder.encode(REDIRECT_URI, "UTF-8") +
-            "&code_verifier=" + URLEncoder.encode(String.valueOf(verifier), "UTF-8");
-
-        Request req = new Request.Builder()
-            .url("https://" + COGNITO_DOMAIN + "/oauth2/token")
-            .post(RequestBody.create(MediaType.parse("application/x-www-form-urlencoded"), postData))
-            .addHeader("Accept", "application/json")
-            .build();
-
-        final java.util.concurrent.CompletableFuture<String> fut = new java.util.concurrent.CompletableFuture<>();
-        httpClient.newCall(req).enqueue(new okhttp3.Callback() {
-            @Override public void onFailure(okhttp3.Call call, java.io.IOException e) { fut.completeExceptionally(e); }
-            @Override public void onResponse(okhttp3.Call call, okhttp3.Response response) throws java.io.IOException {
-                try (okhttp3.Response res = response) {
-                    if (!res.isSuccessful() || res.body() == null) {
-                        fut.completeExceptionally(new IOException("Token exchange failed (status=" + res.code() + ")"));
-                        return;
-                    }
-                    okhttp3.ResponseBody rb = res.body();
-                    String body = rb != null ? rb.string() : "";
-                    fut.complete(body);
-                }
+    private CompletableFuture<Void> exchangeCodeForTokens(String code) {
+        CompletableFuture<Void> result = new CompletableFuture<>();
+        try {
+            String verifier = null;
+            if (configManager != null) {
+                Object v = configManager.getConfiguration("PvPLeaderboard", "pkce_verifier");
+                verifier = v != null ? String.valueOf(v) : null;
+            } else {
+                verifier = transientVerifier;
             }
-        });
-        String response = fut.get(10, java.util.concurrent.TimeUnit.SECONDS);
+            String postData =
+                "grant_type=" + URLEncoder.encode("authorization_code", "UTF-8") +
+                "&client_id=" + URLEncoder.encode(CLIENT_ID, "UTF-8") +
+                "&code=" + URLEncoder.encode(code, "UTF-8") +
+                "&redirect_uri=" + URLEncoder.encode(REDIRECT_URI, "UTF-8") +
+                "&code_verifier=" + URLEncoder.encode(String.valueOf(verifier), "UTF-8");
 
-        JsonObject tokens = gson.fromJson(response, JsonObject.class);
-        accessToken = tokens.has("access_token") && !tokens.get("access_token").isJsonNull() ? tokens.get("access_token").getAsString() : null;
-        idToken = tokens.has("id_token") && !tokens.get("id_token").isJsonNull() ? tokens.get("id_token").getAsString() : null;
-        refreshToken = tokens.has("refresh_token") && !tokens.get("refresh_token").isJsonNull() ? tokens.get("refresh_token").getAsString() : null;
-        int expiresIn = tokens.has("expires_in") ? tokens.get("expires_in").getAsInt() : 3600;
-        tokenExpiry = System.currentTimeMillis() + (expiresIn * 1000L);
+            Request req = new Request.Builder()
+                .url("https://" + COGNITO_DOMAIN + "/oauth2/token")
+                .post(RequestBody.create(MediaType.parse("application/x-www-form-urlencoded"), postData))
+                .addHeader("Accept", "application/json")
+                .build();
 
-        // Validate ID token claims before proceeding (iss/aud/exp/token_use)
-        if (idToken == null || !validateIdTokenClaims(idToken)) {
-            clearTokens();
-            throw new IOException("Invalid ID token claims");
+            httpClient.newCall(req).enqueue(new okhttp3.Callback() {
+                @Override public void onFailure(okhttp3.Call call, java.io.IOException e) {
+                    result.completeExceptionally(e);
+                }
+                @Override public void onResponse(okhttp3.Call call, okhttp3.Response response) throws java.io.IOException {
+                    try (okhttp3.Response res = response) {
+                        if (!res.isSuccessful() || res.body() == null) {
+                            result.completeExceptionally(new IOException("Token exchange failed (status=" + res.code() + ")"));
+                            return;
+                        }
+                        okhttp3.ResponseBody rb = res.body();
+                        String body = rb != null ? rb.string() : "";
+
+                        JsonObject tokens = gson.fromJson(body, JsonObject.class);
+                        accessToken = tokens.has("access_token") && !tokens.get("access_token").isJsonNull() ? tokens.get("access_token").getAsString() : null;
+                        idToken = tokens.has("id_token") && !tokens.get("id_token").isJsonNull() ? tokens.get("id_token").getAsString() : null;
+                        refreshToken = tokens.has("refresh_token") && !tokens.get("refresh_token").isJsonNull() ? tokens.get("refresh_token").getAsString() : null;
+                        int expiresIn = tokens.has("expires_in") ? tokens.get("expires_in").getAsInt() : 3600;
+                        tokenExpiry = System.currentTimeMillis() + (expiresIn * 1000L);
+
+                        if (idToken == null || !validateIdTokenClaims(idToken)) {
+                            clearTokens();
+                            result.completeExceptionally(new IOException("Invalid ID token claims"));
+                            return;
+                        }
+
+                        if (configManager != null) {
+                            configManager.unsetConfiguration("PvPLeaderboard", "pkce_verifier");
+                            configManager.unsetConfiguration("PvPLeaderboard", "oauth_state");
+                        }
+                        transientVerifier = null;
+                        transientState = null;
+
+                        ensureRefreshScheduler();
+                        result.complete(null);
+                    } catch (Exception e) {
+                        result.completeExceptionally(e);
+                    }
+                }
+            });
+        } catch (Exception e) {
+            result.completeExceptionally(e);
         }
-        
-        // Clean up
-        if (configManager != null) {
-            configManager.unsetConfiguration("PvPLeaderboard", "pkce_verifier");
-            configManager.unsetConfiguration("PvPLeaderboard", "oauth_state");
-        }
-        transientVerifier = null;
-        transientState = null;
-
-        // Start/refresh auto refresh loop when we have a refresh token
-        ensureRefreshScheduler();
+        return result;
     }
     
     public String getAccessToken() {
@@ -316,66 +326,80 @@ public class CognitoAuthService {
     }
 
     private void refreshFlow() {
-        try {
-            // If logged out, skip
-            if (refreshToken == null || refreshToken.isEmpty()) return;
-            // If not close to expiry, reschedule
-            long now = System.currentTimeMillis();
-            if (tokenExpiry > 0 && now < tokenExpiry - 120_000L) {
-                scheduleNextRefresh();
-                return;
-            }
-            refreshWithToken();
-        } catch (Exception ignore) {
-            // On failure, retry in 2 minutes
-            try { if (scheduler != null) scheduler.schedule(this::refreshFlow, 120_000L, TimeUnit.MILLISECONDS); } catch (Exception ignored) {}
+        // If logged out, skip
+        if (refreshToken == null || refreshToken.isEmpty()) return;
+        // If not close to expiry, reschedule
+        long now = System.currentTimeMillis();
+        if (tokenExpiry > 0 && now < tokenExpiry - 120_000L) {
+            scheduleNextRefresh();
             return;
         }
-        // On success, schedule next
-        scheduleNextRefresh();
+        refreshWithToken().thenRun(() -> {
+            scheduleNextRefresh();
+        }).exceptionally(ex -> {
+            try { if (scheduler != null) scheduler.schedule(this::refreshFlow, 120_000L, TimeUnit.MILLISECONDS); } catch (Exception ignored) {}
+            return null;
+        });
     }
 
-    private void refreshWithToken() throws Exception {
-        if (refreshToken == null || refreshToken.isEmpty()) throw new IOException("No refresh token");
-        String postData =
-            "grant_type=" + URLEncoder.encode("refresh_token", "UTF-8") +
-            "&client_id=" + URLEncoder.encode(CLIENT_ID, "UTF-8") +
-            "&refresh_token=" + URLEncoder.encode(refreshToken, "UTF-8");
-
-        Request req = new Request.Builder()
-            .url("https://" + COGNITO_DOMAIN + "/oauth2/token")
-            .post(RequestBody.create(MediaType.parse("application/x-www-form-urlencoded"), postData))
-            .addHeader("Accept", "application/json")
-            .build();
-
-        final java.util.concurrent.CompletableFuture<String> fut = new java.util.concurrent.CompletableFuture<>();
-        httpClient.newCall(req).enqueue(new okhttp3.Callback() {
-            @Override public void onFailure(okhttp3.Call call, java.io.IOException e) { fut.completeExceptionally(e); }
-            @Override public void onResponse(okhttp3.Call call, okhttp3.Response response) throws java.io.IOException {
-                try (okhttp3.Response res = response) {
-                    if (!res.isSuccessful() || res.body() == null) {
-                        fut.completeExceptionally(new IOException("Refresh failed (status=" + res.code() + ")"));
-                        return;
-                    }
-                    okhttp3.ResponseBody rb = res.body();
-                    String body = rb != null ? rb.string() : "";
-                    fut.complete(body);
-                }
-            }
-        });
-        String body = fut.get(10, java.util.concurrent.TimeUnit.SECONDS);
-
-        JsonObject tokens = gson.fromJson(body, JsonObject.class);
-        String newAccessToken = tokens.has("access_token") && !tokens.get("access_token").isJsonNull() ? tokens.get("access_token").getAsString() : null;
-        String newIdToken = tokens.has("id_token") && !tokens.get("id_token").isJsonNull() ? tokens.get("id_token").getAsString() : null;
-        int expiresIn = tokens.has("expires_in") ? tokens.get("expires_in").getAsInt() : 3600;
-        if (newAccessToken == null) throw new IOException("No access token in refresh");
-        accessToken = newAccessToken;
-        if (newIdToken != null) {
-            if (!validateIdTokenClaims(newIdToken)) throw new IOException("Invalid refreshed ID token");
-            idToken = newIdToken;
+    private CompletableFuture<Void> refreshWithToken() {
+        CompletableFuture<Void> result = new CompletableFuture<>();
+        if (refreshToken == null || refreshToken.isEmpty()) {
+            result.completeExceptionally(new IOException("No refresh token"));
+            return result;
         }
-        tokenExpiry = System.currentTimeMillis() + (expiresIn * 1000L);
+        try {
+            String postData =
+                "grant_type=" + URLEncoder.encode("refresh_token", "UTF-8") +
+                "&client_id=" + URLEncoder.encode(CLIENT_ID, "UTF-8") +
+                "&refresh_token=" + URLEncoder.encode(refreshToken, "UTF-8");
+
+            Request req = new Request.Builder()
+                .url("https://" + COGNITO_DOMAIN + "/oauth2/token")
+                .post(RequestBody.create(MediaType.parse("application/x-www-form-urlencoded"), postData))
+                .addHeader("Accept", "application/json")
+                .build();
+
+            httpClient.newCall(req).enqueue(new okhttp3.Callback() {
+                @Override public void onFailure(okhttp3.Call call, java.io.IOException e) {
+                    result.completeExceptionally(e);
+                }
+                @Override public void onResponse(okhttp3.Call call, okhttp3.Response response) throws java.io.IOException {
+                    try (okhttp3.Response res = response) {
+                        if (!res.isSuccessful() || res.body() == null) {
+                            result.completeExceptionally(new IOException("Refresh failed (status=" + res.code() + ")"));
+                            return;
+                        }
+                        okhttp3.ResponseBody rb = res.body();
+                        String body = rb != null ? rb.string() : "";
+
+                        JsonObject tokens = gson.fromJson(body, JsonObject.class);
+                        String newAccessToken = tokens.has("access_token") && !tokens.get("access_token").isJsonNull() ? tokens.get("access_token").getAsString() : null;
+                        String newIdToken = tokens.has("id_token") && !tokens.get("id_token").isJsonNull() ? tokens.get("id_token").getAsString() : null;
+                        int expiresIn = tokens.has("expires_in") ? tokens.get("expires_in").getAsInt() : 3600;
+                        if (newAccessToken == null) {
+                            result.completeExceptionally(new IOException("No access token in refresh"));
+                            return;
+                        }
+                        accessToken = newAccessToken;
+                        if (newIdToken != null) {
+                            if (!validateIdTokenClaims(newIdToken)) {
+                                result.completeExceptionally(new IOException("Invalid refreshed ID token"));
+                                return;
+                            }
+                            idToken = newIdToken;
+                        }
+                        tokenExpiry = System.currentTimeMillis() + (expiresIn * 1000L);
+                        result.complete(null);
+                    } catch (Exception e) {
+                        result.completeExceptionally(e);
+                    }
+                }
+            });
+        } catch (Exception e) {
+            result.completeExceptionally(e);
+        }
+        return result;
     }
 
     

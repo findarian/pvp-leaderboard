@@ -130,8 +130,14 @@ public class LoginPanel extends JPanel
     private void searchUserOnPlugin()
     {
         String username = pluginSearchField.getText();
-        if (username == null || username.trim().isEmpty()) return;
-        if (!isValidUsername(username)) return;
+        if (username == null || username.trim().isEmpty())
+        {
+            return;
+        }
+        if (!isValidUsername(username))
+        {
+            return;
+        }
         
         // Rate limit: 10 searches per minute
         if (!checkPluginSearchRateLimit())
@@ -145,6 +151,7 @@ public class LoginPanel extends JPanel
                 timer.start();
             }
             return;
+
         }
         
         if (onPluginSearch != null)
@@ -268,4 +275,3 @@ public class LoginPanel extends JPanel
         if (loginButton != null) loginButton.setText("Login to view stats in runelite");
     }
 }
-

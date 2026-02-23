@@ -147,6 +147,19 @@ public class PvPLeaderboardPlugin extends Plugin
 		// Init fight monitor with RankOverlay for MMR notifications
 		fightMonitor.init(rankOverlay);
 
+		// If player is already logged in (plugin was toggled off/on), resume heartbeats
+		if (client.getGameState() == GameState.LOGGED_IN && client.getLocalPlayer() != null)
+		{
+			String self = client.getLocalPlayer().getName();
+			if (self != null && !self.trim().isEmpty()
+				&& config.showRankToOthers()
+				&& !whitelistService.isHeartbeatActive())
+			{
+				log.debug("[Plugin] Already logged in on startUp, resuming heartbeat for: {}", self);
+				whitelistService.onLogin(self);
+			}
+		}
+
 		log.debug("PvP Leaderboard started!");
 	}
 
@@ -157,6 +170,7 @@ public class PvPLeaderboardPlugin extends Plugin
 		eventBus.unregister(rankOverlay);
 		clientToolbar.removeNavigation(navButton);
 		overlayManager.remove(rankOverlay);
+		whitelistService.onLogout();
 		log.debug("PvP Leaderboard stopped!");
 	}
 

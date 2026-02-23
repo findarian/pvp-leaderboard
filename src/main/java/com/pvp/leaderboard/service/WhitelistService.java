@@ -134,6 +134,15 @@ public class WhitelistService
         currentUsername = null;
         cancelScheduledHeartbeat();
     }
+
+    /**
+     * Whether a heartbeat schedule is currently active.
+     */
+    public boolean isHeartbeatActive()
+    {
+        ScheduledFuture<?> scheduled = scheduledHeartbeat;
+        return scheduled != null && !scheduled.isDone() && currentUsername != null;
+    }
     
     /**
      * Cancel any scheduled heartbeat to prevent chain accumulation.

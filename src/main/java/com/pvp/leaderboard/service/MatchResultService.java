@@ -163,19 +163,22 @@ public class MatchResultService
             .build();
 
         log.debug("[MatchAPI] Auth request to: {}", API_URL);
+        final long reqStart = System.nanoTime();
 
         httpClient.newCall(request).enqueue(new Callback()
         {
             @Override
             public void onFailure(Call call, IOException e)
             {
-                log.debug("[MatchAPI] Auth request NETWORK FAILURE: {}", e.getMessage());
+                long ms = (System.nanoTime() - reqStart) / 1_000_000;
+                log.debug("[MatchAPI] Auth request NETWORK FAILURE after {}ms: {}", ms, e.getMessage());
                 future.complete(false);
             }
 
             @Override
             public void onResponse(Call call, Response response) throws IOException
             {
+                long ms = (System.nanoTime() - reqStart) / 1_000_000;
                 try (Response res = response)
                 {
                     int code = res.code();
@@ -183,14 +186,14 @@ public class MatchResultService
                     
                     if (code >= 200 && code < 300)
                     {
-                        log.debug("[MatchAPI] Auth response SUCCESS: code={} requestId={}", code, reqId);
+                        log.debug("[MatchAPI] Auth response SUCCESS in {}ms: code={} requestId={}", ms, code, reqId);
                         future.complete(true);
                     }
                     else
                     {
                         String errBody = null;
                         try { okhttp3.ResponseBody err = res.body(); errBody = err != null ? err.string() : null; } catch (Exception ignore) {}
-                        log.debug("[MatchAPI] Auth response FAILED: code={} requestId={} body={}", code, reqId, errBody);
+                        log.debug("[MatchAPI] Auth response FAILED in {}ms: code={} requestId={} body={}", ms, code, reqId, errBody);
                         future.complete(false);
                     }
                 }
@@ -226,19 +229,22 @@ public class MatchResultService
             .build();
 
         log.debug("[MatchAPI] Unauth request to: {} timestamp={}", API_URL, timestamp);
+        final long reqStart = System.nanoTime();
 
         httpClient.newCall(request).enqueue(new Callback()
         {
             @Override
             public void onFailure(Call call, IOException e)
             {
-                log.debug("[MatchAPI] Unauth request NETWORK FAILURE: {}", e.getMessage());
+                long ms = (System.nanoTime() - reqStart) / 1_000_000;
+                log.debug("[MatchAPI] Unauth request NETWORK FAILURE after {}ms: {}", ms, e.getMessage());
                 future.complete(false);
             }
 
             @Override
             public void onResponse(Call call, Response response) throws IOException
             {
+                long ms = (System.nanoTime() - reqStart) / 1_000_000;
                 try (Response res = response)
                 {
                     int code = res.code();
@@ -246,14 +252,14 @@ public class MatchResultService
                     
                     if ((code >= 200 && code < 300) || code == 202)
                     {
-                        log.debug("[MatchAPI] Unauth response SUCCESS: code={} requestId={}", code, reqId);
+                        log.debug("[MatchAPI] Unauth response SUCCESS in {}ms: code={} requestId={}", ms, code, reqId);
                         future.complete(true);
                     }
                     else
                     {
                         String errBody = null;
                         try { okhttp3.ResponseBody err = res.body(); errBody = err != null ? err.string() : null; } catch (Exception ignore) {}
-                        log.debug("[MatchAPI] Unauth response FAILED: code={} requestId={} body={}", code, reqId, errBody);
+                        log.debug("[MatchAPI] Unauth response FAILED in {}ms: code={} requestId={} body={}", ms, code, reqId, errBody);
                         future.complete(false);
                     }
                 }

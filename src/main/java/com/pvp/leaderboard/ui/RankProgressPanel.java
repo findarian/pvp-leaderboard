@@ -32,7 +32,7 @@ public class RankProgressPanel extends JPanel
             bucketPanel.setBorder(BorderFactory.createEmptyBorder(0, 6, 0, SIDEBAR_SCROLLBAR_RESERVE_PX));
             bucketPanel.setMaximumSize(new Dimension(Integer.MAX_VALUE, 40));
             
-            progressLabels[i] = new JLabel(buckets[i] + " - — (0.0%) ");
+            progressLabels[i] = new JLabel(buckets[i]);
             progressLabels[i].setFont(progressLabels[i].getFont().deriveFont(Font.BOLD));
             bucketPanel.add(progressLabels[i], BorderLayout.NORTH);
             
@@ -64,7 +64,7 @@ public class RankProgressPanel extends JPanel
                 if (progressLabels[idx] != null)
                 {
                     String displayRank = rankLabel + (division > 0 ? " " + division : "");
-                    String text = buckets[idx] + " - " + displayRank + " (" + Math.round(pct) + "%)";
+                    String text = buckets[idx] + " " + displayRank;
                     if (rankNumber > 0)
                     {
                         text += " #" + rankNumber;
@@ -87,7 +87,7 @@ public class RankProgressPanel extends JPanel
             {
                 if (progressLabels[i] != null)
                 {
-                    progressLabels[i].setText(buckets[i] + " - — (0.0%)");
+                    progressLabels[i].setText(buckets[i]);
                 }
                 if (progressBars[i] != null)
                 {
