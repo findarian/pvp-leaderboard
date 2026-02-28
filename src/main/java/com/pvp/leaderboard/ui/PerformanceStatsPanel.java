@@ -12,15 +12,12 @@ import java.util.Map;
 
 public class PerformanceStatsPanel extends JPanel
 {
-    private JLabel winPercentLabel;
     private JLabel cumulativeStatsLabel;
     private JPanel bucketSelectorPanel;
     
     private DefaultTableModel rankBreakdownModel;
     private JTable rankBreakdownTable;
     
-    // Per-bucket cumulative stats: bucket -> [kills, deaths, ties]
-    private Map<String, int[]> bucketStats;
     private String currentBucket = "overall";
     
     // Cumulative opponent rank stats per bucket: bucket -> (rank -> [wins, losses])
@@ -29,7 +26,7 @@ public class PerformanceStatsPanel extends JPanel
     public PerformanceStatsPanel()
     {
         setLayout(new BoxLayout(this, BoxLayout.Y_AXIS));
-        setBorder(BorderFactory.createTitledBorder("Last 100 Game Performance"));
+        setBorder(BorderFactory.createTitledBorder("Performance Breakdown"));
         
         initUI();
     }
@@ -40,35 +37,27 @@ public class PerformanceStatsPanel extends JPanel
         if (baseFont == null) baseFont = new Font("SansSerif", Font.PLAIN, 12);
         Font small = baseFont.deriveFont(Font.PLAIN, Math.max(10f, baseFont.getSize2D() - 1f));
         
-        // Bucket selector row
-        bucketSelectorPanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 4, 2));
+        bucketSelectorPanel = new JPanel(new GridLayout(2, 3, 2, 2));
+        bucketSelectorPanel.setMaximumSize(new Dimension(Integer.MAX_VALUE, 56));
         String[] buckets = {"Overall", "NH", "Veng", "Multi", "DMM"};
         for (String b : buckets) {
             JButton btn = new JButton(b);
             btn.setFont(small);
-            btn.setMargin(new Insets(2, 6, 2, 6));
+            btn.setMargin(new Insets(2, 2, 2, 2));
+            btn.setFocusPainted(false);
             final String bucketKey = b.toLowerCase();
             btn.addActionListener(e -> setBucket(bucketKey));
-            // Highlight the default (Overall)
-            if ("overall".equals(bucketKey)) {
-                btn.setEnabled(false);
-            }
             bucketSelectorPanel.add(btn);
         }
+        styleBucketButtons("overall");
         add(bucketSelectorPanel);
         
-        // Summary row with cumulative stats and win rate
+        // Summary row
         JPanel summaryRow = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 0));
         
-        cumulativeStatsLabel = new JLabel("- Kills / - Deaths (- total)");
+        cumulativeStatsLabel = new JLabel("K: - D: - Winrate -%");
         cumulativeStatsLabel.setFont(small);
         summaryRow.add(cumulativeStatsLabel);
-        
-        summaryRow.add(Box.createHorizontalStrut(12));
-        
-        winPercentLabel = new JLabel("- % Winrate");
-        winPercentLabel.setFont(small);
-        summaryRow.add(winPercentLabel);
         
         add(summaryRow);
 
@@ -78,19 +67,16 @@ public class PerformanceStatsPanel extends JPanel
 
     private JPanel createRankBreakdownTable()
     {
-        String[] columns = {"Rank", "Wins", "Losses"};
+        String[] columns = {"Rank", "Wins", "Deaths", "KD"};
         rankBreakdownModel = new DefaultTableModel(columns, 0);
         rankBreakdownTable = new JTable(rankBreakdownModel);
         rankBreakdownTable.setEnabled(false);
         
-        // Set all columns to the same width
-        int columnWidth = 60;
-        for (int i = 0; i < rankBreakdownTable.getColumnCount(); i++) {
-            rankBreakdownTable.getColumnModel().getColumn(i).setPreferredWidth(columnWidth);
-            rankBreakdownTable.getColumnModel().getColumn(i).setMinWidth(columnWidth);
-            rankBreakdownTable.getColumnModel().getColumn(i).setMaxWidth(columnWidth);
-        }
-        rankBreakdownTable.setAutoResizeMode(JTable.AUTO_RESIZE_OFF);
+        rankBreakdownTable.getColumnModel().getColumn(0).setPreferredWidth(90);
+        rankBreakdownTable.getColumnModel().getColumn(1).setPreferredWidth(45);
+        rankBreakdownTable.getColumnModel().getColumn(2).setPreferredWidth(45);
+        rankBreakdownTable.getColumnModel().getColumn(3).setPreferredWidth(45);
+        rankBreakdownTable.setAutoResizeMode(JTable.AUTO_RESIZE_ALL_COLUMNS);
         
         JScrollPane sp = new JScrollPane(rankBreakdownTable);
         sp.setPreferredSize(new Dimension(0, 150)); // Adjusted height
@@ -103,61 +89,62 @@ public class PerformanceStatsPanel extends JPanel
     }
 
     /**
-     * Receive all bucket stats from the /user API response.
-     * Called from DashboardPanel.loadPlayerStats() after getUserProfile.
-     */
-    public void setCumulativeStats(JsonObject cumulativeStats)
-    {
-        bucketStats = new HashMap<>();
-        for (String bucket : new String[]{"overall", "nh", "veng", "multi", "dmm"}) {
-            if (cumulativeStats != null && cumulativeStats.has(bucket)) {
-                JsonObject bs = cumulativeStats.getAsJsonObject(bucket);
-                int kills = bs.has("wins") ? bs.get("wins").getAsInt() : 0;
-                int deaths = bs.has("losses") ? bs.get("losses").getAsInt() : 0;
-                int ties = bs.has("ties") ? bs.get("ties").getAsInt() : 0;
-                bucketStats.put(bucket, new int[]{kills, deaths, ties});
-            } else {
-                bucketStats.put(bucket, new int[]{0, 0, 0});
-            }
-        }
-        updateCumulativeDisplay();
-    }
-    
-    /**
-     * Switch to a different bucket for cumulative stats display.
+     * Switch to a different bucket for display.
      */
     public void setBucket(String bucket)
     {
         this.currentBucket = bucket;
         updateCumulativeDisplay();
-        updateRankBreakdownDisplay();  // Also update opponent rank table for selected bucket
-        // Update button states
-        SwingUtilities.invokeLater(() -> {
-            for (Component c : bucketSelectorPanel.getComponents()) {
-                if (c instanceof JButton) {
-                    JButton btn = (JButton) c;
-                    boolean isSelected = btn.getText().equalsIgnoreCase(bucket);
-                    btn.setEnabled(!isSelected);
+        updateRankBreakdownDisplay();
+        SwingUtilities.invokeLater(() -> styleBucketButtons(bucket));
+    }
+    
+    private void styleBucketButtons(String activeBucket)
+    {
+        for (Component c : bucketSelectorPanel.getComponents())
+        {
+            if (c instanceof JButton)
+            {
+                JButton btn = (JButton) c;
+                boolean selected = btn.getText().equalsIgnoreCase(activeBucket);
+                if (selected)
+                {
+                    btn.setForeground(Color.WHITE);
+                    btn.setBackground(new Color(60, 60, 60));
+                }
+                else
+                {
+                    btn.setForeground(Color.GRAY);
+                    btn.setBackground(UIManager.getColor("Button.background"));
                 }
             }
-        });
+        }
     }
     
     /**
-     * Update the cumulative stats display based on selected bucket.
+     * Update the cumulative stats display by summing opponent rank stats for the selected bucket.
      */
     private void updateCumulativeDisplay()
     {
-        int[] stats = bucketStats != null ? bucketStats.getOrDefault(currentBucket, new int[]{0, 0, 0}) : new int[]{0, 0, 0};
-        int kills = stats[0];
-        int deaths = stats[1];
-        int ties = stats[2];
-        int total = kills + deaths + ties;  // Include ties in denominator
+        int kills = 0, deaths = 0;
+        if (opponentRankStatsByBucket != null)
+        {
+            Map<String, int[]> currentStats = opponentRankStatsByBucket.getOrDefault(
+                currentBucket,
+                opponentRankStatsByBucket.getOrDefault("overall", Collections.emptyMap())
+            );
+            for (int[] v : currentStats.values())
+            {
+                kills += v[0];
+                deaths += v[1];
+            }
+        }
+        int total = kills + deaths;
         double winRate = total > 0 ? (double) kills / total * 100 : 0;
         
+        final int k = kills, d = deaths;
         SwingUtilities.invokeLater(() -> {
-            cumulativeStatsLabel.setText(String.format("%d Kills / %d Deaths (%d total)", kills, deaths, total));
-            winPercentLabel.setText(String.format("%.1f%% Winrate", winRate));
+            cumulativeStatsLabel.setText(String.format("K: %d D: %d Winrate %.1f%%", k, d, winRate));
         });
     }
 
@@ -223,6 +210,7 @@ public class PerformanceStatsPanel extends JPanel
             }
         }
         updateRankBreakdownDisplay();
+        updateCumulativeDisplay();
     }
     
     /**
@@ -272,7 +260,10 @@ public class PerformanceStatsPanel extends JPanel
             for (String key : sortedKeys) {
                 int[] stats = currentStats.get(key);
                 if (stats != null && (stats[0] > 0 || stats[1] > 0)) {
-                    rankBreakdownModel.addRow(new Object[]{key, stats[0], stats[1]});
+                    String kd = stats[1] > 0
+                        ? String.format("%.2f", (double) stats[0] / stats[1])
+                        : String.valueOf(stats[0]);
+                    rankBreakdownModel.addRow(new Object[]{key, stats[0], stats[1], kd});
                 }
             }
         });
@@ -308,27 +299,21 @@ public class PerformanceStatsPanel extends JPanel
             
             for (Map.Entry<String, int[]> e : stats.entrySet())
             {
-                rankBreakdownModel.addRow(new Object[]{e.getKey(), e.getValue()[0], e.getValue()[1]});
+                int w = e.getValue()[0], l = e.getValue()[1];
+                String kd = l > 0 ? String.format("%.2f", (double) w / l) : String.valueOf(w);
+                rankBreakdownModel.addRow(new Object[]{e.getKey(), w, l, kd});
             }
         });
     }
 
     public void reset()
     {
-        bucketStats = null;
         opponentRankStatsByBucket = null;
         currentBucket = "overall";
         SwingUtilities.invokeLater(() -> {
-            cumulativeStatsLabel.setText("- Kills / - Deaths (- total)");
-            winPercentLabel.setText("- % Winrate");
+            cumulativeStatsLabel.setText("K: - D: - Winrate -%");
             if (rankBreakdownModel != null) rankBreakdownModel.setRowCount(0);
-            // Reset button states
-            for (Component c : bucketSelectorPanel.getComponents()) {
-                if (c instanceof JButton) {
-                    JButton btn = (JButton) c;
-                    btn.setEnabled(!"Overall".equalsIgnoreCase(btn.getText()));
-                }
-            }
+            styleBucketButtons("overall");
         });
     }
 }

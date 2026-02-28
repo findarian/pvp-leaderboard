@@ -41,7 +41,6 @@ public class RankOverlay extends Overlay
 
     // Config change tracking
     private String lastBucketKey = null;
-    private PvPLeaderboardConfig.RankDisplayMode lastDisplayMode = null;
 
     // Self-rank scheduling
     private volatile long selfRefreshRequestedAtMs = 0L;
@@ -356,21 +355,19 @@ public class RankOverlay extends Overlay
             return new Dimension(0, 0);
         }
 
-        // Handle bucket/mode config changes
+        // Handle bucket config changes
         String currentBucket = bucketKey(config.rankBucket());
-        PvPLeaderboardConfig.RankDisplayMode currentMode = config.rankDisplayMode();
 
-        if (lastBucketKey == null || !lastBucketKey.equals(currentBucket) || lastDisplayMode != currentMode)
+        if (lastBucketKey == null || !lastBucketKey.equals(currentBucket))
         {
             displayedRanks.clear();
             displayedRanksTimestamp.clear();
-            apiSetRanks.clear();  // Clear API overrides when config changes
-            whitelistPlayerCache.clearLookupCache();  // Re-evaluate players for new bucket
+            apiSetRanks.clear();
+            whitelistPlayerCache.clearLookupCache();
             lastBucketKey = currentBucket;
-            lastDisplayMode = currentMode;
             selfRankAttempted = false;
             nextSelfRankAllowedAtMs = 0L;
-            log.debug("[Overlay] Bucket/mode changed to {} / {} - caches cleared", currentBucket, currentMode);
+            log.debug("[Overlay] Bucket changed to {} - caches cleared", currentBucket);
         }
 
         // Get local player
@@ -432,7 +429,7 @@ public class RankOverlay extends Overlay
         // Render whitelist player ranks (if enabled and has data)
         if (config.enableWhitelistRanks() && whitelistPlayerCache.size() > 0)
         {
-            renderWhitelistPlayers(graphics, localPlayer, currentBucket, currentMode, heightOffset);
+            renderWhitelistPlayers(graphics, localPlayer, currentBucket, heightOffset);
         }
 
         return new Dimension(0, 0);
@@ -447,7 +444,7 @@ public class RankOverlay extends Overlay
      * Uses current bucket setting, with fallback to overall if bucket not found.
      */
     private void renderWhitelistPlayers(Graphics2D graphics, Player localPlayer, String bucket,
-                                        PvPLeaderboardConfig.RankDisplayMode mode, int heightOffset)
+                                        int heightOffset)
     {
         String localName = localPlayer.getName();
         long whitelistRefreshMs = whitelistPlayerCache.getLastRefreshMs();
@@ -471,18 +468,7 @@ public class RankOverlay extends Overlay
             
             // Get whitelist cache rank
             WhitelistPlayerCache.BucketRank whitelistRank = whitelistPlayerCache.getRank(playerName, bucket);
-            String formattedWhitelistRank = null;
-            if (whitelistRank != null)
-            {
-                if (mode == PvPLeaderboardConfig.RankDisplayMode.RANK_NUMBER)
-                {
-                    formattedWhitelistRank = whitelistRank.rank > 0 ? "Rank " + whitelistRank.rank : null;
-                }
-                else
-                {
-                    formattedWhitelistRank = whitelistRank.getFormattedTier();
-                }
-            }
+            String formattedWhitelistRank = whitelistRank != null ? whitelistRank.getFormattedTier() : null;
             
             // Use whichever was fetched most recently
             if (apiRank != null && apiTimestamp != null)
@@ -521,52 +507,29 @@ public class RankOverlay extends Overlay
     private void fetchRankForSelf(String selfName)
     {
         String bucket = bucketKey(config.rankBucket());
-        PvPLeaderboardConfig.RankDisplayMode mode = config.rankDisplayMode();
         String key = NameUtils.canonicalKey(selfName);
 
-        // Use API as the primary source of truth (fresh data)
-        // Fall back to shard only if API fails
         pvpDataService.getTierFromProfile(selfName, bucket)
             .thenAccept(apiTier -> {
                 long fetchCompletedAt = System.currentTimeMillis();
                 
                 if (apiTier != null)
                 {
-                    // API returned fresh data - use it
-                    String displayRank = apiTier;
-                    
-                    // For RANK_NUMBER mode, we need to also fetch the rank number from shard
-                    if (mode == PvPLeaderboardConfig.RankDisplayMode.RANK_NUMBER)
-                    {
-                        // Fetch shard for rank number but keep API tier as authoritative
-                        pvpDataService.getShardRankByName(selfName, bucket)
-                            .thenAccept(sr -> {
-                                String rankDisplay = (sr != null && sr.rank > 0) ? "Rank " + sr.rank : apiTier;
-                                displayedRanks.put(key, rankDisplay);
-                                displayedRanksTimestamp.put(key, System.currentTimeMillis());
-                                apiSetRanks.put(key, rankDisplay);
-                                log.debug("[Overlay] Self rank fetched from API: {} = {} (rank mode)", selfName, rankDisplay);
-                            });
-                    }
-                    else
-                    {
-                        displayedRanks.put(key, displayRank);
-                        displayedRanksTimestamp.put(key, fetchCompletedAt);
-                        apiSetRanks.put(key, displayRank);
-                        log.debug("[Overlay] Self rank fetched from API: {} = {}", selfName, displayRank);
-                    }
+                    displayedRanks.put(key, apiTier);
+                    displayedRanksTimestamp.put(key, fetchCompletedAt);
+                    apiSetRanks.put(key, apiTier);
+                    log.debug("[Overlay] Self rank fetched from API: {} = {}", selfName, apiTier);
                     nextSelfRankAllowedAtMs = fetchCompletedAt + 60_000L;
                 }
                 else
                 {
-                    // API failed - fall back to shard
                     log.debug("[Overlay] API returned null for self {}, falling back to shard", selfName);
-                    fetchRankForSelfFromShard(selfName, bucket, mode, key);
+                    fetchRankForSelfFromShard(selfName, bucket, key);
                 }
             })
             .exceptionally(ex -> {
                 log.debug("[Overlay] API error fetching self rank: {}, falling back to shard", ex.getMessage());
-                fetchRankForSelfFromShard(selfName, bucket, mode, key);
+                fetchRankForSelfFromShard(selfName, bucket, key);
                 return null;
             });
     }
@@ -574,8 +537,7 @@ public class RankOverlay extends Overlay
     /**
      * Fallback method to fetch self rank from shard when API fails.
      */
-    private void fetchRankForSelfFromShard(String selfName, String bucket, 
-                                           PvPLeaderboardConfig.RankDisplayMode mode, String key)
+    private void fetchRankForSelfFromShard(String selfName, String bucket, String key)
     {
         pvpDataService.getShardRankByName(selfName, bucket)
             .thenAccept(sr -> {
@@ -585,15 +547,7 @@ public class RankOverlay extends Overlay
                     return;
                 }
 
-                String shardRank;
-                if (mode == PvPLeaderboardConfig.RankDisplayMode.RANK_NUMBER)
-                {
-                    shardRank = sr.rank > 0 ? "Rank " + sr.rank : null;
-                }
-                else
-                {
-                    shardRank = sr.tier;
-                }
+                String shardRank = sr.tier;
 
                 if (shardRank != null)
                 {

@@ -15,8 +15,7 @@ public class LoginPanel extends JPanel
     private final Consumer<String> onPluginSearch;
     private final Runnable onLoginStateChanged;
 
-    private JTextField websiteSearchField;
-    private JTextField pluginSearchField;
+    private JTextField searchField;
     private JButton pluginSearchBtn;
     private JButton loginButton;
     
@@ -33,63 +32,66 @@ public class LoginPanel extends JPanel
         this.onLoginStateChanged = onLoginStateChanged;
 
         setLayout(new BoxLayout(this, BoxLayout.Y_AXIS));
-        setBorder(BorderFactory.createTitledBorder("Login to view stats in runelite"));
-        setMaximumSize(new Dimension(220, 190));
-        setPreferredSize(new Dimension(220, 190));
+        setBorder(BorderFactory.createEmptyBorder(4, 4, 4, 4));
+        setMaximumSize(new Dimension(220, 85));
+        setPreferredSize(new Dimension(220, 85));
 
         initUI();
     }
 
+    private static final String PLACEHOLDER = "Player to search";
+
     private void initUI()
     {
-        // Website search
-        JLabel websiteLabel = new JLabel("Search user on website:");
-        websiteLabel.setAlignmentX(Component.LEFT_ALIGNMENT);
-        add(websiteLabel);
-        
-        JPanel websitePanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 2, 0));
-        websitePanel.setAlignmentX(Component.LEFT_ALIGNMENT);
-        websiteSearchField = new JTextField();
-        websiteSearchField.setPreferredSize(new Dimension(120, 25));
-        websiteSearchField.addActionListener(e -> searchUserOnWebsite());
-        
-        JButton websiteSearchBtn = new JButton("Search");
-        websiteSearchBtn.setPreferredSize(new Dimension(70, 25));
+        searchField = new JTextField(PLACEHOLDER);
+        searchField.setHorizontalAlignment(JTextField.CENTER);
+        searchField.setForeground(Color.GRAY);
+        searchField.setMaximumSize(new Dimension(Integer.MAX_VALUE, 25));
+        searchField.setAlignmentX(Component.LEFT_ALIGNMENT);
+        searchField.addFocusListener(new java.awt.event.FocusAdapter() {
+            @Override
+            public void focusGained(java.awt.event.FocusEvent e) {
+                if (searchField.getText().equals(PLACEHOLDER)) {
+                    searchField.setText("");
+                    searchField.setForeground(null);
+                }
+            }
+            @Override
+            public void focusLost(java.awt.event.FocusEvent e) {
+                if (searchField.getText().isEmpty()) {
+                    searchField.setText(PLACEHOLDER);
+                    searchField.setForeground(Color.GRAY);
+                }
+            }
+        });
+        searchField.addActionListener(e -> searchUserOnPlugin());
+        add(searchField);
+
+        add(Box.createVerticalStrut(4));
+
+        JPanel btnPanel = new JPanel(new GridLayout(1, 2, 4, 0));
+        btnPanel.setAlignmentX(Component.LEFT_ALIGNMENT);
+        btnPanel.setMaximumSize(new Dimension(Integer.MAX_VALUE, 40));
+
+        JButton websiteSearchBtn = new JButton("<html><center>Website<br>Search</center></html>");
         websiteSearchBtn.addActionListener(e -> searchUserOnWebsite());
-        
-        websitePanel.add(websiteSearchField);
-        websitePanel.add(websiteSearchBtn);
-        add(websitePanel);
-        
-        add(Box.createVerticalStrut(5));
-        
-        // Plugin search
-        JLabel pluginLabel = new JLabel("Search user on plugin:");
-        pluginLabel.setAlignmentX(Component.LEFT_ALIGNMENT);
-        add(pluginLabel);
-        
-        JPanel pluginPanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 2, 0));
-        pluginPanel.setAlignmentX(Component.LEFT_ALIGNMENT);
-        pluginSearchField = new JTextField();
-        pluginSearchField.setPreferredSize(new Dimension(120, 25));
-        pluginSearchField.addActionListener(e -> searchUserOnPlugin());
-        
-        pluginSearchBtn = new JButton("Search");
-        pluginSearchBtn.setPreferredSize(new Dimension(70, 25));
+
+        pluginSearchBtn = new JButton("<html><center>Plugin<br>Search</center></html>");
         pluginSearchBtn.addActionListener(e -> searchUserOnPlugin());
-        
-        pluginPanel.add(pluginSearchField);
-        pluginPanel.add(pluginSearchBtn);
-        add(pluginPanel);
-        
-        add(Box.createVerticalStrut(5));
-        
+
+        btnPanel.add(websiteSearchBtn);
+        btnPanel.add(pluginSearchBtn);
+        add(btnPanel);
+
         loginButton = new JButton("Login to view more stats");
-        loginButton.setPreferredSize(new Dimension(210, 25));
-        loginButton.setMaximumSize(new Dimension(220, 25));
+        loginButton.setMaximumSize(new Dimension(Integer.MAX_VALUE, 25));
         loginButton.setAlignmentX(Component.LEFT_ALIGNMENT);
         loginButton.addActionListener(e -> handleLogin());
-        add(loginButton);
+    }
+
+    public JButton getLoginButton()
+    {
+        return loginButton;
     }
 
     private boolean isValidUsername(String username)
@@ -110,8 +112,8 @@ public class LoginPanel extends JPanel
 
     private void searchUserOnWebsite()
     {
-        String username = websiteSearchField.getText();
-        if (username == null || username.trim().isEmpty())
+        String username = searchField.getText();
+        if (username == null || username.trim().isEmpty() || PLACEHOLDER.equals(username))
         {
             LinkBrowser.browse("https://devsecopsautomated.com/index.html");
             return;
@@ -129,8 +131,8 @@ public class LoginPanel extends JPanel
 
     private void searchUserOnPlugin()
     {
-        String username = pluginSearchField.getText();
-        if (username == null || username.trim().isEmpty())
+        String username = searchField.getText();
+        if (username == null || username.trim().isEmpty() || PLACEHOLDER.equals(username))
         {
             return;
         }
@@ -156,12 +158,12 @@ public class LoginPanel extends JPanel
         
         if (onPluginSearch != null)
         {
-            // Immediate visual feedback
             String normalizedUsername = normalizeUsername(username);
-            pluginSearchField.setText(normalizedUsername);
-            
-            // Trigger search
             onPluginSearch.accept(normalizedUsername);
+
+            searchField.setText(PLACEHOLDER);
+            searchField.setForeground(Color.GRAY);
+            searchField.transferFocus();
         }
     }
     
@@ -241,8 +243,7 @@ public class LoginPanel extends JPanel
                 loginButton.setEnabled(!busy);
                 loginButton.setText(busy ? "Logging in..." : (isLoggedIn ? "Logout" : "Login to view more stats"));
             }
-            if (websiteSearchField != null) websiteSearchField.setEnabled(!busy);
-            if (pluginSearchField != null) pluginSearchField.setEnabled(!busy);
+            if (searchField != null) searchField.setEnabled(!busy);
         }
         catch (Exception ignore) {}
     }
@@ -258,15 +259,17 @@ public class LoginPanel extends JPanel
     
     public void setPluginSearchText(String text)
     {
-        if (pluginSearchField != null)
+        if (searchField != null)
         {
-            pluginSearchField.setText(text);
+            searchField.setText(text);
         }
     }
     
     public String getPluginSearchText()
     {
-        return pluginSearchField != null ? pluginSearchField.getText() : "";
+        if (searchField == null) return "";
+        String text = searchField.getText();
+        return PLACEHOLDER.equals(text) ? "" : text;
     }
 
     private void clearTokens() {

@@ -27,13 +27,14 @@ public class DashboardPanel extends PluginPanel
     private LoginPanel loginPanel;
     private RankProgressPanel rankProgressPanel;
     private PerformanceStatsPanel performanceStatsPanel;
-    private MatchHistoryPanel matchHistoryPanel;
     private AdditionalStatsPanel extraStatsPanel;
     private WinRateChartPanel chartPanel;
     
     // Header elements
     private JLabel playerNameLabel;
     private JButton refreshButton;
+    private JButton matchHistoryBtn;
+    private JButton advancedToggle;
 
     // State
     private String currentMatchesPlayerId = null;
@@ -53,10 +54,9 @@ public class DashboardPanel extends PluginPanel
         setLayout(new BorderLayout());
         setBorder(BorderFactory.createEmptyBorder(10, 10, 10, 10));
         
-        JScrollPane scrollPane = new JScrollPane(createMainPanel());
-        scrollPane.setVerticalScrollBarPolicy(JScrollPane.VERTICAL_SCROLLBAR_AS_NEEDED);
-        scrollPane.setHorizontalScrollBarPolicy(JScrollPane.HORIZONTAL_SCROLLBAR_NEVER);
-        add(scrollPane, BorderLayout.CENTER);
+        JPanel mainPanel = createMainPanel();
+        disableNestedWheelScrolling(mainPanel);
+        add(mainPanel, BorderLayout.CENTER);
     }
     
     private JPanel createMainPanel()
@@ -65,50 +65,144 @@ public class DashboardPanel extends PluginPanel
         mainPanel.setLayout(new BoxLayout(mainPanel, BoxLayout.Y_AXIS));
         
         // 1. Community (kept simple here)
-        mainPanel.add(createCommunityBox());
+        JPanel communityBox = createCommunityBox();
+        communityBox.setAlignmentX(LEFT_ALIGNMENT);
+        mainPanel.add(communityBox);
         mainPanel.add(Box.createVerticalStrut(12));
 
-        // 2. Auth / Login
+        // 2. Matchmaking & Tournaments (coming soon)
+        String matchmakingDefault = "<html><center>Matchmaking & Tournaments</center></html>";
+        String matchmakingClicked = "<html><center>Coming soon, check<br>Discord for updates</center></html>";
+        JButton matchmakingBtn = new JButton(matchmakingDefault);
+        matchmakingBtn.setAlignmentX(LEFT_ALIGNMENT);
+        matchmakingBtn.setMaximumSize(new Dimension(Integer.MAX_VALUE, 40));
+        matchmakingBtn.setEnabled(false);
+        matchmakingBtn.addMouseListener(new java.awt.event.MouseAdapter() {
+            @Override
+            public void mouseClicked(java.awt.event.MouseEvent e) {
+                if (!matchmakingBtn.isEnabled() && matchmakingBtn.getText().equals(matchmakingDefault)) {
+                    matchmakingBtn.setText(matchmakingClicked);
+                    Timer revertTimer = new Timer(15000, ev -> {
+                        matchmakingBtn.setText(matchmakingDefault);
+                    });
+                    revertTimer.setRepeats(false);
+                    revertTimer.start();
+                }
+            }
+        });
+        mainPanel.add(matchmakingBtn);
+        mainPanel.add(Box.createVerticalStrut(8));
+
+        // 3. Search box
         loginPanel = new LoginPanel(cognitoAuthService, this::loadMatchHistory, this::onLoginStateChanged);
-        JPanel authContainer = new JPanel(new FlowLayout(FlowLayout.LEFT, 0, 0));
-        authContainer.add(loginPanel);
-        mainPanel.add(authContainer);
+        loginPanel.setAlignmentX(LEFT_ALIGNMENT);
+        mainPanel.add(loginPanel);
+        mainPanel.add(Box.createVerticalStrut(4));
+
+        // 4. Login button (separate from search box)
+        JButton loginBtn = loginPanel.getLoginButton();
+        loginBtn.setAlignmentX(LEFT_ALIGNMENT);
+        loginBtn.setMaximumSize(new Dimension(Integer.MAX_VALUE, 25));
+        mainPanel.add(loginBtn);
         mainPanel.add(Box.createVerticalStrut(16));
 
-        // 3. Profile Header
-        mainPanel.add(createProfileHeader());
+        // 5. Player name label
+        playerNameLabel = new JLabel("");
+        playerNameLabel.setFont(playerNameLabel.getFont().deriveFont(Font.BOLD, 18f));
+        playerNameLabel.setHorizontalAlignment(SwingConstants.CENTER);
+        playerNameLabel.setAlignmentX(LEFT_ALIGNMENT);
+        playerNameLabel.setMaximumSize(new Dimension(Integer.MAX_VALUE, 25));
+        mainPanel.add(playerNameLabel);
+        mainPanel.add(Box.createVerticalStrut(4));
+
+        // Refresh button (hidden until a player is searched)
+        refreshButton = new JButton("Refresh");
+        refreshButton.setAlignmentX(LEFT_ALIGNMENT);
+        refreshButton.setMaximumSize(new Dimension(Integer.MAX_VALUE, 25));
+        refreshButton.setHorizontalAlignment(SwingConstants.CENTER);
+        refreshButton.setVisible(false);
+        refreshButton.addActionListener(e -> handleRefresh());
+        mainPanel.add(refreshButton);
         mainPanel.add(Box.createVerticalStrut(24));
         
-        // 4. Rank Progress
+        // 4. Additional Stats (above rank progress)
+        extraStatsPanel = new AdditionalStatsPanel();
+        extraStatsPanel.setPvPDataService(pvpDataService);
+        extraStatsPanel.setVisible(false);
+        extraStatsPanel.setAlignmentX(LEFT_ALIGNMENT);
+        try { extraStatsPanel.setBucket("overall"); } catch (Exception ignore) {}
+        mainPanel.add(extraStatsPanel);
+        mainPanel.add(Box.createVerticalStrut(12));
+
+        // 5. Rank Progress
         rankProgressPanel = new RankProgressPanel();
+        rankProgressPanel.setAlignmentX(LEFT_ALIGNMENT);
         mainPanel.add(rankProgressPanel);
-        mainPanel.add(Box.createVerticalStrut(24));
-        
-        // 5. Performance Overview
-        performanceStatsPanel = new PerformanceStatsPanel();
-        mainPanel.add(performanceStatsPanel);
+        mainPanel.add(Box.createVerticalStrut(12));
+
+        // 6. Match History button (standalone, below progress bars, hidden until search)
+        matchHistoryBtn = new JButton("Popout Match History");
+        matchHistoryBtn.setAlignmentX(LEFT_ALIGNMENT);
+        matchHistoryBtn.setMaximumSize(new Dimension(Integer.MAX_VALUE, 25));
+        matchHistoryBtn.setHorizontalAlignment(SwingConstants.CENTER);
+        matchHistoryBtn.setVisible(false);
+        matchHistoryBtn.addActionListener(e -> {
+            Window owner = SwingUtilities.getWindowAncestor(this);
+            JDialog dialog = new JDialog(owner, "Match History", Dialog.ModalityType.MODELESS);
+            dialog.setDefaultCloseOperation(JDialog.DISPOSE_ON_CLOSE);
+            dialog.setSize(800, 500);
+            dialog.setLocationRelativeTo(owner);
+            MatchHistoryPanel dialogPanel = new MatchHistoryPanel();
+            if (allMatches != null) {
+                dialogPanel.setMatches(allMatches);
+            }
+            dialog.add(dialogPanel);
+            dialog.setVisible(true);
+        });
+        mainPanel.add(matchHistoryBtn);
         mainPanel.add(Box.createVerticalStrut(12));
         
-        // 6. Additional Stats (Hidden by default)
-        extraStatsPanel = new AdditionalStatsPanel();
-        extraStatsPanel.setVisible(false);
-        try { if (extraStatsPanel != null) extraStatsPanel.setBucket("overall"); } catch (Exception ignore) {}
-        mainPanel.add(extraStatsPanel);
-        mainPanel.add(Box.createVerticalStrut(24));
+        // 7. Advanced Stats toggle (hidden until search)
+        advancedToggle = new JButton("Advanced Stats");
+        advancedToggle.setAlignmentX(LEFT_ALIGNMENT);
+        advancedToggle.setMaximumSize(new Dimension(Integer.MAX_VALUE, 25));
+        advancedToggle.setHorizontalAlignment(SwingConstants.CENTER);
+        advancedToggle.setVisible(false);
+        mainPanel.add(advancedToggle);
+        mainPanel.add(Box.createVerticalStrut(12));
         
-        // 7. Win Rate Chart
-        chartPanel = new WinRateChartPanel();
-        JScrollPane chartScroll = new JScrollPane(chartPanel);
-        chartScroll.setHorizontalScrollBarPolicy(JScrollPane.HORIZONTAL_SCROLLBAR_AS_NEEDED);
-        chartScroll.setVerticalScrollBarPolicy(JScrollPane.VERTICAL_SCROLLBAR_NEVER);
-        chartScroll.setPreferredSize(new Dimension(0, 220));
-        chartScroll.setBorder(BorderFactory.createTitledBorder("Win Rate History"));
-        mainPanel.add(chartScroll);
-        mainPanel.add(Box.createVerticalStrut(24));
+        // 8. Advanced stats container (hidden by default)
+        JPanel advancedContainer = new JPanel();
+        advancedContainer.setLayout(new BoxLayout(advancedContainer, BoxLayout.Y_AXIS));
+        advancedContainer.setAlignmentX(LEFT_ALIGNMENT);
+        advancedContainer.setVisible(false);
 
-        // 8. Match History
-        matchHistoryPanel = new MatchHistoryPanel();
-        mainPanel.add(matchHistoryPanel);
+        performanceStatsPanel = new PerformanceStatsPanel();
+        performanceStatsPanel.setAlignmentX(LEFT_ALIGNMENT);
+        advancedContainer.add(performanceStatsPanel);
+        advancedContainer.add(Box.createVerticalStrut(12));
+        
+        chartPanel = new WinRateChartPanel();
+        chartPanel.setPreferredSize(new Dimension(0, 200));
+        chartPanel.setMinimumSize(new Dimension(0, 200));
+        chartPanel.setMaximumSize(new Dimension(Integer.MAX_VALUE, 200));
+        chartPanel.setBorder(BorderFactory.createTitledBorder("Win Rate History"));
+        chartPanel.setAlignmentX(LEFT_ALIGNMENT);
+        advancedContainer.add(chartPanel);
+        
+        mainPanel.add(advancedContainer);
+        
+        advancedToggle.addActionListener(e -> {
+            boolean showing = advancedContainer.isVisible();
+            advancedToggle.setText(showing ? "Advanced Stats" : "Hide Advanced Stats");
+            advancedToggle.setEnabled(false);
+            SwingUtilities.invokeLater(() -> {
+                advancedContainer.setVisible(!showing);
+                mainPanel.revalidate();
+                mainPanel.repaint();
+                advancedToggle.setEnabled(true);
+            });
+        });
         
         return mainPanel;
     }
@@ -120,8 +214,8 @@ public class DashboardPanel extends PluginPanel
         JPanel box = new JPanel();
         box.setLayout(new BoxLayout(box, BoxLayout.Y_AXIS));
         box.setBorder(BorderFactory.createTitledBorder("Join the community"));
-        box.setMaximumSize(new Dimension(220, 60));
-        box.setPreferredSize(new Dimension(220, 60));
+        box.setMaximumSize(new Dimension(220, 90));
+        box.setPreferredSize(new Dimension(220, 90));
         JPanel row = new JPanel(new FlowLayout(FlowLayout.LEFT, 2, 0));
         JButton discordBtn = new JButton("Discord");
         discordBtn.setPreferredSize(new Dimension(90, 25));
@@ -138,27 +232,18 @@ public class DashboardPanel extends PluginPanel
         });
         row.add(websiteBtn);
         box.add(row);
+        JPanel row2 = new JPanel(new FlowLayout(FlowLayout.LEFT, 2, 0));
+        JButton reportBugsBtn = new JButton("Report Bugs");
+        reportBugsBtn.setPreferredSize(new Dimension(184, 25));
+        reportBugsBtn.setToolTipText("Report bugs on Discord");
+        reportBugsBtn.addActionListener(e -> {
+            try { LinkBrowser.browse("https://discord.gg/3Ct5CQmCPr"); } catch (Exception ignore) {}
+        });
+        row2.add(reportBugsBtn);
+        box.add(row2);
         return box;
     }
     
-    private JPanel createProfileHeader()
-    {
-        JPanel header = new JPanel(new BorderLayout());
-        JPanel namePanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 0, 0));
-        
-        playerNameLabel = new JLabel("Player Name");
-        playerNameLabel.setFont(playerNameLabel.getFont().deriveFont(Font.BOLD, 18f));
-        namePanel.add(playerNameLabel);
-        namePanel.add(Box.createHorizontalStrut(8));
-        
-        refreshButton = new JButton("Refresh");
-        refreshButton.setPreferredSize(new Dimension(80, 25));
-        refreshButton.addActionListener(e -> handleRefresh());
-        namePanel.add(refreshButton);
-        
-        header.add(namePanel, BorderLayout.NORTH);
-        return header;
-    }
     
     // --- Actions ---
 
@@ -183,7 +268,6 @@ public class DashboardPanel extends PluginPanel
             } else {
                 String self = plugin != null ? plugin.getLocalPlayerName() : null;
                 if (self != null) {
-                    loginPanel.setPluginSearchText(self);
                     loadMatchHistory(self);
                 }
             }
@@ -235,13 +319,13 @@ public class DashboardPanel extends PluginPanel
     public void loadMatchHistory(String playerId)
     {
         currentMatchesPlayerId = normalizePlayerId(playerId);
-        playerNameLabel.setText(playerId); // Update header immediately
+        playerNameLabel.setText(playerId);
+        refreshButton.setVisible(true);
+        matchHistoryBtn.setVisible(true);
+        advancedToggle.setVisible(true);
         lastRefreshTimestamp = System.currentTimeMillis();
+        extraStatsPanel.setPlayerName(currentMatchesPlayerId);
         
-        // Update the search box (needed for PvP lookup right-click menu)
-        if (loginPanel != null) {
-            loginPanel.setPluginSearchText(playerId);
-        }
 
         resetUiForNewSearch();
 
@@ -249,15 +333,20 @@ public class DashboardPanel extends PluginPanel
             String normalizedId = currentMatchesPlayerId;
             loadPlayerStats(normalizedId);
 
-            // Determine if this is "self" lookup - use acct-based query for accurate match history
-            // across name changes; use name-based query for searching other players
             String selfName = plugin != null ? plugin.getLocalPlayerName() : null;
             String selfNameNormalized = normalizePlayerId(selfName);
             boolean isSelf = selfNameNormalized != null && selfNameNormalized.equalsIgnoreCase(normalizedId);
             
+            // Pass acct SHA to tier graph panel for self-lookups
+            if (isSelf) {
+                String sha = pvpDataService.getSelfAcctSha();
+                extraStatsPanel.setAcctSha(sha);
+            } else {
+                extraStatsPanel.setAcctSha(null);
+            }
+            
             CompletableFuture<JsonObject> matchesFuture;
             if (isSelf) {
-                // Self lookup - use acct SHA for accurate history across name changes
                 String selfAcctSha = pvpDataService.getSelfAcctSha();
                 if (selfAcctSha != null && !selfAcctSha.isEmpty()) {
                     matchesFuture = pvpDataService.getPlayerMatchesByAcct(selfAcctSha, null, MATCHES_PAGE_SIZE, false);
@@ -290,22 +379,9 @@ public class DashboardPanel extends PluginPanel
     }
 
     private void updateUiWithMatches(JsonArray matches) {
-        matchHistoryPanel.setMatches(matches);
         chartPanel.setMatches(matches);
         extraStatsPanel.setMatches(matches);
-        performanceStatsPanel.updateBreakdown(matches);
         allMatches = matches;
-        
-        // Update summary stats
-        int wins = 0, losses = 0, ties = 0;
-        for (int i = 0; i < matches.size(); i++) {
-             JsonObject m = matches.get(i).getAsJsonObject();
-             String r = m.has("result") ? m.get("result").getAsString().toLowerCase() : "";
-             if ("win".equals(r)) wins++;
-             else if ("loss".equals(r)) losses++;
-             else if ("tie".equals(r)) ties++;
-                }
-        performanceStatsPanel.updateStats(wins, losses, ties);
         
         updateBucketBarsFromMatches();
     }
@@ -314,8 +390,7 @@ public class DashboardPanel extends PluginPanel
             {
         rankProgressPanel.reset();
         performanceStatsPanel.reset();
-        matchHistoryPanel.clear();
-                chartPanel.setMatches(new JsonArray());
+        chartPanel.setMatches(new JsonArray());
         extraStatsPanel.setMatches(new JsonArray());
         allMatches = null;
     }
@@ -348,6 +423,11 @@ public class DashboardPanel extends PluginPanel
         if (playerName != null)
         {
             updatePlayerStats(stats, playerName);
+        }
+        
+        if (stats.has("opponent_rank_stats_by_bucket") && stats.get("opponent_rank_stats_by_bucket").isJsonObject())
+        {
+            performanceStatsPanel.setOpponentRankStats(stats.getAsJsonObject("opponent_rank_stats_by_bucket"));
         }
     }
     
@@ -495,6 +575,71 @@ public class DashboardPanel extends PluginPanel
 
     private static String normalizePlayerId(String name) {
         return name != null ? name.trim().replaceAll("\\s+", " ").toLowerCase() : null;
+    }
+
+    private static void disableNestedWheelScrolling(Container container)
+    {
+        installSmartWheelForwarding(container);
+    }
+
+    private static void installSmartWheelForwarding(Container container)
+    {
+        for (Component child : container.getComponents())
+        {
+            if (child instanceof JScrollPane)
+            {
+                addBoundaryForwarding((JScrollPane) child);
+            }
+            if (child instanceof Container)
+            {
+                installSmartWheelForwarding((Container) child);
+            }
+        }
+        container.addContainerListener(new java.awt.event.ContainerAdapter()
+        {
+            @Override
+            public void componentAdded(java.awt.event.ContainerEvent e)
+            {
+                Component c = e.getChild();
+                if (c instanceof JScrollPane)
+                {
+                    addBoundaryForwarding((JScrollPane) c);
+                }
+                if (c instanceof Container)
+                {
+                    installSmartWheelForwarding((Container) c);
+                }
+            }
+        });
+    }
+
+    private static void addBoundaryForwarding(JScrollPane sp)
+    {
+        sp.setWheelScrollingEnabled(false);
+        sp.addMouseWheelListener(e -> {
+            JScrollBar vbar = sp.getVerticalScrollBar();
+            if (vbar == null || !vbar.isVisible())
+            {
+                sp.getParent().dispatchEvent(SwingUtilities.convertMouseEvent(sp, e, sp.getParent()));
+                return;
+            }
+            int val = vbar.getValue();
+            int max = vbar.getMaximum() - vbar.getVisibleAmount();
+            boolean atTop = val <= vbar.getMinimum();
+            boolean atBottom = val >= max;
+            boolean scrollingDown = e.getWheelRotation() > 0;
+            boolean scrollingUp = e.getWheelRotation() < 0;
+
+            if ((scrollingUp && atTop) || (scrollingDown && atBottom))
+            {
+                sp.getParent().dispatchEvent(SwingUtilities.convertMouseEvent(sp, e, sp.getParent()));
+            }
+            else
+            {
+                int delta = e.getUnitsToScroll() * vbar.getUnitIncrement();
+                vbar.setValue(val + delta);
+            }
+        });
     }
 }
 

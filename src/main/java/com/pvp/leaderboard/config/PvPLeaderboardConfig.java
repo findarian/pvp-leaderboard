@@ -48,26 +48,6 @@ public interface PvPLeaderboardConfig extends Config
 
 	// ==================== Enums ====================
 
-	enum RankDisplayMode
-	{
-		TEXT
-		{
-			@Override
-			public String toString()
-			{
-				return "Text";
-			}
-		},
-		RANK_NUMBER
-		{
-			@Override
-			public String toString()
-			{
-				return "Rank #";
-			}
-		}
-	}
-
 	enum RankBucket
 	{
 		OVERALL
@@ -152,18 +132,6 @@ public interface PvPLeaderboardConfig extends Config
 	default boolean showOwnRank()
 	{
 		return true;
-	}
-
-	@ConfigItem(
-		keyName = "rankDisplayMode",
-		name = "Display rank as",
-		description = "How to display ranks above players",
-		section = overlaySection,
-		position = 1
-	)
-	default RankDisplayMode rankDisplayMode()
-	{
-		return RankDisplayMode.TEXT;
 	}
 
 	@ConfigItem(

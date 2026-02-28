@@ -1,6 +1,7 @@
 package com.pvp.leaderboard.service;
 
 import com.google.gson.Gson;
+import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonSyntaxException;
 import com.pvp.leaderboard.cache.MatchesCacheEntry;
@@ -44,8 +45,8 @@ public class PvPDataService
 	private final ClientIdentityService clientIdentityService;
 
 	// Shard lookup caching
-    // Per spec: Shard Files = 60s TTL
-	private static final long SHARD_CACHE_EXPIRY_MS = 60L * 1000L; 
+    // Per spec: Shard Files = 60m TTL
+	private static final long SHARD_CACHE_EXPIRY_MS = 60L * 60L * 1000L; 
     // "Not Found" State = 1 hour TTL
 	private static final long MISSING_PLAYER_BACKOFF_MS = 60L * 60L * 1000L;
     // Failed fetch backoff
@@ -387,6 +388,83 @@ public class PvPDataService
 		return null;
 	}
 
+	/**
+	 * Fetch ALL match pages for a player by name, paginating through every next_token.
+	 * Returns a single JsonArray containing every match across all pages.
+	 * Caps at 50 pages to avoid runaway requests.
+	 */
+	public CompletableFuture<JsonArray> getAllPlayerMatches(String playerName) {
+		CompletableFuture<JsonArray> future = new CompletableFuture<>();
+		JsonArray allMatches = new JsonArray();
+		log.debug("[TierGraph] getAllPlayerMatches: starting full fetch by name for '{}'", playerName);
+		fetchAllPages(null, playerName, null, allMatches, future, 0, 5);
+		return future;
+	}
+
+	/**
+	 * Fetch ALL match pages for a player by account SHA, paginating through every next_token.
+	 * Use this for self-lookups to capture all matches across name changes.
+	 */
+	public CompletableFuture<JsonArray> getAllPlayerMatchesByAcct(String acctSha) {
+		CompletableFuture<JsonArray> future = new CompletableFuture<>();
+		if (acctSha == null || acctSha.isEmpty()) {
+			future.complete(new JsonArray());
+			return future;
+		}
+		JsonArray allMatches = new JsonArray();
+		log.debug("[TierGraph] getAllPlayerMatchesByAcct: starting full fetch by acct SHA");
+		fetchAllPages(acctSha, null, null, allMatches, future, 0, 5);
+		return future;
+	}
+
+	private void fetchAllPages(String acctSha, String playerName, String nextToken,
+							   JsonArray accumulator, CompletableFuture<JsonArray> future,
+							   int page, int maxPages) {
+		if (page >= maxPages) {
+			log.debug("[TierGraph] fetchAllPages: hit max {} pages, total matches so far: {}", maxPages, accumulator.size());
+			future.complete(accumulator);
+			return;
+		}
+		log.debug("[TierGraph] fetchAllPages: page={}, hasToken={}, accumulated={}, mode={}",
+				page, nextToken != null, accumulator.size(), acctSha != null ? "acct" : "name");
+
+		CompletableFuture<JsonObject> pageFuture;
+		if (acctSha != null) {
+			pageFuture = getPlayerMatchesByAcct(acctSha, nextToken, 1000, true);
+		} else {
+			pageFuture = getPlayerMatches(playerName, nextToken, 1000, true);
+		}
+
+		pageFuture.thenAccept(response -> {
+			if (response == null) {
+				log.debug("[TierGraph] fetchAllPages: null response on page {}, stopping with {} matches", page, accumulator.size());
+				future.complete(accumulator);
+				return;
+			}
+			int pageSize = 0;
+			if (response.has("matches") && response.get("matches").isJsonArray()) {
+				JsonArray pageMatches = response.getAsJsonArray("matches");
+				pageSize = pageMatches.size();
+				for (var el : pageMatches) {
+					accumulator.add(el);
+				}
+			}
+			log.debug("[TierGraph] fetchAllPages: page {} returned {} matches, total now {}", page, pageSize, accumulator.size());
+			String next = response.has("next_token") && !response.get("next_token").isJsonNull()
+					? response.get("next_token").getAsString() : null;
+			if (next != null && !next.isEmpty()) {
+				fetchAllPages(acctSha, playerName, next, accumulator, future, page + 1, maxPages);
+			} else {
+				log.debug("[TierGraph] fetchAllPages: no more pages, total: {} matches", accumulator.size());
+				future.complete(accumulator);
+			}
+		}).exceptionally(ex -> {
+			log.warn("[TierGraph] fetchAllPages: error on page {}, stopping with {} matches", page, accumulator.size(), ex);
+			future.complete(accumulator);
+			return null;
+		});
+	}
+
 	public CompletableFuture<JsonObject> getUserProfile(String playerName, String clientUniqueId)
 	{
 		return getUserProfile(playerName, clientUniqueId, false);
@@ -410,6 +488,7 @@ public class PvPDataService
 		}
 		HttpUrl url = urlObj.newBuilder()
 			.addQueryParameter("player_id", playerName)
+			.addQueryParameter("include_world_rank", "1")
 			.build();
 
 		Request.Builder requestBuilder = new Request.Builder().url(url).get();

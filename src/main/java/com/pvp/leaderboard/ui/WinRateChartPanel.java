@@ -87,16 +87,6 @@ public class WinRateChartPanel extends JPanel
         // Draw X-axis labels and win rate line
         if (winRateHistory != null && winRateHistory.size() > 1)
         {
-            // Draw X-axis labels (match numbers)
-            g2.setColor(Color.WHITE);
-            int maxTicks = Math.min(8, winRateHistory.size());
-            for (int i = 0; i < maxTicks; i++)
-            {
-                int x = 20 + (i * width / (maxTicks - 1));
-                int matchNum = winRateHistory.size() - (i * winRateHistory.size() / (maxTicks - 1));
-                g2.drawString("#" + matchNum, x - 10, height + 35);
-            }
-
             // Draw win rate line
             g2.setColor(new Color(255, 215, 0)); // Gold color
             g2.setStroke(new BasicStroke(2));

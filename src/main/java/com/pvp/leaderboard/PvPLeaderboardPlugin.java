@@ -188,8 +188,8 @@ public class PvPLeaderboardPlugin extends Plugin
 				return;
 			}
 
-			// Ensure self rank refreshes when bucket or display mode changes
-			if ("rankBucket".equals(event.getKey()) || "rankDisplayMode".equals(event.getKey()))
+			// Ensure self rank refreshes when bucket changes
+			if ("rankBucket".equals(event.getKey()))
 			{
 				if (rankOverlay != null)
 				{

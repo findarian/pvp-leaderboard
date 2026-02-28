@@ -36,7 +36,7 @@ public class MatchHistoryPanel extends JPanel
             matchHistoryTable.getColumnModel().getColumn(2).setPreferredWidth(60);
             matchHistoryTable.getColumnModel().getColumn(3).setPreferredWidth(220);
             matchHistoryTable.getColumnModel().getColumn(4).setPreferredWidth(180);
-            matchHistoryTable.getColumnModel().getColumn(5).setPreferredWidth(120);
+            matchHistoryTable.getColumnModel().getColumn(5).setPreferredWidth(160);
         } catch (Exception ignore) {}
 
         JScrollPane scrollPane = new JScrollPane(matchHistoryTable);
@@ -146,7 +146,7 @@ public class MatchHistoryPanel extends JPanel
 
     private String formatTime(long timestamp)
     {
-        return new SimpleDateFormat("MM/dd/yyyy, HH:mm:ss").format(new Date(timestamp * 1000));
+        return new SimpleDateFormat("MM/dd/yyyy HH:mm").format(new Date(timestamp * 1000));
     }
 }
 
