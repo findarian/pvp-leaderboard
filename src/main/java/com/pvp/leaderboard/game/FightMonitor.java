@@ -637,18 +637,17 @@ public class FightMonitor
 
         submissionFuture.thenAccept(success -> {
             if (config.showMmrChangeNotification() && opponent != null && selfName != null) {
-                long delay = 1L;
-                log.debug("[PostFight] Submission done (success={}), scheduling MMR fetch in {}s for opponent={}", success, delay, opponent);
+                log.debug("[PostFight] Submission done (success={}), scheduling MMR fetch in 3s for opponent={}", success, opponent);
                 scheduler.schedule(() -> {
-                    fetchMmrDeltaFromMatchHistory(selfName, opponent, displayBucket, showBucketInMmr, 25, endTs);
-                }, delay, java.util.concurrent.TimeUnit.SECONDS);
+                    fetchMmrDeltaFromMatchHistory(selfName, opponent, displayBucket, showBucketInMmr, 0, endTs);
+                }, 3L, java.util.concurrent.TimeUnit.SECONDS);
             }
         }).exceptionally(ex -> {
             log.debug("[PostFight] Submission future failed, scheduling fallback MMR fetch: {}", ex.getMessage());
             if (config.showMmrChangeNotification() && opponent != null && selfName != null) {
                 scheduler.schedule(() -> {
-                    fetchMmrDeltaFromMatchHistory(selfName, opponent, displayBucket, showBucketInMmr, 25, endTs);
-                }, 1L, java.util.concurrent.TimeUnit.SECONDS);
+                    fetchMmrDeltaFromMatchHistory(selfName, opponent, displayBucket, showBucketInMmr, 0, endTs);
+                }, 3L, java.util.concurrent.TimeUnit.SECONDS);
             }
             return null;
         });
@@ -677,18 +676,19 @@ public class FightMonitor
         }, 5L, java.util.concurrent.TimeUnit.SECONDS);
     }
 
+    private static final long[] MMR_RETRY_DELAYS = {5L, 5L};
+
     /**
      * Fetch MMR delta from match history API.
-     * This is more accurate than calculating from profile differences.
      * Uses account SHA (UUID hash) to ensure ALL matches are returned even after name changes.
-     * First attempt at ~5s after fight, second (final) attempt at ~15s if first fails.
+     * Retry schedule: first attempt at 3s post-submit, then 5s, then 10s.
      * 
-     * @param showBucketLabel If true, include bucket name in MMR notification (used when auto-switch occurred)
+     * @param attempt 0-based attempt index (0 = first try, 1 = retry at 5s, 2 = retry at 10s)
      * @param submittedMatchEndTs The fight_end_ts of the submitted match, used to validate we got the correct match
      */
-    private void fetchMmrDeltaFromMatchHistory(String selfName, String opponentName, String displayBucket, boolean showBucketLabel, int retriesLeft, long submittedMatchEndTs) {
-        log.debug("[PostFight] Fetching MMR delta from match history: self={} opponent={} showBucket={} retriesLeft={} submittedTs={}", 
-            selfName, opponentName, showBucketLabel, retriesLeft, submittedMatchEndTs);
+    private void fetchMmrDeltaFromMatchHistory(String selfName, String opponentName, String displayBucket, boolean showBucketLabel, int attempt, long submittedMatchEndTs) {
+        log.debug("[PostFight] Fetching MMR delta from match history: self={} opponent={} showBucket={} attempt={} submittedTs={}", 
+            selfName, opponentName, showBucketLabel, attempt, submittedMatchEndTs);
         
         // Use account SHA for accurate match history across name changes
         // This ensures MMR delta is correct even if the player changed their name
@@ -777,25 +777,28 @@ public class FightMonitor
                     }
                 }
                 
-                if (retriesLeft > 0) {
-                    log.debug("[PostFight] Match not found in history, retrying in 2s ({} left)", retriesLeft - 1);
-                    scheduler.schedule(() -> fetchMmrDeltaFromMatchHistory(selfName, opponentName, displayBucket, showBucketLabel, retriesLeft - 1, submittedMatchEndTs),
-                        2L, java.util.concurrent.TimeUnit.SECONDS);
+                if (attempt < MMR_RETRY_DELAYS.length) {
+                    long delay = MMR_RETRY_DELAYS[attempt];
+                    log.debug("[PostFight] Match not found in history, retrying in {}s (attempt {})", delay, attempt + 1);
+                    scheduler.schedule(() -> fetchMmrDeltaFromMatchHistory(selfName, opponentName, displayBucket, showBucketLabel, attempt + 1, submittedMatchEndTs),
+                        delay, java.util.concurrent.TimeUnit.SECONDS);
                 } else {
                     log.debug("[PostFight] Match not found in history after all retries, skipping MMR notification");
                 }
-            } else if (retriesLeft > 0) {
-                log.debug("[PostFight] No matches in response, retrying in 2s ({} left)", retriesLeft - 1);
-                scheduler.schedule(() -> fetchMmrDeltaFromMatchHistory(selfName, opponentName, displayBucket, showBucketLabel, retriesLeft - 1, submittedMatchEndTs),
-                    2L, java.util.concurrent.TimeUnit.SECONDS);
+            } else if (attempt < MMR_RETRY_DELAYS.length) {
+                long delay = MMR_RETRY_DELAYS[attempt];
+                log.debug("[PostFight] No matches in response, retrying in {}s (attempt {})", delay, attempt + 1);
+                scheduler.schedule(() -> fetchMmrDeltaFromMatchHistory(selfName, opponentName, displayBucket, showBucketLabel, attempt + 1, submittedMatchEndTs),
+                    delay, java.util.concurrent.TimeUnit.SECONDS);
             } else {
                 log.debug("[PostFight] Failed to get matches after all retries");
             }
         }).exceptionally(ex -> {
-            if (retriesLeft > 0) {
-                log.debug("[PostFight] Match history exception: {}, retrying in 2s ({} left)", ex.getMessage(), retriesLeft - 1);
-                scheduler.schedule(() -> fetchMmrDeltaFromMatchHistory(selfName, opponentName, displayBucket, showBucketLabel, retriesLeft - 1, submittedMatchEndTs),
-                    2L, java.util.concurrent.TimeUnit.SECONDS);
+            if (attempt < MMR_RETRY_DELAYS.length) {
+                long delay = MMR_RETRY_DELAYS[attempt];
+                log.debug("[PostFight] Match history exception: {}, retrying in {}s (attempt {})", ex.getMessage(), delay, attempt + 1);
+                scheduler.schedule(() -> fetchMmrDeltaFromMatchHistory(selfName, opponentName, displayBucket, showBucketLabel, attempt + 1, submittedMatchEndTs),
+                    delay, java.util.concurrent.TimeUnit.SECONDS);
             } else {
                 log.debug("[PostFight] Match history failed after all retries: {}", ex.getMessage());
             }
