@@ -130,8 +130,7 @@ public class PerformanceStatsPanel extends JPanel
         if (opponentRankStatsByBucket != null)
         {
             Map<String, int[]> currentStats = opponentRankStatsByBucket.getOrDefault(
-                currentBucket,
-                opponentRankStatsByBucket.getOrDefault("overall", Collections.emptyMap())
+                currentBucket, Collections.emptyMap()
             );
             for (int[] v : currentStats.values())
             {
@@ -227,8 +226,7 @@ public class PerformanceStatsPanel extends JPanel
             Map<String, int[]> currentStats = Collections.emptyMap();
             if (opponentRankStatsByBucket != null) {
                 currentStats = opponentRankStatsByBucket.getOrDefault(
-                    currentBucket,
-                    opponentRankStatsByBucket.getOrDefault("overall", Collections.emptyMap())
+                    currentBucket, Collections.emptyMap()
                 );
             }
             

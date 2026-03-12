@@ -3,6 +3,13 @@
   "configurations": [
     {
       "type": "java",
+      "name": "RankTierPreview",
+      "request": "launch",
+      "mainClass": "com.pvp.leaderboard.RankTierPreview",
+      "projectName": "PvPLeaderboardPlugin-pvp-leaderboard"
+    },
+    {
+      "type": "java",
       "name": "PvPLeaderboardPluginTest",
       "request": "launch",
       "mainClass": "com.pvp.leaderboard.PvPLeaderboardPluginTest",
