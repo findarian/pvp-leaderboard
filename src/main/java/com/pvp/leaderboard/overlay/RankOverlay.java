@@ -21,6 +21,7 @@ import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
 @Slf4j
+@SuppressWarnings("deprecation")
 public class RankOverlay extends Overlay
 {
     private final Client client;

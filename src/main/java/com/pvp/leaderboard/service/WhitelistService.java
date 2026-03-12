@@ -68,7 +68,6 @@ public class WhitelistService
     private volatile long nextFetchAllowedMs = 0L;
     
     // Heartbeat state
-    private volatile long lastHeartbeatMs = 0L;
     private volatile String currentUsername = null;
     private volatile ScheduledFuture<?> scheduledHeartbeat = null;
     
@@ -235,11 +234,11 @@ public class WhitelistService
             {
                 try (Response res = response)
                 {
-                    String responseBody = res.body() != null ? res.body().string() : "(empty)";
+                    okhttp3.ResponseBody rb = res.body();
+                    String responseBody = rb != null ? rb.string() : "(empty)";
                     
                     if (res.isSuccessful())
                     {
-                        lastHeartbeatMs = System.currentTimeMillis();
                         log.debug("[Heartbeat] Success - HTTP {} | User: {} | Response: {}", 
                             res.code(), username, responseBody);
                     }

@@ -45,12 +45,7 @@ public class FightMonitor
     private RankOverlay rankOverlay;
 
     // --- Fight State ---
-    private boolean inFight = false;
-    private boolean wasInMulti = false;
-    private int fightStartSpellbook = -1;
     private String opponent = null;
-    private volatile String lastExactOpponentName = null;
-    private long fightStartTime = 0;
 
     // Tracks multiple simultaneous fights (per-opponent) - damage is now tracked per-FightEntry
     private final ConcurrentHashMap<String, FightEntry> activeFights = new ConcurrentHashMap<>();
@@ -60,7 +55,6 @@ public class FightMonitor
     private final ConcurrentHashMap<String, Integer> perOpponentSuppressUntilTicks = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, Boolean> shardPresence = new ConcurrentHashMap<>();
     
-    private volatile int lastCombatActivityTick = 0;
     private static final int OUT_OF_COMBAT_TICKS = 16;
     private int gcTicksCounter = 0;
 
@@ -97,17 +91,11 @@ public class FightMonitor
 
     public void resetFightState()
     {
-        inFight = false;
-        wasInMulti = false;
-        fightStartSpellbook = -1;
         opponent = null;
-        fightStartTime = 0;
         suppressFightStartTicks = 2;
         activeFights.clear();
         perOpponentSuppressUntilTicks.clear();
         shardPresence.clear();
-        lastCombatActivityTick = 0;
-        lastExactOpponentName = null;
         try { log.debug("[Fight] state reset; suppressTicks={}", suppressFightStartTicks); } catch (Exception ignore) {}
     }
     
@@ -124,16 +112,8 @@ public class FightMonitor
         // Only reset global state if ALL fights are done
         if (activeFights.isEmpty())
         {
-            inFight = false;
-            wasInMulti = false;
-            fightStartSpellbook = -1;
             opponent = null;
-            fightStartTime = 0;
             suppressFightStartTicks = 2;
-        }
-        else
-        {
-            inFight = true;
         }
     }
 
@@ -175,7 +155,6 @@ public class FightMonitor
                     }
                     return false;
                 });
-                inFight = !activeFights.isEmpty();
             }
 
             // Combat window idle check - individual fight expiration is handled by GC above
@@ -205,10 +184,6 @@ public class FightMonitor
             int amt = hs.getAmount();
             boolean isMine = hs.isMine();
             String hitPlayerName = hitPlayer.getName();
-            String localPlayerName = localPlayer.getName();
-            
-            // Get hitsplat type name for logging
-            String hitsplatTypeName = getHitsplatTypeName(hitsplatType);
 
             // Only process relevant damage hitsplat types
             if (amt > 0)
@@ -254,7 +229,6 @@ public class FightMonitor
                 opponentName = resolveInboundAttacker(localPlayer);
                 if (opponentName != null)
                 {
-                    lastExactOpponentName = opponentName;
                     if (isDamageHitsplat) startNow = true;
                 }
             }
@@ -308,18 +282,10 @@ public class FightMonitor
                     existingFight = null;
                 }
 
-                boolean isNewFight = (existingFight == null);
                 touchFight(opponentName);
-                inFight = true;
-                if (!inFight) startFight(opponentName);
                 
-                // Check if LOCAL player is in multi - if so, mark this fight as multi
-                // This ensures if YOU ever enter multi during the fight, it counts as multi
-                // But if opponent dies in multi while you stayed in singles, it's a singles kill
                 boolean localPlayerInMulti = client.getVarbitValue(Varbits.MULTICOMBAT_AREA) == 1;
                 if (localPlayerInMulti) {
-                    wasInMulti = true;
-                    // Also update the per-opponent FightEntry
                     FightEntry fe = activeFights.get(opponentName);
                     if (fe != null) {
                         fe.markMultiIfNeeded(true);
@@ -442,15 +408,6 @@ public class FightMonitor
                 log.debug("[Death][PERF] handleActorDeath took {}ms (>5ms threshold)", elapsed);
             }
         }
-    }
-
-    private void startFight(String opponentName)
-    {
-        inFight = true;
-        opponent = opponentName;
-        wasInMulti = client.getVarbitValue(Varbits.MULTICOMBAT_AREA) == 1;
-        fightStartSpellbook = client.getVarbitValue(Varbits.SPELLBOOK);
-        fightStartTime = System.currentTimeMillis() / 1000;
     }
 
     private void endFightFor(String opponentName, String result)
@@ -823,92 +780,6 @@ public class FightMonitor
         }
     }
 
-    /**
-     * Extract tier string from user profile response for a specific bucket.
-     */
-    private String extractTierFromProfile(JsonObject profile, String bucket) {
-        if (profile == null) return null;
-        
-        // Try bucket-specific data first
-        if (bucket != null && !bucket.isEmpty() && !"overall".equalsIgnoreCase(bucket)) {
-            if (profile.has("buckets") && profile.get("buckets").isJsonObject()) {
-                JsonObject buckets = profile.getAsJsonObject("buckets");
-                if (buckets.has(bucket) && buckets.get(bucket).isJsonObject()) {
-                    JsonObject bucketData = buckets.getAsJsonObject(bucket);
-                    String tier = extractTierFromBucketData(bucketData);
-                    if (tier != null) return tier;
-                }
-            }
-        }
-        
-        // Fallback to top-level (overall) data
-        return extractTierFromBucketData(profile);
-    }
-
-    /**
-     * Extract tier from a bucket data object.
-     */
-    private String extractTierFromBucketData(JsonObject data) {
-        if (data == null) return null;
-        
-        String rank = null;
-        int division = 0;
-        
-        if (data.has("rank") && !data.get("rank").isJsonNull()) {
-            rank = data.get("rank").getAsString();
-        }
-        if (data.has("division") && !data.get("division").isJsonNull()) {
-            division = data.get("division").getAsInt();
-        }
-        
-        if (rank != null && !rank.isEmpty()) {
-            return division > 0 ? rank + " " + division : rank;
-        }
-        return null;
-    }
-
-    /**
-     * Extract MMR from user profile response for a specific bucket.
-     */
-    private Double extractMmrFromProfile(JsonObject profile, String bucket) {
-        return extractDoubleFieldFromProfile(profile, bucket, "mmr");
-    }
-
-    /**
-     * Extract Sigma (TrueSkill uncertainty) from user profile response for a specific bucket.
-     * Each bucket maintains separate TrueSkill values since they act as separate leaderboards.
-     */
-    private Double extractSigmaFromProfile(JsonObject profile, String bucket) {
-        return extractDoubleFieldFromProfile(profile, bucket, "sigma");
-    }
-
-    /**
-     * Generic helper to extract a Double field from user profile for a specific bucket.
-     * Tries bucket-specific data first, falls back to top-level.
-     */
-    private Double extractDoubleFieldFromProfile(JsonObject profile, String bucket, String fieldName) {
-        if (profile == null || fieldName == null) return null;
-        
-        // Try bucket-specific data first
-        if (bucket != null && !bucket.isEmpty() && !"overall".equalsIgnoreCase(bucket)) {
-            if (profile.has("buckets") && profile.get("buckets").isJsonObject()) {
-                JsonObject buckets = profile.getAsJsonObject("buckets");
-                if (buckets.has(bucket) && buckets.get(bucket).isJsonObject()) {
-                    JsonObject bucketData = buckets.getAsJsonObject(bucket);
-                    if (bucketData.has(fieldName) && !bucketData.get(fieldName).isJsonNull()) {
-                        return bucketData.get(fieldName).getAsDouble();
-                    }
-                }
-            }
-        }
-        
-        // Fallback to top-level field
-        if (profile.has(fieldName) && !profile.get(fieldName).isJsonNull()) {
-            return profile.get(fieldName).getAsDouble();
-        }
-        return null;
-    }
-    
     private void fetchTierWithRetry(String playerName, String bucket, int retriesLeft) {
         log.debug("[PostFight] fetchTierWithRetry called: player={} bucket={} retriesLeft={}", playerName, bucket, retriesLeft);
         pvpDataService.getTierFromProfile(playerName, bucket).thenAccept(tier -> {
@@ -1120,23 +991,6 @@ public class FightMonitor
             case 2: return "Lunar";
             case 3: return "Arceuus";
             default: return "Unknown";
-        }
-    }
-
-    /**
-     * Get readable name for hitsplat type for debug logging.
-     */
-    private String getHitsplatTypeName(int type)
-    {
-        switch (type) {
-            case HitsplatID.DAMAGE_ME: return "DAMAGE_ME";
-            case HitsplatID.DAMAGE_OTHER: return "DAMAGE_OTHER";
-            case HitsplatID.POISON: return "POISON";
-            case HitsplatID.VENOM: return "VENOM";
-            case HitsplatID.BLOCK_ME: return "BLOCK_ME";
-            case HitsplatID.BLOCK_OTHER: return "BLOCK_OTHER";
-            case HitsplatID.HEAL: return "HEAL";
-            default: return "TYPE_" + type;
         }
     }
 

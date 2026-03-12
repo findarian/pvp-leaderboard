@@ -71,26 +71,6 @@ public class MatchResultService
                 return overall;
             }
 
-            // Preflight diagnostics to understand why server might reject
-            // Note: FightMonitor now ensures valid timestamps (non-zero, 60s apart if one was missing)
-            try {
-                String pLower = match.getPlayerId().trim().replaceAll("\\s+", " ").toLowerCase(java.util.Locale.ROOT);
-                String oLower = match.getOpponentId().trim().replaceAll("\\s+", " ").toLowerCase(java.util.Locale.ROOT);
-                boolean notSelf = !pLower.equals(oLower);
-                boolean timeOk = match.getFightStartTs() > 0 && match.getFightEndTs() > 0 && match.getFightEndTs() >= match.getFightStartTs();
-                boolean worldOk = match.getWorld() > 0;
-                // log.debug("[Submit] preflight notSelf={} timeOk={} worldOk={} player='{}' opponent='{}' startTs={} endTs={} world={} multi={} dmgOut={}",
-                //     notSelf, timeOk, worldOk, match.getPlayerId(), match.getOpponentId(), match.getFightStartTs(), match.getFightEndTs(), match.getWorld(), match.isWasInMulti(), match.getDamageToOpponent());
-                // if (!notSelf) { log.debug("[Submit][why] Opponent equals self; likely mis-attribution"); }
-                // if (!timeOk) { log.debug("[Submit][why] Invalid timestamps startTs={} endTs={}", match.getFightStartTs(), match.getFightEndTs()); }
-                // if (!worldOk) { log.debug("[Submit][why] Invalid world={}", match.getWorld()); }
-            } catch (Exception ignore) {}
-            
-            String dbgPlayer = (match.getPlayerId() != null ? match.getPlayerId() : "<null>");
-            String dbgOpponent = (match.getOpponentId() != null ? match.getOpponentId() : "<null>");
-            // log.debug("[Submit] begin playerId={} opponentId={} result={} world={} startTs={} endTs={} startSpell={} endSpell={} multi={} authed={}",
-            //     dbgPlayer, dbgOpponent, match.getResult(), match.getWorld(), match.getFightStartTs(), match.getFightEndTs(), match.getFightStartSpellbook(), match.getFightEndSpellbook(), match.isWasInMulti(), (match.getIdToken() != null && !match.getIdToken().isEmpty()));
-
             JsonObject body = new JsonObject();
             body.addProperty("player_id", match.getPlayerId());
             body.addProperty("opponent_id", match.getOpponentId());

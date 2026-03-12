@@ -23,7 +23,6 @@ import net.runelite.client.config.ConfigManager;
 import net.runelite.client.eventbus.EventBus;
 import net.runelite.client.eventbus.Subscribe;
 import net.runelite.client.events.ConfigChanged;
-import net.runelite.client.game.SpriteManager;
 import net.runelite.client.plugins.Plugin;
 import net.runelite.client.plugins.PluginDescriptor;
 import net.runelite.client.ui.ClientToolbar;
@@ -57,9 +56,6 @@ public class PvPLeaderboardPlugin extends Plugin
 
 	@Inject
 	private EventBus eventBus;
-
-	@Inject
-	private SpriteManager spriteManager;
 
 	@Inject
 	private PvPDataService pvpDataService;
@@ -136,10 +132,11 @@ public class PvPLeaderboardPlugin extends Plugin
 		clientToolbar.addNavigation(navButton);
 
 		// Register overlay
-		overlayManager.add(rankOverlay);
-
-		// Register RankOverlay with EventBus to receive PlayerRankEvent
-		eventBus.register(rankOverlay);
+		if (rankOverlay != null)
+		{
+			overlayManager.add(rankOverlay);
+			eventBus.register(rankOverlay);
+		}
 
 		// Init menu handler with RankOverlay
 		menuHandler.init(dashboardPanel, navButton);
@@ -167,9 +164,12 @@ public class PvPLeaderboardPlugin extends Plugin
 	protected void shutDown() throws Exception
 	{
 		menuHandler.shutdown();
-		eventBus.unregister(rankOverlay);
+		if (rankOverlay != null)
+		{
+			eventBus.unregister(rankOverlay);
+			overlayManager.remove(rankOverlay);
+		}
 		clientToolbar.removeNavigation(navButton);
-		overlayManager.remove(rankOverlay);
 		whitelistService.onLogout();
 		log.debug("PvP Leaderboard stopped!");
 	}

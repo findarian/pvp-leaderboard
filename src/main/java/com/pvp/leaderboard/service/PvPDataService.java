@@ -41,7 +41,6 @@ public class PvPDataService
 
 	private final OkHttpClient okHttpClient;
 	private final Gson gson;
-	private final PvPLeaderboardConfig config;
 	private final ClientIdentityService clientIdentityService;
 
 	// Shard lookup caching
@@ -99,7 +98,6 @@ public class PvPDataService
 	{
 		this.okHttpClient = okHttpClient;
 		this.gson = gson;
-		this.config = config;
 		this.clientIdentityService = clientIdentityService;
 	}
 
