@@ -64,19 +64,30 @@ INVALID_MESSAGE            UNKNOWN_COMMAND
 
 ---
 
-## 2. Open question — `lobby/join` MMR source
+## 2. ~~Open question — `lobby/join` MMR source~~ — **RESOLVED 2026-05-18**
 
-**The gap**: `LobbyService.joinLobby(region, styles, builds, minRankIdx, maxRankIdx)` doesn't take MMR, but the backend's `validate_join_payload` requires `current_mmr_per_bucket["overall"] >= LOBBY_MIN_CURRENT_OVERALL_MMR` (= 940 / Mithril 3) for `SMURF_GUARD`. The current backend wiring reads `data.current_mmr_per_bucket` straight off the wire envelope.
+> **Decision**: option 2 (backend reads from `OSRS-Connections` `$connect` snapshot). Shipped as `p2-mmr-trust-fix`. The plugin's `LobbyService.joinLobby(...)` signature stays as-is — **does NOT carry MMR**.
 
-**Three options** — the plugin team should pick one before wiring:
+### What's now live on the backend
 
-1. **Plugin includes MMR in payload**: extend `joinLobby(...)` signature to take `Map<String, Integer> currentMmrPerBucket` and pass through. The plugin already has the values (it queries `pvp-leaderboard.com/api/me`). Risk: trivially spoofable by a modified plugin; the smurf gate becomes advisory.
-2. **Backend reads from `OSRS-Connections` snapshot**: the connection row written at `$connect` step 9 already snapshots `current_mmr_per_bucket` from `OSRS-MMR-table`. Backend change: have `_handle_join` read `current_mmr_per_bucket` from the connection row (which is uuid-trusted) instead of the wire payload. Risk: snapshot may be stale (taken at $connect time, not refreshed during the connection). Acceptable trade-off — MMR doesn't change drastically within a session.
-3. **Backend reads fresh from `OSRS-MMR-table`**: most authoritative. Adds one DDB GetItem to every `lobby/join`. Cost: negligible at the lobby's expected volume.
+`websocket_handler.handle_default` extracts `current_mmr_per_bucket` from the same `OSRS-Connections` row it already reads for `connection_uuid` (the row was written at `$connect` step 9 from `OSRS-MMR-table`), and passes it through as the new `connection_mmr_per_bucket` kwarg of `handle_lobby_cmd`. `lobby_handler._handle_join` uses that trusted value as the SOLE input to `validate_join_payload`'s `SMURF_GUARD` check. **Any `current_mmr_per_bucket` in the wire payload is ignored entirely.**
 
-**My recommendation**: option 2. Server-side trust + the existing `$connect` snapshot is exactly what it's there for. I can ship this in a 30-min `p2-mmr-trust-fix` slice if the plugin team agrees.
+Regression tests pin the contract (`tests/unit/lambda_code/test_lobby_handler.py::TestLobbyJoinMmrTrustBoundary`):
 
-If we pick option 1 (plugin includes MMR), I don't need to change anything backend-side — `_handle_join` already reads from the wire payload.
+- `test_spoofed_high_wire_mmr_does_not_bypass_smurf_guard` — wire `{overall: 9999}` + trusted `{overall: 800}` → SMURF_GUARD fires.
+- `test_wire_mmr_absent_with_trusted_high_is_admitted` — no wire MMR + trusted `{overall: 1500}` → join succeeds, `put_item` carries the trusted value.
+- `test_member_row_persists_only_trusted_mmr_not_wire_value` — wire `{overall: 9999}` + trusted `{overall: 1200}` → join succeeds, stored row carries `1200`, never `9999`.
+- `test_no_trusted_mmr_at_all_emits_smurf_guard` — defense-in-depth: if the conn_row somehow lacks the MMR field (e.g. DDB outage during `$connect` step 9), join fails closed with SMURF_GUARD, never silently bypasses.
+
+### Plugin wire-format implication
+
+Don't include `current_mmr_per_bucket` in the `lobby/join` payload — it's silently ignored. The full `data` keys for `lobby/join` are now exactly:
+
+```
+region, styles, builds, min_rank_idx, max_rank_idx, sort_bucket  (optional)
+```
+
+Per-cmd field reference table in §4 below is the authoritative list.
 
 ---
 
@@ -101,7 +112,7 @@ Specifically: don't include `from_uuid` in `lobby/invite` payloads. The fields e
 
 | Cmd | Wire `data` keys |
 |---|---|
-| `lobby/join` | `region`, `styles`, `builds`, `min_rank_idx`, `max_rank_idx`, `current_mmr_per_bucket` (per §2 question), optional `sort_bucket` |
+| `lobby/join` | `region`, `styles`, `builds`, `min_rank_idx`, `max_rank_idx`, optional `sort_bucket`. **MMR is server-resolved** from the `$connect` snapshot — do not include `current_mmr_per_bucket` (silently ignored per `p2-mmr-trust-fix`). |
 | `lobby/leave` | (none — empty `{}` is fine) |
 | `lobby/invite` | `to_uuid`, `style`, `build`, `location` |
 | `lobby/cancel_invite` | `to_uuid` |
