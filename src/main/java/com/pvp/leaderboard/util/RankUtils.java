@@ -57,6 +57,51 @@ public class RankUtils
         return s.replaceAll("([A-Za-z]+)(\\d+)$", "$1 $2");
     }
 
+    /** Maps a backend tier string (e.g. {@code "Adamant2"}, {@code "3rdAge"})
+     *  to its index in {@link #THRESHOLDS}, or {@code -1} if the tier
+     *  doesn't match any known threshold. Used by the lobby gate to
+     *  surface the local player's rank in their own self-profile
+     *  preview row.
+     *
+     *  <p>Tolerates both compact ({@code "Adamant2"}) and spaced
+     *  ({@code "Adamant 2"}) forms by normalising via
+     *  {@link #formatTierLabel(String)} first. Comparison is
+     *  case-insensitive on the rank-family name and exact on the
+     *  division number — a malformed input returns {@code -1} rather
+     *  than guessing. */
+    public static int rankIndexForTier(String raw)
+    {
+        if (raw == null) return -1;
+        String formatted = formatTierLabel(raw);
+        if (formatted == null) return -1;
+        // 3rd Age: division stored as "0" in THRESHOLDS; match the
+        // single-token form before the generic split below so the
+        // empty-division branch doesn't fall through.
+        if ("3rd Age".equalsIgnoreCase(formatted))
+        {
+            for (int i = 0; i < THRESHOLDS.length; i++)
+            {
+                if ("3rd Age".equalsIgnoreCase(THRESHOLDS[i][0])) return i;
+            }
+            return -1;
+        }
+        // Split on the last space so multi-word rank families (none
+        // today, but defends against a future "Black Iron 2" rename)
+        // still pick the trailing division off correctly.
+        int sp = formatted.lastIndexOf(' ');
+        if (sp <= 0) return -1;
+        String family = formatted.substring(0, sp);
+        String div = formatted.substring(sp + 1);
+        for (int i = 0; i < THRESHOLDS.length; i++)
+        {
+            if (THRESHOLDS[i][0].equalsIgnoreCase(family) && THRESHOLDS[i][1].equals(div))
+            {
+                return i;
+            }
+        }
+        return -1;
+    }
+
     public static boolean isUnrankedOrDefault(JsonObject obj)
     {
         if (obj == null) return true;

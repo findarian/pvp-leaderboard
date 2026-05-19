@@ -1,5 +1,6 @@
 package com.pvp.leaderboard.lobby;
 
+import java.util.Collections;
 import java.util.Map;
 
 /**
@@ -67,6 +68,21 @@ public interface LobbyJoinGate
      *  text, not 0). Empty map if the gate has never successfully
      *  refreshed (still in pre-login / pre-first-fetch state). */
     Map<Style, Integer> getMatchCounts();
+
+    /** Snapshot of last-known rank index per {@link Style}, indexed
+     *  into {@link com.pvp.leaderboard.util.RankUtils#THRESHOLDS}. Used
+     *  by the matchmaking panel's self-profile preview row to render
+     *  the same rank the player sees on the website + Player Lookup
+     *  tab. Priority for the single-rank display is NH > Veng > Multi
+     *  > DMM (matches {@link Style} declaration order).
+     *
+     *  <p>Keys are only present for styles the gate has both a rank
+     *  string and a successful tier→index lookup for; callers must
+     *  treat a missing key (or value {@code < 0}) as "rank unknown"
+     *  and suppress the rank chip rather than rendering "Bronze 3"
+     *  (the THRESHOLDS[0] default). Default implementation returns an
+     *  empty map so test/no-op gates don't have to opt in. */
+    default Map<Style, Integer> getRankIdxByStyle() { return Collections.emptyMap(); }
 
     /** Epoch ms of the last successful refresh; {@code 0} if never
      *  refreshed. UI uses this to render "Updated N min ago" so the user

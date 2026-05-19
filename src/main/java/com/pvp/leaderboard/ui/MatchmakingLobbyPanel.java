@@ -114,21 +114,25 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
     /** Default region used when the user hasn't explicitly picked one yet. */
     private static final String DEFAULT_REGION = "NA-E";
 
-    /** Empty by default — the gate requires the user to actively pick ≥1
-     *  style before the Go-to-lobby button enables. Reset Options also
-     *  clears this back to empty. */
-    private final Set<Style> selectedStyles = EnumSet.noneOf(Style.class);
+    /** Seeded with NH so first-time users land on a sensible default
+     *  (NH is the most-played bucket on the leaderboard) — they can
+     *  deselect it and pick others, but the gate doesn't open with a
+     *  blank style row. {@link #resetGateOptions()} restores this
+     *  same default. Go-to-lobby still requires ≥1 style + ≥1 build
+     *  so a user who manually deselects everything stays gated. */
+    private final Set<Style> selectedStyles = EnumSet.of(Style.NH);
     /** The user's own region — picked once at the gate. Surfaced as the
      *  region chip on incoming-invite cards' Meet At view (so the receiver
      *  knows where the sender's coming from); never used to filter the
      *  roster. Players see everyone in the lobby regardless of region. */
     private String selfRegion = DEFAULT_REGION;
-    /** Account builds the user fights as — any combination of Pure, Zerker,
-     *  Main (≥1 required). Empty by default so the gate forces an explicit
-     *  pick; once any build is picked the gate enforces ≥1 the same way
-     *  the style toggles do. Surfaced in the current-style bar and on
-     *  invite cards so opponents know which builds the sender plays. */
-    private final Set<BuildType> selectedBuildTypes = EnumSet.noneOf(BuildType.class);
+    /** Account builds — seeded with all three (Main + Zerker + Pure)
+     *  so first-time users are by default open to every opponent
+     *  build (most-permissive). They can narrow it down before
+     *  joining or via Reset Options. {@link #resetGateOptions()}
+     *  restores this default. Go-to-lobby still requires ≥1 build so
+     *  a manual deselect-all path stays gated. */
+    private final Set<BuildType> selectedBuildTypes = EnumSet.allOf(BuildType.class);
     private int rankMinIdx = 0;
     private int rankMaxIdx = RANK_LABELS.length - 1;
 
@@ -555,6 +559,13 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
             tog.setAlignmentX(LEFT_ALIGNMENT);
             tog.setMaximumSize(new Dimension(Integer.MAX_VALUE, 36));
             tog.setFocusPainted(false);
+            // Green-on-selected / red-on-unselected paint, applied on
+            // construction + via an item listener so every programmatic
+            // setSelected (resetGateOptions, applyStyleToggleLockState
+            // force-deselect, login restore) auto-repaints without a
+            // separate refresh pass.
+            applyToggleVisualState(tog);
+            tog.addItemListener(e -> applyToggleVisualState(tog));
             tog.addActionListener(e ->
             {
                 if (tog.isSelected())
@@ -655,6 +666,8 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
             tog.setAlignmentX(LEFT_ALIGNMENT);
             tog.setMaximumSize(new Dimension(Integer.MAX_VALUE, 36));
             tog.setFocusPainted(false);
+            applyToggleVisualState(tog);
+            tog.addItemListener(e -> applyToggleVisualState(tog));
             tog.addActionListener(e ->
             {
                 if (tog.isSelected())
@@ -866,10 +879,15 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         {
             detail = remainingCsv.toString();
         }
-        // 200px width tracks the sidepanel's BoxLayout child cap so
-        // long single-line remainders wrap instead of forcing a
-        // horizontal scrollbar.
-        gateMatchCountStatusLabel.setText("<html><div style='width:200px'>"
+        // 170px wrap target — the gate panel's inner content area
+        // is narrower than the 225px sidepanel because of the
+        // panel's left/right padding (~6px each side) + the
+        // gateContent box's own insets. At 200px the headline
+        // "You need 20 kills or deaths per style to queue." was
+        // clipping the trailing "r style to queue." in the
+        // sidepanel screenshot. 170 leaves ~10px slack against the
+        // narrowest reasonable RuneLite sidepanel.
+        gateMatchCountStatusLabel.setText("<html><div style='width:170px'>"
             + escapeHtml(headline) + "<br>" + escapeHtml(detail) + "</div></html>");
 
         if (gateMatchCountRefreshBtn != null)
@@ -948,6 +966,50 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         }
     }
 
+    /** Green-on-selected / red-on-unselected paint for the gate's
+     *  style + build toggles. The selected state also gets a 2px
+     *  green {@link javax.swing.border.LineBorder} outline so the
+     *  "picked" state reads instantly without relying on the L&F's
+     *  pressed-button shading (Substance under RuneLite paints both
+     *  states with very similar greys; the previous toggle UI was
+     *  confusing because users couldn't tell which styles they'd
+     *  selected at a glance).
+     *
+     *  <p>Border thickness is offset by reduced inner padding so the
+     *  toggle's overall width/height is identical in both states —
+     *  no layout reflow on click. Disabled (locked) toggles still
+     *  get the green/red palette; Substance's grey-out overlay
+     *  composites on top, which makes the locked state read as
+     *  "muted green/red" rather than ambiguous-grey. */
+    private static void applyToggleVisualState(JToggleButton tog)
+    {
+        if (tog.isSelected())
+        {
+            tog.setForeground(SELECTED_TOGGLE_FG);
+            tog.setBorder(BorderFactory.createCompoundBorder(
+                BorderFactory.createLineBorder(SELECTED_TOGGLE_FG, 2),
+                BorderFactory.createEmptyBorder(2, 6, 2, 6)));
+        }
+        else
+        {
+            tog.setForeground(UNSELECTED_TOGGLE_FG);
+            // Same total inset as the selected state (2px line + 2px
+            // inner padding == 4px empty border) so flipping the
+            // selection doesn't resize the button.
+            tog.setBorder(BorderFactory.createEmptyBorder(4, 8, 4, 8));
+        }
+    }
+
+    /** Bright green that reads as "this style/build is picked".
+     *  Matches the {@link #goToLobbyBtn}'s background hue family
+     *  so the picked toggles + the active CTA share a palette. */
+    private static final Color SELECTED_TOGGLE_FG = new Color(0x6c, 0xd1, 0x6a);
+
+    /** Muted red for the unselected state — strong enough to read
+     *  as "not picked" at a glance without screaming for attention
+     *  the way a saturated red would. */
+    private static final Color UNSELECTED_TOGGLE_FG = new Color(0xef, 0x53, 0x50);
+
     /** Minimal HTML escaping — only the four chars Swing's HTML view
      *  actually reinterprets. Inputs here are bounded enum labels +
      *  small integers so we don't need a full sanitiser. */
@@ -967,15 +1029,29 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
      *  cards back to the gate. */
     private void resetGateOptions()
     {
+        // Restore the same first-launch defaults: NH style + every
+        // build. Matches the {@link #selectedStyles} / {@link
+        // #selectedBuildTypes} field initialisers — keep these two
+        // sites in lock-step. User can deselect immediately after a
+        // reset, but they always start from a non-empty, lobby-ready
+        // state so Go-to-lobby is enabled by default.
         selectedStyles.clear();
+        selectedStyles.add(Style.NH);
         selectedBuildTypes.clear();
+        for (BuildType bt : BuildType.values()) selectedBuildTypes.add(bt);
         selfRegion = DEFAULT_REGION;
         // Explicit "I want to re-pick" — clear the sticky lobby flag so
         // the next login doesn't bypass the gate.
         hasJoinedLobby = false;
 
-        for (JToggleButton tog : styleToggles.values()) tog.setSelected(false);
-        for (JToggleButton tog : buildToggles.values()) tog.setSelected(false);
+        for (Map.Entry<Style, JToggleButton> e : styleToggles.entrySet())
+        {
+            e.getValue().setSelected(selectedStyles.contains(e.getKey()));
+        }
+        for (Map.Entry<BuildType, JToggleButton> e : buildToggles.entrySet())
+        {
+            e.getValue().setSelected(selectedBuildTypes.contains(e.getKey()));
+        }
         if (regionCombo != null) regionCombo.setSelectedIndex(indexOfRegion(DEFAULT_REGION));
 
         // Re-apply the lock state since clearing selection above also
@@ -1194,19 +1270,22 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         selfPreviewContainer.add(caption);
 
         String uuid = selfUuidSupplier != null ? selfUuidSupplier.get() : null;
-        // peakRankIdx = -1 is the "rank unknown" sentinel that
-        // PlayerRow honours by skipping the rank-text render. We don't
-        // have an authoritative self-rank here (would require wiring
-        // RankOverlay / PvPDataService); the preview is a chip-only
-        // view of the user's advertised setup. Caption already tells
-        // the user this is a preview, so the missing rank doesn't
-        // look like a bug.
+        // Pick the displayed rank by Style priority NH > Veng > Multi
+        // > DMM among the user's currently-selected styles (Style
+        // enum declaration order matches the priority). Falls back
+        // to "any style with a known rank" if none of the selected
+        // styles has a rank yet (user picked styles they haven't
+        // played) so the preview still shows something meaningful
+        // pre-first-match. peakRankIdx = -1 remains the "unknown"
+        // sentinel; PlayerRow then suppresses the rank chip rather
+        // than mis-rendering as Bronze 3.
+        int peakIdx = pickSelfPreviewRankIdx();
         LobbyMember self = new LobbyMember(
             uuid != null ? uuid : "self",
             name,
             selectedStyles,
             selectedBuildTypes,
-            -1,
+            peakIdx,
             selfRegion,
             false);
 
@@ -1223,6 +1302,45 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
 
         selfPreviewContainer.revalidate();
         selfPreviewContainer.repaint();
+    }
+
+    /** Picks the rank index to display on the self-preview row given
+     *  the user's current style picks. Priority is NH &gt; Veng &gt;
+     *  Multi &gt; DMM (matches {@link Style} declaration order); the
+     *  first selected style with a known rank wins. If none of the
+     *  selected styles has a known rank, falls back to the
+     *  highest-known rank across <i>any</i> style so a brand-new
+     *  user who hasn't played their selected style yet still sees
+     *  something meaningful instead of a blank row. Returns -1 if
+     *  the gate has no rank data at all (pre-login / pre-first-fetch)
+     *  — PlayerRow honours that as "unknown" and skips the chip. */
+    private int pickSelfPreviewRankIdx()
+    {
+        if (joinGate == null) return -1;
+        Map<Style, Integer> ranks = joinGate.getRankIdxByStyle();
+        if (ranks == null || ranks.isEmpty()) return -1;
+        // Style.values() is declared NH, VENG, MULTI, DMM — the same
+        // ordering the user spec'd, so a single pass over the enum
+        // gives us the right priority without a separate lookup
+        // table. selectedStyles guards against showing a rank for a
+        // style the user isn't even advertising.
+        for (Style s : Style.values())
+        {
+            if (!selectedStyles.contains(s)) continue;
+            Integer idx = ranks.get(s);
+            if (idx != null && idx >= 0) return idx;
+        }
+        // Fallback — no selected style had a rank. Pick the highest
+        // known rank across all styles so new users who haven't
+        // played their selected style yet still see their best
+        // overall rank instead of an empty chip.
+        int best = -1;
+        for (Style s : Style.values())
+        {
+            Integer idx = ranks.get(s);
+            if (idx != null && idx > best) best = idx;
+        }
+        return best;
     }
 
     // -------------------- Fight setup flow --------------------
@@ -2784,7 +2902,11 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         }
 
         /** [Region] [NH] [Veng] [Multi] [DMM] — style chips dim when not
-         *  advertised. The MOD chip lives on the build row below, not here. */
+         *  advertised. The MOD chip lives on the build row below, not here.
+         *  When the player advertises <i>every</i> style, the four
+         *  per-style chips collapse into a single [Any Style] chip so
+         *  the row matches the "Style: Any Style" wording from the
+         *  pre-lobby gate's current-style bar. */
         private JPanel buildChipsRow()
         {
             JPanel chips = new JPanel(new FlowLayout(FlowLayout.LEFT, 3, 0));
@@ -2796,10 +2918,18 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
             // all chips to the inactive grey palette so the whole card
             // reads as muted.
             chips.add(makeChip(p.region, !blocked, Color.WHITE, chipFont));
-            for (Style s : Style.values())
+            Color styleColor = new Color(0xff, 0xc1, 0x07);
+            if (p.styles.size() == Style.values().length)
             {
-                boolean advertised = !blocked && p.styles.contains(s);
-                chips.add(makeChip(s.label, advertised, new Color(0xff, 0xc1, 0x07), chipFont));
+                chips.add(makeChip("Any Style", !blocked, styleColor, chipFont));
+            }
+            else
+            {
+                for (Style s : Style.values())
+                {
+                    boolean advertised = !blocked && p.styles.contains(s);
+                    chips.add(makeChip(s.label, advertised, styleColor, chipFont));
+                }
             }
             return chips;
         }
@@ -2808,7 +2938,10 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
          *  doesn't advertise that build. Cyan so they're visually distinct
          *  from the yellow style chips on the row above; MOD stays red.
          *  p.builds is guaranteed ≥1 by LobbyMember's contract, so at least
-         *  one build chip is always lit. */
+         *  one build chip is always lit. When the player advertises
+         *  <i>every</i> build type, the per-build chips collapse into a
+         *  single [Any Build] chip mirroring the {@code buildChipsRow}
+         *  [Any Style] collapse. */
         private JPanel buildBuildsRow()
         {
             JPanel chips = new JPanel(new FlowLayout(FlowLayout.LEFT, 3, 0));
@@ -2821,10 +2954,17 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
                 chips.add(makeChip("MOD", !blocked, new Color(0xff, 0x55, 0x55), chipFont));
             }
             Color buildColor = new Color(0x4f, 0xc3, 0xf7);
-            for (BuildType a : BuildType.values())
+            if (p.builds.size() == BuildType.values().length)
             {
-                boolean advertised = !blocked && p.builds.contains(a);
-                chips.add(makeChip(a.label, advertised, buildColor, chipFont));
+                chips.add(makeChip("Any Build", !blocked, buildColor, chipFont));
+            }
+            else
+            {
+                for (BuildType a : BuildType.values())
+                {
+                    boolean advertised = !blocked && p.builds.contains(a);
+                    chips.add(makeChip(a.label, advertised, buildColor, chipFont));
+                }
             }
             return chips;
         }

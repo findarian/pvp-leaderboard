@@ -2,6 +2,7 @@ package com.pvp.leaderboard.lobby;
 
 import com.google.gson.JsonObject;
 import com.pvp.leaderboard.service.PvPDataService;
+import com.pvp.leaderboard.util.RankUtils;
 import lombok.extern.slf4j.Slf4j;
 
 import javax.inject.Inject;
@@ -74,6 +75,15 @@ public final class UserProfileLobbyJoinGate implements LobbyJoinGate
      *  isn't thread-safe and listeners may read it from the EDT while
      *  the refresh callback writes from an OkHttp dispatcher thread. */
     private final EnumMap<Style, Integer> counts = new EnumMap<>(Style.class);
+
+    /** Per-style rank index parallel to {@link #counts}, derived from
+     *  {@code cumulative_stats.<bucket>.tier}. Independent of the
+     *  threshold check — a user with 5 NH matches still has an NH
+     *  rank (Bronze 3 by default); we just don't let them queue NH
+     *  yet. Read by {@link #getRankIdxByStyle()} for the panel's
+     *  self-profile preview. Same lock discipline as {@link #counts}. */
+    private final EnumMap<Style, Integer> rankIdxByStyle = new EnumMap<>(Style.class);
+
     private volatile long lastRefreshEpochMs;
 
     /** Active auto-refresh handle; null when {@link #onLogout()} or no
@@ -144,7 +154,11 @@ public final class UserProfileLobbyJoinGate implements LobbyJoinGate
     {
         cancelAutoRefreshLocked();
         loggedIn = false;
-        synchronized (counts) { counts.clear(); }
+        synchronized (counts)
+        {
+            counts.clear();
+            rankIdxByStyle.clear();
+        }
         lastRefreshEpochMs = 0L;
         fireListenersOnEdt();
     }
@@ -173,6 +187,18 @@ public final class UserProfileLobbyJoinGate implements LobbyJoinGate
         synchronized (counts)
         {
             return Collections.unmodifiableMap(new EnumMap<>(counts));
+        }
+    }
+
+    @Override
+    public Map<Style, Integer> getRankIdxByStyle()
+    {
+        synchronized (counts)
+        {
+            // Share the same monitor as {@link #counts} — the two
+            // EnumMaps are mutated together inside {@link
+            // #applyProfile} so they never observe a torn snapshot.
+            return Collections.unmodifiableMap(new EnumMap<>(rankIdxByStyle));
         }
     }
 
@@ -293,11 +319,29 @@ public final class UserProfileLobbyJoinGate implements LobbyJoinGate
             return;
         }
         JsonObject cum = profile.getAsJsonObject("cumulative_stats");
-        EnumMap<Style, Integer> next = new EnumMap<>(Style.class);
+        // Per-bucket rank lives in a separate top-level object on the
+        // {@code /user} endpoint — NOT inside {@code cumulative_stats}.
+        // See {@code PvPDataService.extractTierFromUserResponse}: the
+        // per-bucket shape is {@code {"rank": "Adamant", "division":
+        // 2, "mmr": ...}} where {@code rank} is the family name and
+        // {@code division} is 1–3 (absent / non-1–3 for the
+        // single-division "3rd Age" tier). Earlier draft of this
+        // method read {@code cumulative_stats.<bucket>.tier} which
+        // doesn't exist on this endpoint (only the S3 shard payload
+        // has a {@code tier} field) — meaning {@link
+        // #rankIdxByStyle} would stay empty and the self-preview
+        // row's name rendered in plain white. Fixed by reading from
+        // {@code buckets.<bucket>} instead.
+        JsonObject buckets = profile.has("buckets") && profile.get("buckets").isJsonObject()
+            ? profile.getAsJsonObject("buckets")
+            : null;
+        EnumMap<Style, Integer> nextCounts = new EnumMap<>(Style.class);
+        EnumMap<Style, Integer> nextRanks = new EnumMap<>(Style.class);
         for (Style s : Style.values())
         {
             String bucket = bucketFor(s);
             int total = 0;
+            int rankIdx = -1;
             if (bucket != null && cum.has(bucket) && cum.get(bucket).isJsonObject())
             {
                 JsonObject b = cum.getAsJsonObject(bucket);
@@ -311,12 +355,83 @@ public final class UserProfileLobbyJoinGate implements LobbyJoinGate
                 total = wins + losses + ties;
                 if (total < 0) total = 0;
             }
-            next.put(s, total);
+            if (bucket != null && buckets != null
+                && buckets.has(bucket) && buckets.get(bucket).isJsonObject())
+            {
+                rankIdx = readRankIdxFromBucket(buckets.getAsJsonObject(bucket));
+            }
+            nextCounts.put(s, total);
+            if (rankIdx >= 0) nextRanks.put(s, rankIdx);
         }
         synchronized (counts)
         {
             counts.clear();
-            counts.putAll(next);
+            counts.putAll(nextCounts);
+            rankIdxByStyle.clear();
+            rankIdxByStyle.putAll(nextRanks);
+        }
+    }
+
+    /** Parses the {@code {rank, division}} pair off a single
+     *  {@code buckets.<bucket>} object and returns the
+     *  {@link RankUtils#THRESHOLDS} index, or {@code -1} if the
+     *  bucket has no rank ("Bronze 3 / 0 MMR" default that the
+     *  backend stamps on never-fought buckets — that defaults state
+     *  shouldn't pop a rank chip on the self-preview row).
+     *
+     *  <p>Wire format from {@code PvPDataService.extractTierFromUserResponse}:
+     *  {@code rank} is the family ("Bronze".."Dragon" or "3rd Age");
+     *  {@code division} is 1-3 or absent. We compose them into the
+     *  spaced label form ({@code "Adamant 2"} / {@code "3rd Age"})
+     *  before handing off to {@link RankUtils#rankIndexForTier}. */
+    private static int readRankIdxFromBucket(JsonObject b)
+    {
+        if (b == null) return -1;
+        String rank = optString(b, "rank");
+        if (rank == null || rank.isEmpty()) return -1;
+        int division = optInt(b, "division");
+        // Default-state bucket ({@code Bronze} family + division 3 +
+        // 0 MMR) — surface as "unknown" so a brand-new account
+        // doesn't get a misleading Bronze 3 chip on the preview row.
+        if ("Bronze".equalsIgnoreCase(rank) && division == 3
+            && Math.abs(optDouble(b, "mmr")) < 0.001)
+        {
+            return -1;
+        }
+        String composed = (division >= 1 && division <= 3)
+            ? rank + " " + division
+            : rank;
+        try
+        {
+            return RankUtils.rankIndexForTier(composed);
+        }
+        catch (UnsupportedOperationException | IllegalStateException e)
+        {
+            return -1;
+        }
+    }
+
+    private static String optString(JsonObject o, String key)
+    {
+        try
+        {
+            return o.has(key) && !o.get(key).isJsonNull() ? o.get(key).getAsString() : null;
+        }
+        catch (UnsupportedOperationException | IllegalStateException e)
+        {
+            return null;
+        }
+    }
+
+    private static double optDouble(JsonObject o, String key)
+    {
+        try
+        {
+            return o.has(key) && !o.get(key).isJsonNull() ? o.get(key).getAsDouble() : 0.0;
+        }
+        catch (NumberFormatException | UnsupportedOperationException | IllegalStateException e)
+        {
+            return 0.0;
         }
     }
 
@@ -326,6 +441,11 @@ public final class UserProfileLobbyJoinGate implements LobbyJoinGate
         {
             counts.clear();
             for (Style s : Style.values()) counts.put(s, 0);
+            // Soft-404 / brand-new player: leave rankIdxByStyle empty.
+            // The self-preview row falls back to "rank unknown" and
+            // suppresses the rank chip rather than showing a fake
+            // Bronze 3.
+            rankIdxByStyle.clear();
         }
     }
 
