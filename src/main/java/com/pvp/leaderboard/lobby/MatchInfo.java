@@ -2,22 +2,19 @@ package com.pvp.leaderboard.lobby;
 
 /**
  * Terminal "Meet at" view payload pushed when both players have confirmed
- * the fight. Sent by the server via {@code lobby/match_found} per the
- * architecture's Phase-2 flow.
+ * the fight. Sent by the server via {@code lobby/match_found}.
  *
  * <p>{@link #world} is the world number the players should world-hop to
  * (e.g. {@code "W370"} for NA Arena), resolved server-side per the
- * style + location + both players' regions via
- * {@code resolve_match_world} in {@code backend/core/lobby.py}. The
- * client renders this verbatim — no client-side world-picking — so
- * the world tables can be updated server-side without a plugin
- * release. {@link #meetingPlace} is the in-game meeting spot per
- * style+location (e.g. {@code "Arena"}, {@code "Ferox Enclave"},
- * {@code "Grand Exchange"}), resolved by {@code resolve_meeting_place}.
+ * style + location + both players' regions. The client renders this
+ * verbatim — no client-side world-picking — so the world tables can be
+ * updated server-side without a plugin release. {@link #meetingPlace}
+ * is the in-game meeting spot per style+location (e.g. {@code "Arena"},
+ * {@code "Ferox Enclave"}, {@code "Grand Exchange"}), also resolved
+ * server-side.
  *
- * <p>Created as part of {@code p1-plugin-mock-refactor}. Public final
- * fields match the {@code LobbyMember} idiom. The panel renders this in
- * its Meet-At view (the terminal state of the fight flow).
+ * <p>Pure immutable data carrier. The panel renders this in its Meet-At
+ * view (the terminal state of the fight flow).
  */
 public final class MatchInfo
 {

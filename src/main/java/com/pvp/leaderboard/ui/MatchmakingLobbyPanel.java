@@ -1,13 +1,13 @@
 package com.pvp.leaderboard.ui;
 
 import com.pvp.leaderboard.lobby.BuildType;
-import com.pvp.leaderboard.lobby.DevLobbyFixture;
 import com.pvp.leaderboard.lobby.FightSession;
 import com.pvp.leaderboard.lobby.IncomingInvite;
 import com.pvp.leaderboard.lobby.LobbyErrorMessages;
 import com.pvp.leaderboard.lobby.LobbyEventListener;
 import com.pvp.leaderboard.lobby.LobbyJoinGate;
 import com.pvp.leaderboard.lobby.LobbyMember;
+import com.pvp.leaderboard.lobby.LobbyPreferences;
 import com.pvp.leaderboard.lobby.LobbyService;
 import com.pvp.leaderboard.lobby.NoOpLobbyJoinGate;
 import com.pvp.leaderboard.lobby.MatchInfo;
@@ -40,30 +40,24 @@ import java.util.function.Supplier;
 
 /**
  * Matchmaking Lobby UI — pure presentational panel that reads through a
- * {@link LobbyService} seam. Two known service implementations:
- * {@link DevLobbyFixture} (mock roster + auto-accept timers, used during
- * the pre-backend window) and the future {@code WebSocketLobbyService}
- * which lands at {@code p2-plugin-service}.
+ * {@link LobbyService} seam. The production implementation is
+ * {@code WebSocketLobbyService} (wire adapter).
  *
  * <p>The panel owns <b>presentation</b> only — every roster member,
- * incoming invite, fight-session transition, and match-found event comes
- * from the service via the {@link LobbyEventListener} callbacks defined on
- * this class. The panel never seeds its own data or runs its own mock
- * timers; both used to live here pre-{@code p1-plugin-mock-refactor} (see
- * {@code docs/PLUGIN_PROGRESS.md}).
+ * incoming invite, fight-session transition, and match-found event
+ * comes from the service via the {@link LobbyEventListener} callbacks
+ * defined on this class. The panel never seeds its own data or runs
+ * its own timers.
  *
  * <p>Outgoing-invite tracking is the one piece of state the panel still
  * keeps locally — {@link #outgoingInvitesByOpponent} mirrors what the
- * user has sent so the per-row {@code [Invited M:SS]} chip + countdown can
- * render without round-tripping the service for every paint. Keyed by
- * the opponent's canonical {@code player_id} (the lowercased display
- * name produced server-side by {@code canon_name()}). Post-{@code
- * p2-scrub-uuids-from-lobby} (2026-05-19) {@code player_id} is the only
- * stable correlation identifier the wire carries — raw player UUIDs
- * are scrubbed from every push and cmd. The display-cased {@code name}
- * is also pushed alongside {@code player_id} on every roster row +
- * invite-received push so the panel can render the proper-cased label
- * without losing the canonical lookup key.
+ * user has sent so the per-row {@code [Invited M:SS]} chip + countdown
+ * can render without round-tripping the service for every paint. Keyed
+ * by the opponent's canonical {@code player_id} (the lowercased display
+ * name). The display-cased {@code name} is also pushed alongside
+ * {@code player_id} on every roster row + invite-received push so the
+ * panel can render the proper-cased label without losing the canonical
+ * lookup key.
  */
 public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
 {
@@ -80,10 +74,17 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
 
     /** Root card keys: pre-lobby gate, browseable lobby, and the full-screen
      *  fight-setup view (Pick Style → optional sub-location → Meet At) that
-     *  takes over the panel between [Fight] and "Find a new match". */
-    private static final String CARD_GATE = "gate";
-    private static final String CARD_LOBBY = "lobby";
-    private static final String CARD_FIGHT = "fight";
+     *  takes over the panel between [Fight] and "Find a new match". The
+     *  card-key strings double as {@link Component#getName()} on each
+     *  card's root panel so tests (and any future "which card am I on?"
+     *  diagnostic) can find the currently-visible card by name. */
+    public static final String CARD_GATE = "gate";
+    public static final String CARD_LOBBY = "lobby";
+    public static final String CARD_FIGHT = "fight";
+
+    /** Stable {@link Component#getName()} on {@code rootCardHost} so
+     *  tests can locate it without walking layout indices. */
+    public static final String ROOT_CARD_HOST_NAME = "matchmaking-root-cards";
 
     /** The single, agreed-on row font size. Player name + rank label use this; chips
      *  / pickers / Fight button derive from it. Locked at 15pt per the dev review. */
@@ -202,41 +203,31 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
     /** {@code inviteId → IncomingInvitePanel card} so
      *  {@link #onIncomingInviteCancelled} can locate the card to remove
      *  by the server-side stable id (sender-cancelled, block-cascade,
-     *  leave-cascade — all key on inviteId per
-     *  {@code BACKEND_HANDOFF_TO_PLUGIN.md §3}). Parallel to
+     *  leave-cascade all key on inviteId). Parallel to
      *  {@link #incomingInviteNames}; both must stay in lockstep —
      *  cleared together on accept/decline/cancel/exit. */
     private final Map<String, IncomingInvitePanel> incomingCardsById = new HashMap<>();
 
-    /** Outgoing invites we've sent that are still in INVITED state (waiting
-     *  for opponent to accept). Drives the row [Invited M:SS] chip; entries
-     *  are removed on opponent-accept (transition to mutual-confirm), TTL
-     *  expiry, or user-cancel.
+    /** Outgoing invites we've sent that are still in INVITED state
+     *  (waiting for opponent to accept). Drives the row [Invited M:SS]
+     *  chip; entries are removed on opponent-accept (transition to
+     *  mutual-confirm), TTL expiry, or user-cancel.
      *
-     *  <p><b>Keyed by opponent {@code player_id}</b> (canonical lowercase
-     *  name) — the only stable per-peer wire identifier the post-{@code
-     *  p2-scrub-uuids-from-lobby} protocol exposes. Server guarantees
-     *  {@code player_id} is non-empty on every roster + invite-received
-     *  push (derived from the player's MMR row's sorted-first
-     *  {@code player_names} entry, refused at {@code $connect} with
-     *  soft-refuse code {@code no_player_id} if absent). Display-cased
-     *  {@code name} is pushed alongside but isn't unique enough to key
-     *  by — two peers can render identically-cased names in edge cases.
-     *  Pre-2026-05-18: was keyed by name; 2026-05-18 — 2026-05-19: was
-     *  keyed by raw UUID (scrubbed from the wire on 2026-05-19). */
+     *  <p>Keyed by opponent {@code player_id} (canonical lowercase
+     *  name) — the stable per-peer wire identifier. Server guarantees
+     *  it is non-empty on every roster + invite-received push.
+     *  Display-cased {@code name} is pushed alongside but isn't unique
+     *  enough to key by (two peers can render identically-cased names
+     *  in edge cases). */
     private final Map<String, OutgoingInvite> outgoingInvitesByOpponent = new HashMap<>();
 
-    /** Canonical {@code player_id}s the local user has blocked. Driven by
-     *  {@link #onBlockListSnapshot} / {@link #onBlockAdded} /
-     *  {@link #onBlockRemoved} per {@code BACKEND_HANDOFF_TO_PLUGIN.md
-     *  §3.3}. Server does NOT filter blocked rows out of the roster
-     *  (that would leak presence — block-toggle would let the user
-     *  probe who is online) so the panel grays them client-side.
-     *  Clicking a greyed row routes to Player Lookup so the user can
-     *  Unblock from there. Set membership is by canonical lowercase
-     *  player_id — matches the new wire shape of
-     *  {@code lobby/block_list_snapshot} (carries
-     *  {@code blocked_player_ids}, not {@code blocked_uuids}). */
+    /** Canonical {@code player_id}s the local user has blocked. Driven
+     *  by {@link #onBlockListSnapshot} / {@link #onBlockAdded} /
+     *  {@link #onBlockRemoved}. The server does NOT filter blocked
+     *  rows out of the roster (that would leak presence — block-toggle
+     *  would let the user probe who is online) so the panel greys them
+     *  client-side. Clicking a greyed row routes to Player Lookup so
+     *  the user can Unblock from there. */
     private final Set<String> blockedPlayerIds = new HashSet<>();
 
     /** Active fight session occupying the FIGHT card. One at a time — set
@@ -289,7 +280,7 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
      *  the immutable {@link FightSession} pushed by the service with two
      *  mutable flags the panel toggles in response to the local user
      *  clicking Confirm + the service's {@code onFightConfirmedByPeer} push.
-     *  Mock-timer ownership lives in {@link DevLobbyFixture}, so this type
+     *  Timer ownership lives in the service implementation, so this type
      *  is a pure UI-state record — no {@code Timer} fields.
      *
      *  <p>Fields {@link #opponent}, {@link #style}, {@link #build},
@@ -320,24 +311,22 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         boolean bothConfirmed() { return iConfirmed && peerConfirmed; }
     }
 
-    /** Backing {@link LobbyService} — the seam introduced at
-     *  {@code p1-plugin-mock-refactor}. Wired to {@link DevLobbyFixture}
-     *  during the pre-backend window; will swap to the real
-     *  {@code WebSocketLobbyService} when {@code p2-plugin-service} lands. */
+    /** Backing {@link LobbyService} — {@code WebSocketLobbyService} in
+     *  production. */
     private final LobbyService service;
 
     /** Per-style match-count gate (anti-smurf: need
      *  {@link LobbyJoinGate#THRESHOLD} kills + deaths in a style before
      *  the user can advertise it). Drives the locked-style rendering on
      *  the gate's style toggles + the [Refresh count] / "Updated X min
-     *  ago" status row. Backend enforces the same rule at
-     *  {@code lobby/join} (see {@code BACKEND_HANDOFF_TO_PLUGIN.md} →
-     *  "SMURF_GUARD v2"); this gate is UX-only.
+     *  ago" status row. The server enforces the same rule at
+     *  {@code lobby/join} (returning {@code SMURF_GUARD}); this client
+     *  gate is UX-only.
      *
      *  <p>Default to {@link NoOpLobbyJoinGate} so the panel is
-     *  constructible in tests / fixtures that don't need the anti-smurf
-     *  UX — the no-op reports every style unlocked, so the server-side
-     *  check is the safety net. */
+     *  constructible in tests that don't need the anti-smurf UX — the
+     *  no-op reports every style unlocked, so the server-side check is
+     *  the safety net. */
     private final LobbyJoinGate joinGate;
 
     /** Gate UI elements held as fields so the gate-listener callback can
@@ -364,11 +353,10 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
     /** Resolved-at-render-time supplier for the local OSRS player's
      *  name. Wired by {@code DashboardPanel} via
      *  {@link #setSelfIdentity}; {@code null} until then (the panel
-     *  hides the self-profile preview entirely when no supplier or
-     *  no name). Post-{@code p2-scrub-uuids-from-lobby} this is the
-     *  ONLY identity supplier the panel needs — the raw client UUID
-     *  is kept on the {@code WebSocketManager} side as the {@code
-     *  $connect} auth credential and never leaks into UI state. */
+     *  hides the self-profile preview entirely when no supplier or no
+     *  name). The local OSRS player's name is the only identity the
+     *  panel needs — server pushes carry display names alongside
+     *  canonical player ids, and outbound cmds key by canonical id. */
     private Supplier<String> selfNameSupplier;
 
     /** Container + row references for the self-profile preview shown
@@ -380,20 +368,44 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
     private JPanel selfPreviewContainer;
     private PlayerRow selfPreviewRow;
 
-    /** {@code true} once the user has clicked "Go to lobby" in the
-     *  current plugin session and hasn't subsequently hit Reset Options.
-     *  Drives the logout → login auto-restore in
+    /** {@code true} once the user has clicked "Go to lobby" and hasn't
+     *  subsequently hit Reset Options.
+     *
+     *  <p>Drives the logout → login auto-restore in
      *  {@link #applyLoginGateState()}: a user who logs out from the
      *  lobby is returned to the lobby card (not the gate) on re-login,
      *  with their previously-picked region / styles / builds still
      *  selected. Reset Options is the explicit "I want to re-pick"
      *  escape hatch — it clears this flag.
      *
-     *  <p>In-memory only; doesn't survive a plugin reload. A future
-     *  {@code p2-plugin-config} item could persist the gate picks +
-     *  this flag across plugin restarts, but logout → login within a
-     *  session is the common case this guards. */
+     *  <p>Persisted across plugin restarts via {@link #prefs} so a user
+     *  who passes the gate once stays in the auto-restore lane forever
+     *  unless they Reset Options. Also surfaces if the user toggles the
+     *  plugin off and back on within the same RuneLite session. */
     private boolean hasJoinedLobby;
+
+    /** Persistence backend for gate selections (region / styles / builds /
+     *  rank-slider bounds / hasJoined sticky flag). Always non-null —
+     *  ctor overloads that don't supply one fall back to
+     *  {@link LobbyPreferences#inMemory()}. */
+    private final LobbyPreferences prefs;
+
+    /** {@code true} once {@link #maybeAutoJoinAfterLogin()} has issued a
+     *  {@code service.joinLobby(...)} for the current login session.
+     *  Cleared in {@link #applyLoginGateState()} on every logout so
+     *  the next login re-issues. Without this guard the gate
+     *  listener firing on every hourly match-count refresh would spam
+     *  the server with redundant {@code lobby/join} updates.
+     *
+     *  <p>The auto-issue exists because {@link WebSocketLobbyService}'s
+     *  reconnect-replay cache is in-memory only — survives a
+     *  within-session logout/login round-trip but NOT a fresh plugin
+     *  start. Without the auto-issue, a user who'd previously passed
+     *  the gate would land on {@link #CARD_LOBBY} after a RuneLite
+     *  restart but the server wouldn't have an
+     *  {@code OSRS-LobbyMembers} row for them — empty roster, invisible
+     *  to peers. */
+    private boolean autoJoinIssuedThisSession;
 
     /** Top-of-panel inline error banner. Persists across the gate / lobby /
      *  fight cards (lives above the {@link CardLayout}) so a SMURF_GUARD
@@ -429,10 +441,16 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
 
     public MatchmakingLobbyPanel(LobbyService service)
     {
-        this(service, new NoOpLobbyJoinGate());
+        this(service, new NoOpLobbyJoinGate(), LobbyPreferences.inMemory());
     }
 
     public MatchmakingLobbyPanel(LobbyService service, LobbyJoinGate joinGate)
+    {
+        this(service, joinGate, LobbyPreferences.inMemory());
+    }
+
+    public MatchmakingLobbyPanel(LobbyService service, LobbyJoinGate joinGate,
+                                 LobbyPreferences prefs)
     {
         if (service == null) throw new IllegalArgumentException("LobbyService is required");
         this.service = service;
@@ -440,6 +458,16 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         // unlocked so a wiring bug doesn't lock the user out (server
         // still has the final word via the v2 SMURF_GUARD check).
         this.joinGate = joinGate != null ? joinGate : new NoOpLobbyJoinGate();
+        // In-memory fallback so test call sites + the existing
+        // NoOpLobbyService production placeholder continue to build
+        // without a real ConfigManager. Real persistence kicks in once
+        // PvPLeaderboardPlugin wires the Guice-provided variant.
+        this.prefs = prefs != null ? prefs : LobbyPreferences.inMemory();
+        // Restore previously-persisted gate state into the in-memory
+        // fields BEFORE buildStyleGate() initialises the widgets — the
+        // gate's region combo, style toggles, build toggles, and the
+        // sticky hasJoinedLobby flag all read from these fields.
+        applyPersistedPreferences();
         this.roster = new ArrayList<>();
         // Initial pending == visible so the first coalescer tick is a no-op
         // until a roster snapshot arrives via onRosterSnapshot(...).
@@ -473,9 +501,15 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
 
         rootCards = new CardLayout();
         rootCardHost = new JPanel(rootCards);
-        rootCardHost.add(buildStyleGate(), CARD_GATE);
-        rootCardHost.add(buildLobbyView(), CARD_LOBBY);
+        rootCardHost.setName(ROOT_CARD_HOST_NAME);
+        JPanel gateCard = buildStyleGate();
+        gateCard.setName(CARD_GATE);
+        rootCardHost.add(gateCard, CARD_GATE);
+        JPanel lobbyCard = buildLobbyView();
+        lobbyCard.setName(CARD_LOBBY);
+        rootCardHost.add(lobbyCard, CARD_LOBBY);
         fightSetupContainer = new JPanel(new BorderLayout());
+        fightSetupContainer.setName(CARD_FIGHT);
         rootCardHost.add(fightSetupContainer, CARD_FIGHT);
         add(rootCardHost, BorderLayout.CENTER);
         rootCards.show(rootCardHost, CARD_GATE);
@@ -492,9 +526,9 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         reconnectBannerTicker.setRepeats(true);
         reconnectBannerTicker.start();
 
-        // Register for server (or fixture) pushes. The roster + initial
-        // incoming-invite cards arrive via these callbacks when the user
-        // passes the gate by calling service.joinLobby(...).
+        // Register for server pushes. The roster + initial incoming-invite
+        // cards arrive via these callbacks when the user passes the gate
+        // by calling service.joinLobby(...).
         this.service.setListener(this);
         this.service.start();
 
@@ -582,6 +616,7 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
             if (idx >= 0)
             {
                 selfRegion = REGION_CODES[idx];
+                prefs.setRegion(selfRegion);
                 // Region chip lives on the self-preview row above the
                 // slider — keep it in sync with the picker.
                 renderSelfPreview();
@@ -634,6 +669,7 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
                 {
                     selectedStyles.remove(s);
                 }
+                prefs.setStyles(selectedStyles);
                 refreshCurrentStyleLabel();
                 updateGoToLobbyEnabled();
             });
@@ -643,15 +679,11 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         }
 
         // ---- Anti-smurf match-count status row (drives style-toggle lock state) ----
-        // Layout per spec: explanation line on top, per-style remaining
-        // counts below, [Refresh count] button at the bottom. Both
-        // widgets live as fields so the gate-listener callback can
-        // update them in place without rebuilding the gate. Font sizes
-        // mirror the style-toggle row above (15pt BOLD) per user spec
-        // 2026-05-18 — was 12pt PLAIN before. The "Updated N min ago"
-        // label was dropped in the same pass (was visual noise; the
-        // count itself reads from the listener-driven label below
-        // which is enough signal).
+        // Layout: explanation line on top, per-style remaining counts
+        // below, [Refresh count] button at the bottom. Both widgets
+        // live as fields so the gate-listener callback can update them
+        // in place without rebuilding the gate. Font sizes mirror the
+        // style-toggle row above (15pt BOLD).
         gateContent.add(leftAlignedStrut(8));
 
         gateMatchCountStatusLabel = new JLabel(" ");
@@ -736,6 +768,7 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
                 {
                     selectedBuildTypes.remove(a);
                 }
+                prefs.setBuilds(selectedBuildTypes);
                 refreshCurrentStyleLabel();
                 updateGoToLobbyEnabled();
             });
@@ -760,16 +793,24 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         {
             // Region picker only sets the user's own region — the lobby
             // shows everyone regardless of region. Forward the gate picks
-            // to the service so the fixture (or future socket impl) knows
-            // who we are; it'll push the roster + any seeded incoming
+            // to the service; it'll push the roster + any pending incoming
             // invites back through onRosterSnapshot / onIncomingInvite.
             refreshCurrentStyleLabel();
             service.joinLobby(selfRegion, selectedStyles, selectedBuildTypes,
                 rankMinIdx, rankMaxIdx);
             // Sticky-flag the lobby so a logout → login round-trip
-            // auto-returns the user to this card (with picks preserved)
-            // rather than dropping them back at the gate.
+            // (or a full plugin restart) auto-returns the user to this
+            // card with their picks preserved, rather than dropping them
+            // back at the gate. Persisted via prefs so restarts honour
+            // it; the in-memory field handles intra-session navigation.
             hasJoinedLobby = true;
+            // The user just sent a fresh lobby/join via the click above
+            // — flag the auto-issue path as done for this session so a
+            // subsequent gate-listener tick (e.g. hourly count refresh)
+            // doesn't re-fire a redundant lobby/join with the same args.
+            autoJoinIssuedThisSession = true;
+            saveGateSelections();
+            prefs.setHasJoined(true);
             renderRoster();
             rootCards.show(rootCardHost, CARD_LOBBY);
         });
@@ -794,15 +835,23 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
      *  onLogout transitions). EDT-only — the listener already
      *  marshals.
      *
-     *  <p>Also handles the logout → login auto-restore: if the user
-     *  was previously in the lobby (per {@link #hasJoinedLobby}) and
-     *  they're currently parked on the gate card, jump them back to
-     *  the lobby card. The {@code WebSocketLobbyService}'s reconnect-
-     *  replay re-issues {@code lobby/join} on the OkHttp reconnect, so
-     *  the panel just needs to navigate; it doesn't need to call
-     *  {@code service.joinLobby} again itself. We also skip the auto-
-     *  jump if the user is mid-fight-setup (CARD_FIGHT) — the fight
-     *  flow has its own exit path. */
+     *  <p>Drives the OSRS-login/logout lifecycle for the lobby:
+     *  <ul>
+     *    <li><b>Logout</b> — clear any active fight setup (the server
+     *    expires the session on disconnect anyway) and force the root
+     *    card back to {@link #CARD_GATE}. The gate's logged-out notice
+     *    is what the user then sees. {@link #hasJoinedLobby} +
+     *    {@link #selectedStyles}/{@link #selectedBuildTypes}/{@link #selfRegion}
+     *    are deliberately preserved so the next login can auto-restore
+     *    without forcing the user to re-pick.</li>
+     *    <li><b>Login auto-restore</b> — if the user was previously in
+     *    the lobby (per {@link #hasJoinedLobby}) and they're not
+     *    mid-fight, jump back to {@link #CARD_LOBBY}. The
+     *    {@code WebSocketLobbyService}'s reconnect-replay re-issues
+     *    {@code lobby/join} on the OkHttp reconnect, so the panel just
+     *    needs to navigate; it doesn't need to call
+     *    {@code service.joinLobby} again itself.</li>
+     *  </ul> */
     private void applyLoginGateState()
     {
         if (gateContent == null || gateLoggedOutNotice == null) return;
@@ -819,14 +868,87 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
             parent.repaint();
         }
 
-        if (loggedIn && hasJoinedLobby && currentFightSession == null)
+        if (!loggedIn)
         {
+            // Tear down any in-flight fight session so a relogin doesn't
+            // resume into a stale CARD_FIGHT — the server already
+            // expires the session on disconnect, this just keeps the
+            // local state honest.
+            if (currentFightSession != null) exitFightSetup();
+            // Reset the auto-join sticky so the next login re-issues
+            // service.joinLobby(...). The server already drops the
+            // OSRS-LobbyMembers row on $disconnect (60s grace, then
+            // TTL), so a fresh join is the right thing on re-login.
+            autoJoinIssuedThisSession = false;
+            rootCards.show(rootCardHost, CARD_GATE);
+            return;
+        }
+
+        if (hasJoinedLobby && currentFightSession == null)
+        {
+            // Auto-restore safety net: if the persisted gate picks have
+            // become invalid since the user last logged in (e.g. all
+            // their advertised styles fell below the SMURF_GUARD
+            // threshold and applyStyleToggleLockState force-deselected
+            // them), drop back to the gate so the user re-picks. Sending
+            // lobby/join with an empty styles set would just trip
+            // server-side validation. applyStyleToggleLockState() is
+            // called BEFORE this method in onJoinGateChanged() so the
+            // empty-set check below sees the post-cleanup state.
+            if (selectedStyles.isEmpty() || selectedBuildTypes.isEmpty())
+            {
+                rootCards.show(rootCardHost, CARD_GATE);
+                return;
+            }
             // currentVisibleCard() requires walking the rootCardHost's
             // children to find the one with isVisible()==true; cheaper
             // to just always re-issue the show(CARD_LOBBY) — CardLayout
             // is a no-op if we're already on that card.
             rootCards.show(rootCardHost, CARD_LOBBY);
         }
+    }
+
+    /** Re-issues {@code service.joinLobby(...)} once per login session
+     *  when the persisted "I'm in the lobby" sticky flag is set and the
+     *  gate picks are valid (every advertised style has a known +
+     *  unlocked match count). Idempotent — once
+     *  {@link #autoJoinIssuedThisSession} flips true, subsequent calls
+     *  no-op until the next logout clears it.
+     *
+     *  <p>Defers when match counts haven't loaded yet — the gate
+     *  listener will fire again when they do, and this method gets
+     *  called from {@link #onJoinGateChanged()} on every refresh. The
+     *  server's {@code SMURF_GUARD v2} would reject locked-style joins
+     *  anyway, but issuing them at all generates a noisy
+     *  {@code error/lobby} push that the user briefly sees in the
+     *  banner — better to wait for trusted counts.
+     *
+     *  <p>Defers when {@link #selectedStyles} or
+     *  {@link #selectedBuildTypes} is empty — that path is
+     *  drop-to-gate, handled by {@link #applyLoginGateState()}. */
+    private void maybeAutoJoinAfterLogin()
+    {
+        if (autoJoinIssuedThisSession) return;
+        if (!hasJoinedLobby) return;
+        if (currentFightSession != null) return;
+        if (!joinGate.isLoggedIn()) return;
+        if (selectedStyles.isEmpty() || selectedBuildTypes.isEmpty()) return;
+
+        Map<Style, Integer> counts = joinGate.getMatchCounts();
+        for (Style s : selectedStyles)
+        {
+            Integer c = counts.get(s);
+            // Unknown count → defer to a later refresh. Locked count →
+            // applyStyleToggleLockState() will force-deselect on this
+            // same gate-listener tick, and the next call to this method
+            // will see selectedStyles cleaned up (or empty → drop-to-gate
+            // via applyLoginGateState).
+            if (c == null || !LobbyJoinGate.isUnlocked(c)) return;
+        }
+
+        service.joinLobby(selfRegion, selectedStyles, selectedBuildTypes,
+            rankMinIdx, rankMaxIdx);
+        autoJoinIssuedThisSession = true;
     }
 
     /** Enables {@link #goToLobbyBtn} only when all gate picks are
@@ -871,14 +993,23 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
      *  both fire through this listener. */
     private void onJoinGateChanged()
     {
+        // Order matters: lock-state runs first so applyLoginGateState's
+        // empty-picks branch sees post-cleanup selectedStyles. Without
+        // this ordering a user whose persisted styles are all locked
+        // would briefly land on CARD_LOBBY before getting redirected to
+        // CARD_GATE on the next listener tick.
+        applyStyleToggleLockState();
         applyLoginGateState();
         renderJoinGateStatus();
-        applyStyleToggleLockState();
         updateGoToLobbyEnabled();
         // The self-name supplier returns null pre-login and then
         // non-null after; rebuild the preview row on every gate
         // event so the row appears the instant the user logs in.
         renderSelfPreview();
+        // Auto-issue lobby/join after applyLoginGateState has decided
+        // CARD_LOBBY — covers fresh-plugin-start where the WSLS
+        // reconnect-replay cache is empty. Idempotent within a session.
+        maybeAutoJoinAfterLogin();
     }
 
     /** Repaints {@link #gateMatchCountStatusLabel} + the [Refresh count]
@@ -1073,6 +1204,70 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
             .replace("\"", "&quot;");
     }
 
+    /** Pulls the last persisted gate selections (region / styles / builds /
+     *  rank-slider bounds / hasJoinedLobby) into the in-memory fields.
+     *  Called once from the ctor BEFORE {@link #buildStyleGate()} so the
+     *  widgets read the restored values when they construct.
+     *
+     *  <p>The field initialisers above remain the "first launch / no
+     *  persistence" defaults; this method overrides them when the user
+     *  has previously completed the gate. An invalid persisted set
+     *  (zero styles or zero builds — possible if an older plugin version
+     *  stored those) falls back to the field defaults so the gate stays
+     *  usable. Out-of-range rank indices are clamped against
+     *  {@link #RANK_LABELS}.length so a future RANK_LABELS shrink can't
+     *  leave the slider pointing past the end. */
+    private void applyPersistedPreferences()
+    {
+        selfRegion = prefs.getRegion(DEFAULT_REGION);
+
+        Set<Style> persistedStyles = prefs.getStyles(EnumSet.of(Style.NH));
+        if (!persistedStyles.isEmpty())
+        {
+            selectedStyles.clear();
+            selectedStyles.addAll(persistedStyles);
+        }
+
+        Set<BuildType> persistedBuilds = prefs.getBuilds(EnumSet.allOf(BuildType.class));
+        if (!persistedBuilds.isEmpty())
+        {
+            selectedBuildTypes.clear();
+            selectedBuildTypes.addAll(persistedBuilds);
+        }
+
+        int min = clampRankIdx(prefs.getMinRankIdx(0));
+        int max = clampRankIdx(prefs.getMaxRankIdx(RANK_LABELS.length - 1));
+        // Defensive — a corrupt write could leave min > max. Swap
+        // rather than reject so the user still sees a usable slider.
+        if (min > max) { int t = min; min = max; max = t; }
+        rankMinIdx = min;
+        rankMaxIdx = max;
+
+        hasJoinedLobby = prefs.getHasJoined();
+    }
+
+    /** Clamps {@code idx} into {@code [0, RANK_LABELS.length - 1]}. */
+    private static int clampRankIdx(int idx)
+    {
+        if (idx < 0) return 0;
+        if (idx >= RANK_LABELS.length) return RANK_LABELS.length - 1;
+        return idx;
+    }
+
+    /** Snapshots the user's current gate picks (region / styles / builds /
+     *  rank-slider bounds) into {@link #prefs}. Called from the gate
+     *  widget action listeners after each mutation, AND from the
+     *  Go-to-lobby click handler so the canonical "I'm in the lobby"
+     *  payload is what's persisted. */
+    private void saveGateSelections()
+    {
+        prefs.setRegion(selfRegion);
+        prefs.setStyles(selectedStyles);
+        prefs.setBuilds(selectedBuildTypes);
+        prefs.setMinRankIdx(rankMinIdx);
+        prefs.setMaxRankIdx(rankMaxIdx);
+    }
+
     /** Clears all three gate picks (styles, account builds, region) and
      *  rebinds the gate widgets' visual state to match. The user must
      *  re-pick before Go-to-lobby re-enables. Called by [Reset Options] in
@@ -1091,9 +1286,13 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         selectedBuildTypes.clear();
         for (BuildType bt : BuildType.values()) selectedBuildTypes.add(bt);
         selfRegion = DEFAULT_REGION;
+        rankMinIdx = 0;
+        rankMaxIdx = RANK_LABELS.length - 1;
         // Explicit "I want to re-pick" — clear the sticky lobby flag so
-        // the next login doesn't bypass the gate.
+        // the next login doesn't bypass the gate, AND wipe the persisted
+        // values so a plugin restart starts at the gate too.
         hasJoinedLobby = false;
+        prefs.clear();
 
         for (Map.Entry<Style, JToggleButton> e : styleToggles.entrySet())
         {
@@ -1201,9 +1400,8 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
     }
 
     /** Lobby card: presence + style indicator + filters NORTH; invites strip
-     *  + roster scroll CENTER. Chat was removed for the initial plugin (see
-     *  PLUGIN_PROGRESS.md `chat-deferred`); the lobby now fills the entire
-     *  card vertically. */
+     *  + roster scroll CENTER. The lobby fills the entire card vertically
+     *  (no chat strip on the initial release). */
     private JPanel buildLobbyView()
     {
         JPanel lobby = new JPanel(new BorderLayout(0, 4));
@@ -1276,13 +1474,7 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
      *  <p>Wired from {@code DashboardPanel} just like
      *  {@link #setOnOpenProfile}; not part of the constructor so
      *  existing test call sites (and the source-compat 1-arg ctor)
-     *  don't need updating.
-     *
-     *  <p>Pre-{@code p2-scrub-uuids-from-lobby} this also took a
-     *  client-UUID supplier; that argument was removed when the
-     *  self-preview {@link LobbyMember} was migrated off raw UUIDs
-     *  (the panel synthesises its own canonical {@code player_id}
-     *  from the lowercased name — see {@link #renderSelfPreview}). */
+     *  don't need updating. */
     public void setSelfIdentity(Supplier<String> nameSup)
     {
         this.selfNameSupplier = nameSup;
@@ -1325,15 +1517,11 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         caption.setBorder(BorderFactory.createEmptyBorder(2, 2, 4, 2));
         selfPreviewContainer.add(caption);
 
-        // Self-preview LobbyMember.playerId is set to the lowercased
-        // display name purely as a stable in-process identifier — this
+        // Self-preview LobbyMember.playerId is the lowercased display
+        // name purely as a stable in-process identifier — this
         // synthetic member never crosses the wire (the server filters
         // the viewer's own row out of every roster push), so the
         // value only has to be non-null + non-empty for the renderer.
-        // Pre-2026-05-19 this used the raw {@code $connect} UUID via
-        // {@code selfUuidSupplier}; with raw UUIDs scrubbed from the
-        // wire and from {@link LobbyMember}, the canonical lowercase
-        // name is the right local stand-in.
         String selfPlayerId = name != null && !name.isEmpty() ? name.toLowerCase() : "self";
         // Pick the displayed rank by Style priority NH > Veng > Multi
         // > DMM among the user's currently-selected styles (Style
@@ -1413,9 +1601,9 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
     // Sender path:
     //   [Fight] click -> Pick Style -> (sub-loc if NH/Multi) -> submitOutgoingInvite()
     //   -> back to LOBBY with [Invited M:SS] chip on opponent's row
-    //   -> mock auto-accept after MOCK_AUTO_ACCEPT_DELAY_MS -> ConfirmFight view
+    //   -> opponent accepts (server push) -> ConfirmFight view
     //   -> user clicks Confirm -> Waiting view (or MeetAt if opponent already confirmed)
-    //   -> mock opponent confirm fires -> MeetAt
+    //   -> opponent confirms (server push) -> MeetAt
     //
     // Receiver path:
     //   IncomingInvitePanel "Accept Fight" -> ConfirmFight view (skips Pick Style)
@@ -1423,7 +1611,7 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
     //
     // Termination paths (all clear the [Invited] block + currentFightSession):
     //   - Both confirm -> MeetAt -> Find a new match -> LOBBY
-    //   - 30s confirm window expires -> LOBBY (toast/notification TBD server-side)
+    //   - 30s confirm window expires -> LOBBY
     //   - Find a new match clicked from any FIGHT view -> LOBBY
     //   - 10-min original invite TTL elapses (only meaningful in INVITED state)
 
@@ -1437,17 +1625,10 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
     }
 
     /** User-facing display name for a roster row / invite card.
-     *  Prefers the display-cased {@link LobbyMember#name} (the
-     *  server pushes it alongside {@link LobbyMember#playerId} on
-     *  every roster + invite-received push post-{@code
-     *  p2-scrub-uuids-from-lobby}). Falls back to the canonical
-     *  {@code player_id} (the lowercased form) if the display name
-     *  field is empty — that's still a real player-visible
-     *  identifier, never a UUID. Returns {@code "Unknown"} only when
-     *  both are empty (shouldn't happen with the new backend, but
-     *  the synthetic fallback in {@code synthesiseMinimalMember}
-     *  could in theory hand us empty strings during a reconnect
-     *  race). */
+     *  Prefers the display-cased {@link LobbyMember#name}, falls back
+     *  to the canonical {@link LobbyMember#playerId} (lowercased
+     *  form) if the display name is empty, and finally {@code
+     *  "Unknown"} only if both are empty. */
     private static String displayNameOf(LobbyMember m)
     {
         if (m == null) return "";
@@ -1511,11 +1692,10 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
 
     /** Cleans up any in-flight FIGHT session + outgoing invite for the same
      *  opponent (Find-a-new-match exit, 30s expiry, both-confirmed exit, etc.)
-     *  and returns the user to the lobby. The service's mock peer-confirm
-     *  timer (or the real server's session TTL) keeps running server-side;
-     *  the panel just drops its local state and ignores the late
-     *  {@link #onFightConfirmedByPeer onFightConfirmedByPeer} /
-     *  {@link #onMatchFound onMatchFound} push since
+     *  and returns the user to the lobby. The server's session TTL keeps
+     *  running server-side; the panel just drops its local state and
+     *  ignores the late {@link #onFightConfirmedByPeer onFightConfirmedByPeer}
+     *  / {@link #onMatchFound onMatchFound} push since
      *  {@code currentFightSession} is already null. */
     private void exitFightSetup()
     {
@@ -1644,9 +1824,8 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
      *  {@link LobbyService#sendInvite}), the user is dropped back into the
      *  lobby, and the opponent's row chip flips to [Invited M:SS]. The
      *  opponent's eventual acceptance arrives asynchronously via
-     *  {@link #onFightProposed} (mock fixture fakes it after
-     *  {@link DevLobbyFixture#DEFAULT_AUTO_ACCEPT_DELAY_MS}; real backend
-     *  pushes when the opponent clicks Accept). */
+     *  {@link #onFightProposed} (the backend pushes when the opponent
+     *  clicks Accept). */
     private void submitOutgoingInvite(LobbyMember opponent, Style style, BuildType build, String location)
     {
         if (opponent == null || style == null || build == null) return;
@@ -1658,8 +1837,8 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
 
         // Local tracking record for the [Invited M:SS] chip + the
         // 10-min client-side TTL countdown. Invite-id is locally-minted
-        // here; when the service's ack comes back the real server-assigned
-        // id replaces it (architecture {@code p2-plugin-service}).
+        // here; when the service's ack comes back the real
+        // server-assigned id replaces it.
         long now = System.currentTimeMillis();
         final OutgoingInvite oi = new OutgoingInvite(
             "local-" + UUID.randomUUID(), opponent, style, build, location,
@@ -1674,8 +1853,7 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
 
     /** User clicked [Invited M:SS] on a row to abort their pending invite.
      *  Drops the local tracking record (so the chip flips back to [Fight])
-     *  and asks the service to cancel server-side — which in mock mode
-     *  stops the fixture's pending auto-accept timer.
+     *  and asks the service to cancel the invite server-side.
      *
      *  <p>Keyed by canonical {@code player_id} (not display name) —
      *  display names can collide across peers (case-insensitive
@@ -1696,10 +1874,9 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
     /** User clicked Confirm Fight in the ConfirmFight view. Marks local
      *  state {@code iConfirmed=true}, fires the service confirm, and
      *  optimistically renders the Waiting view. If the peer had already
-     *  confirmed, {@link #onMatchFound} fires synchronously inside
-     *  {@code service.confirmFight()} (mock fixture) or shortly after
-     *  (real server), at which point the listener swaps the view to
-     *  MeetAt — the {@code if (currentFightSession != null)} guard below
+     *  confirmed, {@link #onMatchFound} fires shortly after, at which
+     *  point the listener swaps the view to MeetAt — the
+     *  {@code if (currentFightSession != null)} guard below
      *  avoids double-rendering the Waiting view in that case. */
     private void onUserConfirmedFight()
     {
@@ -1885,9 +2062,8 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
             Map.Entry<String, OutgoingInvite> e = it.next();
             if (now >= e.getValue().expiresAtEpochMs)
             {
-                // Local-side TTL expiry — ask the service to cancel its
-                // own pending state too (idempotent for the mock fixture
-                // since the auto-accept timer is keyed by opponent UUID).
+                // Local-side TTL expiry — ask the service to cancel
+                // its own pending state too (idempotent).
                 service.cancelInvite(e.getValue().opponent);
                 it.remove();
                 rosterDirty = true;
@@ -1977,8 +2153,9 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         if (invite == null) return;
         // Spec'd filter: only show invite cards from senders whose rank
         // sits inside the user's [rankMinIdx, rankMaxIdx] slider band.
-        // Mock fixture seeds invites pre-filter, so the panel re-applies
-        // the same rule here that PlayerRow uses for the lobby roster.
+        // The panel re-applies the same rule the PlayerRow renderer uses
+        // for the lobby roster, so a push that arrives just before the
+        // user widens their slider doesn't sneak past the filter.
         if (invite.sender != null
             && (invite.sender.peakRankIdx < rankMinIdx
                 || invite.sender.peakRankIdx > rankMaxIdx)) return;
@@ -1988,11 +2165,10 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
     @Override
     public void onIncomingInviteCancelled(String inviteId)
     {
-        // Push fires on four cascades per BACKEND_HANDOFF_TO_PLUGIN.md §3:
-        // (a) sender cancelled, (b) receiver declined (push to sender),
-        // (c) block-cascade, (d) leave-cascade. The inviteId is the only
-        // stable correlation key — sender / receiver perspectives both
-        // resolve here.
+        // Server pushes this on four cascades: (a) sender cancelled,
+        // (b) receiver declined (push to sender), (c) block-cascade,
+        // (d) leave-cascade. The inviteId is the only stable correlation
+        // key — sender / receiver perspectives both resolve here.
         if (inviteId == null || inviteId.isEmpty()) return;
 
         // ---- Receiver perspective: cancel an incoming card we showed ----
@@ -2139,9 +2315,9 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
     {
         // Localized via LobbyErrorMessages — never display the raw
         // server message; it's English-only debug text that may change
-        // without notice (see BACKEND_HANDOFF_TO_PLUGIN.md §3). Unknown
-        // codes get a generic fallback so a backend that adds a new
-        // code without a plugin release degrades gracefully.
+        // without notice. Unknown codes get a generic fallback so a
+        // server that adds a new code without a plugin release degrades
+        // gracefully.
         showErrorBanner(LobbyErrorMessages.forCode(code));
     }
 
@@ -2267,12 +2443,10 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
      * presentation logic (countdown formatting, edge cases when the
      * scheduled time is in the past while a reconnect is mid-flight).
      *
-     * <p>Test fixtures ({@link com.pvp.leaderboard.lobby.DevLobbyFixture},
-     * {@link com.pvp.leaderboard.lobby.NoOpLobbyService}) inherit the
+     * <p>{@link com.pvp.leaderboard.lobby.NoOpLobbyService} inherits the
      * interface defaults — {@code isConnected()=true} +
      * {@code getNextReconnectAttemptEpochMs()=0} — so the banner stays
-     * hidden in visual-review / unit-test runs without any extra
-     * mocking.
+     * hidden in unit-test runs without any extra stubbing.
      */
     private void refreshReconnectBanner()
     {
@@ -2613,6 +2787,11 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
             updateRankValueLabel(maxValue, rankMaxIdx);
             if (!rankRange.getValueIsAdjusting())
             {
+                // Persist on commit (drag-end) rather than every drag
+                // tick — avoids hammering the config writer with N writes
+                // per drag while still ensuring the final value lands.
+                prefs.setMinRankIdx(rankMinIdx);
+                prefs.setMaxRankIdx(rankMaxIdx);
                 renderRoster();
                 // Slider also gates incoming invite cards — re-evaluate per-card
                 // visibility so out-of-range invites disappear (and reappear if
@@ -2638,11 +2817,10 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         return filters;
     }
 
-    /** Live "current value" label for a rank-range endpoint — bold, painted in
-     *  the rank's own colour so the user can spot which tier they're on without
-     *  reading the text. 15pt matches the lobby's body-text scale (style
-     *  toggles + presence label) per user spec 2026-05-18 — was 12pt
-     *  ({@code FILTER_FONT_PT}, now retired) before. */
+    /** Live "current value" label for a rank-range endpoint — bold,
+     *  painted in the rank's own colour so the user can spot which
+     *  tier they're on without reading the text. 15pt matches the
+     *  lobby's body-text scale (style toggles + presence label). */
     private static JLabel makeRankValueLabel(int idx)
     {
         JLabel l = new JLabel(RANK_LABELS[idx]);
@@ -2778,9 +2956,8 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
                 : "No players match your filters, click Reset Options and widen your search";
             // HTML wrap forces line breaks inside the ~200px lobby
             // column — JLabel won't wrap plain text inside a
-            // BoxLayout.Y_AXIS parent. 15pt BOLD (non-italic per user
-            // spec 2026-05-18-pm-2) matches the lobby's body-text
-            // scale used by the style toggles + presence label.
+            // BoxLayout.Y_AXIS parent. 15pt BOLD matches the lobby's
+            // body-text scale used by the style toggles + presence label.
             JLabel empty = new JLabel("<html><div style='width:200px'>" + message + "</div></html>");
             empty.setFont(empty.getFont().deriveFont(Font.BOLD, 15f));
             empty.setForeground(new Color(0x888888));
@@ -2867,7 +3044,7 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         private final InviteCancelCallback onCancelInvite;
         /** Re-queried at construction so the next renderRoster picks up
          *  block changes immediately (block listener overrides call
-         *  renderRoster directly per BACKEND_HANDOFF_TO_PLUGIN.md §3.3). */
+         *  renderRoster directly). */
         private final boolean blocked;
         /** {@code true} for the "Your profile displayed to others"
          *  row above the slider — suppresses the right-side action

@@ -3,32 +3,21 @@ package com.pvp.leaderboard.lobby;
 import java.util.Set;
 
 /**
- * Placeholder {@link LobbyService} used while {@code WebSocketLobbyService}
- * (task {@code p2-plugin-service}) is unbuilt and the backend's
- * {@code wss://api.pvp-leaderboard.com/ws/prod} endpoint is still being
- * deployed (see {@code docs/BACKEND_HANDOFF_LOBBY.md}).
+ * Fallback {@link LobbyService} used when {@link
+ * com.pvp.leaderboard.ui.DashboardPanel} is constructed without an
+ * injected service (e.g. in unit tests that don't wire matchmaking).
  *
- * <p>Every command is a silent no-op. No event is ever pushed back to the
- * registered {@link LobbyEventListener}, so the panel renders an empty
- * roster (no rows, no incoming-invite cards, 0 players online) and every
- * gate / fight / invite UI affordance does nothing when clicked.
- *
- * <p>The presence of this service rather than {@link DevLobbyFixture} in
- * the production wiring (see
- * {@link com.pvp.leaderboard.ui.DashboardPanel}) is intentional: shipping
- * a fake roster to real users in a beta jar would be misleading. The
- * fixture stays in the codebase but is only reachable from tests
- * ({@code DevLobbyFixtureTest}) until the real service lands.
- *
- * <p>Swap target: drop-in replace this class with
- * {@code WebSocketLobbyService} at the {@code DashboardPanel} call-site.
- * The {@link MatchmakingLobbyPanel} contract is identical — only the
- * service implementation changes.
+ * <p>Every command is a silent no-op and no event is ever pushed back
+ * to the registered {@link LobbyEventListener}, so the panel renders
+ * an empty roster (no rows, no incoming-invite cards, 0 players online)
+ * and every gate / fight / invite UI affordance does nothing when
+ * clicked. Production wiring supplies {@code WebSocketLobbyService}
+ * instead.
  */
 public final class NoOpLobbyService implements LobbyService
 {
-    /** Cached listener so callers can still set + replace it without NPE
-     *  (mirrors {@link DevLobbyFixture}'s lifecycle); never invoked. */
+    /** Cached listener so callers can still set + replace it without NPE;
+     *  never invoked. */
     @SuppressWarnings("unused")
     private LobbyEventListener listener;
 

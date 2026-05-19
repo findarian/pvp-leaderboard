@@ -44,17 +44,14 @@ import java.util.regex.Pattern;
  * successful open. Triggered by abnormal close codes (anything other
  * than 1000 / 1001) AND by network-level {@code onFailure}.
  *
- * <p>HTTP 401 (server stealth-refuse — missing UUID, banned IP,
- * WAF block) drops into a fixed <b>1-minute slow-retry</b> instead
- * of the fast 1s/2s/4s ladder. Bounded enough that a server-side
- * unban or WAF policy change is picked up within a minute without
- * requiring a RuneLite restart; spaced enough that the per-IP hit
- * rate stays well under any auto-ban trigger. The panel surfaces a
- * "Attempting to reconnect" banner with the countdown so the user
- * sees the retry is in flight (see {@link
- * #getNextReconnectAttemptEpochMs()}). Earlier "hard stop on 401"
- * stranded users whose unban landed mid-session; the prior 5/15/30
- * min ladder was too slow for a beta where unbans happen interactively.
+ * <p>HTTP 401 (server stealth-refuse) drops into a fixed
+ * <b>1-minute slow-retry</b> instead of the fast 1s/2s/4s ladder.
+ * Bounded enough that a server-side state change (unban, WAF policy
+ * update) is picked up within a minute without requiring a RuneLite
+ * restart; spaced enough that the per-IP hit rate stays well under
+ * any auto-ban trigger. The panel surfaces a "Attempting to
+ * reconnect" banner with the countdown so the user sees the retry
+ * is in flight (see {@link #getNextReconnectAttemptEpochMs()}).
  *
  * <p><b>Keepalive</b>: RFC 6455 native ping every 8 min
  * ({@link OkHttpClient.Builder#pingInterval}). API Gateway's idle
@@ -146,8 +143,8 @@ public final class WebSocketManager
     /** Listeners called every time the socket transitions from
      *  not-connected to connected (i.e. {@code onOpen} fires). Used by
      *  {@link com.pvp.leaderboard.lobby.WebSocketLobbyService} to
-     *  re-issue {@code lobby/join} on reconnect per
-     *  {@code BACKEND_HANDOFF_TO_PLUGIN.md §3.5}. Invoked on the OkHttp
+     *  re-issue {@code lobby/join} on reconnect so the user's roster
+     *  membership survives a transient drop. Invoked on the OkHttp
      *  dispatcher thread — listeners must marshal to their target thread
      *  themselves. {@link CopyOnWriteArrayList} so addConnectListener
      *  during an open-callback doesn't trip CME. */
@@ -464,37 +461,15 @@ public final class WebSocketManager
                 status, t == null ? "null" : t.getClass().getSimpleName(), intentional);
             if (response != null) response.close();
             if (intentional) return;
-            // 401 = server stealth-refuse on $connect. Three known
-            // soft-refuse reason codes today (visible in CloudWatch
-            // via the WAF response body's X-Refuse-Reason header,
-            // and as `_SOFT_REFUSE_REASON_CODES` on the backend per
-            // HANDOFF_TO_PLUGIN_SCRUB_UUIDS_FROM_LOBBY.md §2):
-            //
-            //   - missing_user_agent / invalid_user_agent —
-            //     plugin bug or out-of-spec client.
-            //   - no_player_id (added 2026-05-19) — brand-new
-            //     player who has never submitted a match, so the
-            //     server's MMR-row-derived player_id resolves
-            //     empty. Self-heals as soon as the user submits
-            //     one match (which creates the MMR row).
-            //
-            // All three soft-refuse codes are handled identically
-            // here: drop into the fixed 1-minute slow-retry so a
-            // server-side unban, WAF policy change, OR a brand-new
-            // player's first match submission recovers automatically
-            // without forcing the user to restart RuneLite. The
-            // panel renders a visible countdown banner from
+            // HTTP 401 = server stealth-refuse on $connect. Drop into
+            // the fixed 1-minute slow-retry so server-side state
+            // changes (unban, WAF policy update, the player's first
+            // match landing) recover automatically without forcing
+            // the user to restart RuneLite. Other failures use the
+            // standard fast-cadence backoff. The panel renders a
+            // visible countdown banner from
             // getNextReconnectAttemptEpochMs() so the user sees the
-            // retry is in flight. Earlier "hard stop on 401" build
-            // stranded users whose unban landed mid-session; see
-            // class javadoc on the reconnect policy.
-            //
-            // We don't read X-Refuse-Reason on the plugin side
-            // today — the same 1-min retry recovers from all three
-            // codes, and surfacing the distinction in the UI would
-            // require differentiating "you're banned" from "your
-            // first match is still pending" which we punt on until
-            // telemetry says it's worth the UX.
+            // retry is in flight.
             if (status == 401)
             {
                 scheduleAuthRefusedRetry();

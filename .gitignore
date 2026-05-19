@@ -30,17 +30,19 @@ nbactions.xml
 nb-configuration.xml
 nbproject/
 
-# Local-only tests added during the lobby/socket rollout — not part of
-# the production review surface. Listed by exact path so the three
-# already-tracked tests (MatchResultServiceTest, PvPDataServiceTest,
-# PvPLeaderboardPluginTest) keep showing up in diffs. Add the file path
-# here when introducing any further local-only test.
-src/test/java/com/pvp/leaderboard/DashboardPanelTest.java
-src/test/java/com/pvp/leaderboard/RankUtilsTest.java
-src/test/java/com/pvp/leaderboard/lobby/DevLobbyFixtureTest.java
-src/test/java/com/pvp/leaderboard/lobby/WebSocketLobbyServiceTest.java
-src/test/java/com/pvp/leaderboard/service/socket/SocketProtocolTest.java
-src/test/java/com/pvp/leaderboard/service/socket/SocketEventBusTest.java
-src/test/java/com/pvp/leaderboard/lobby/UserProfileLobbyJoinGateTest.java
-src/test/java/com/pvp/leaderboard/lobby/LobbyJoinGateHelpersTest.java
-src/test/java/com/pvp/leaderboard/ui/MatchmakingLobbyPanelGateTest.java
+# Tests are local-only and not part of the production review surface.
+# Ignore everything under src/test/, then allowlist only what the
+# shadow JAR build needs: PvPLeaderboardPluginTest is the Main-Class
+# named in build.gradle's shadowJar manifest and must stay tracked.
+src/test/**
+!src/test/
+!src/test/java/
+!src/test/java/com/
+!src/test/java/com/pvp/
+!src/test/java/com/pvp/leaderboard/
+!src/test/java/com/pvp/leaderboard/PvPLeaderboardPluginTest.java
+
+# Internal handoffs / progress trackers / architecture deep-dives —
+# kept on disk for local reference but not part of the GitHub review
+# surface. README.md at the repo root remains tracked.
+docs/

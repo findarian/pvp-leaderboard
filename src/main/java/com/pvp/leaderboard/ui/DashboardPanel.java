@@ -77,8 +77,9 @@ public class DashboardPanel extends PluginPanel
     /** Single {@link com.pvp.leaderboard.lobby.LobbyService} dependency used
      *  by {@link #createMatchmakingCard}. Injected from
      *  {@code PvPLeaderboardPlugin.startUp()} so production gets the
-     *  real {@code WebSocketLobbyService} and tests can pass a no-op
-     *  fixture or mock. Never null — the plugin always provides one. */
+     *  real {@code WebSocketLobbyService}. Falls back to
+     *  {@link com.pvp.leaderboard.lobby.NoOpLobbyService} when no
+     *  service is supplied (e.g. unit tests). */
     private final com.pvp.leaderboard.lobby.LobbyService lobbyService;
 
     /** Anti-smurf gate driving {@link MatchmakingLobbyPanel}'s
@@ -90,6 +91,15 @@ public class DashboardPanel extends PluginPanel
      *  know about the gate yet still build cleanly. */
     private final com.pvp.leaderboard.lobby.LobbyJoinGate joinGate;
 
+    /** Persistence backend for the lobby gate's selections (region /
+     *  styles / builds / rank-slider bounds / hasJoined sticky flag).
+     *  Production uses the Guice-provided {@link com.pvp.leaderboard.lobby.LobbyPreferences}
+     *  backed by {@code ConfigManager}; tests pass
+     *  {@link com.pvp.leaderboard.lobby.LobbyPreferences#inMemory()}.
+     *  Always non-null — the older 4-arg + 5-arg ctors substitute the
+     *  in-memory variant so source-compat is preserved. */
+    private final com.pvp.leaderboard.lobby.LobbyPreferences lobbyPreferences;
+
     /** Three-arg ctor kept for source-compatibility with any pre-gate
      *  call sites; substitutes a {@link com.pvp.leaderboard.lobby.NoOpLobbyJoinGate}
      *  so the panel still builds (server-side {@code SMURF_GUARD v2}
@@ -99,13 +109,27 @@ public class DashboardPanel extends PluginPanel
                           com.pvp.leaderboard.lobby.LobbyService lobbyService)
     {
         this(plugin, pvpDataService, cognitoAuthService, lobbyService,
-            new com.pvp.leaderboard.lobby.NoOpLobbyJoinGate());
+            new com.pvp.leaderboard.lobby.NoOpLobbyJoinGate(),
+            com.pvp.leaderboard.lobby.LobbyPreferences.inMemory());
+    }
+
+    /** Five-arg ctor kept for source-compatibility with the pre-prefs
+     *  wiring; substitutes an in-memory {@link com.pvp.leaderboard.lobby.LobbyPreferences}
+     *  so the panel still builds without a {@code ConfigManager}. */
+    public DashboardPanel(PvPLeaderboardPlugin plugin, PvPDataService pvpDataService,
+                          CognitoAuthService cognitoAuthService,
+                          com.pvp.leaderboard.lobby.LobbyService lobbyService,
+                          com.pvp.leaderboard.lobby.LobbyJoinGate joinGate)
+    {
+        this(plugin, pvpDataService, cognitoAuthService, lobbyService, joinGate,
+            com.pvp.leaderboard.lobby.LobbyPreferences.inMemory());
     }
 
     public DashboardPanel(PvPLeaderboardPlugin plugin, PvPDataService pvpDataService,
                           CognitoAuthService cognitoAuthService,
                           com.pvp.leaderboard.lobby.LobbyService lobbyService,
-                          com.pvp.leaderboard.lobby.LobbyJoinGate joinGate)
+                          com.pvp.leaderboard.lobby.LobbyJoinGate joinGate,
+                          com.pvp.leaderboard.lobby.LobbyPreferences lobbyPreferences)
     {
         this.plugin = plugin;
         this.pvpDataService = pvpDataService;
@@ -116,6 +140,9 @@ public class DashboardPanel extends PluginPanel
         this.lobbyService = lobbyService != null
             ? lobbyService
             : new com.pvp.leaderboard.lobby.NoOpLobbyService();
+        this.lobbyPreferences = lobbyPreferences != null
+            ? lobbyPreferences
+            : com.pvp.leaderboard.lobby.LobbyPreferences.inMemory();
 
         setLayout(new BorderLayout());
         setBorder(BorderFactory.createEmptyBorder(10, 10, 10, 10));
@@ -506,28 +533,20 @@ public class DashboardPanel extends PluginPanel
         matchmakingSubCardContainer = new JPanel(matchmakingSubCards);
         matchmakingSubCardContainer.setAlignmentX(LEFT_ALIGNMENT);
 
-        // Production wiring is the empty placeholder service until
-        // WebSocketLobbyService (task p2-plugin-service, blocked on the
-        // backend deployment described in docs/BACKEND_HANDOFF_LOBBY.md)
-        // lands. The mock fixture (DevLobbyFixture) is kept in the
-        // codebase for tests but is intentionally NOT wired here so beta
-        // jars don't ship a fake roster to real users.
-        matchmakingLobbyPanel = new MatchmakingLobbyPanel(lobbyService, joinGate);
+        // Production wiring uses the injected LobbyService (the real
+        // WebSocketLobbyService) + the ConfigManager-backed
+        // LobbyPreferences so gate selections persist across plugin
+        // restarts (region / styles / builds / rank slider /
+        // hasJoinedLobby sticky flag).
+        matchmakingLobbyPanel = new MatchmakingLobbyPanel(lobbyService, joinGate, lobbyPreferences);
         // Lobby profile-row clicks → same code path as right-click "PvP lookup".
         matchmakingLobbyPanel.setOnOpenProfile(this::openPlayerLookup);
-        // Self-profile preview ("Your profile displayed to others") above
-        // the rank slider — supplies the local OSRS name lazily so the
-        // row pre-login renders empty (supplier returns null) and
-        // auto-populates on the next gate refresh after the user logs
-        // in. No-op when running without a plugin handle (e.g.
-        // DevLobbyFixture-driven unit tests).
-        //
-        // Pre-{@code p2-scrub-uuids-from-lobby} this also passed
-        // {@code plugin::getClientUniqueId} as a second arg. With raw
-        // UUIDs scrubbed from every wire field and from the
-        // {@link LobbyMember} model, the panel no longer needs it —
-        // the client UUID lives only on the {@code WebSocketManager}
-        // side as the {@code $connect} auth credential.
+        // Self-profile preview ("Your profile displayed to others")
+        // above the rank slider — supplies the local OSRS name lazily
+        // so the row pre-login renders empty (supplier returns null)
+        // and auto-populates on the next gate refresh after the user
+        // logs in. No-op when running without a plugin handle (e.g.
+        // unit tests that don't construct a plugin).
         if (plugin != null)
         {
             matchmakingLobbyPanel.setSelfIdentity(plugin::getLocalPlayerName);
@@ -587,7 +606,7 @@ public class DashboardPanel extends PluginPanel
         row.add(discordBtn);
         JButton websiteBtn = makeCommunityBtn("Website", "Open the website");
         websiteBtn.addActionListener(e -> {
-            try { LinkBrowser.browse(PvPLeaderboardConstants.PUBLIC_SITE_BASE_URL + "/index.html"); } catch (Exception ignore) {}
+            try { LinkBrowser.browse(PvPLeaderboardConstants.PUBLIC_SITE_BASE_URL); } catch (Exception ignore) {}
         });
         row.add(websiteBtn);
         box.add(row);
@@ -670,12 +689,10 @@ public class DashboardPanel extends PluginPanel
     }
 
     /**
-     * Toggles the blocked state for the currently-displayed player. Updates
-     * the button label so the user gets immediate confirmation of the new
-     * state. Real socket-side mute will arrive with {@code p2-plugin-service};
-     * for now this only affects the in-memory {@link BlockedPlayersService}
-     * registry (consulted by the lobby roster filter once the real lobby
-     * service ships).
+     * Toggles the blocked state for the currently-displayed player.
+     * Updates the button label so the user gets immediate confirmation
+     * of the new state. The in-memory {@link BlockedPlayersService}
+     * registry is consulted by the lobby roster filter.
      */
     private void handleBlockPlayerToggle()
     {

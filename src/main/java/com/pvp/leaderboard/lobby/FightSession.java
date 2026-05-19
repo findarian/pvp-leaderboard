@@ -13,13 +13,8 @@ package com.pvp.leaderboard.lobby;
  * UI state separate from this — those flags are derived from the server's
  * push events ({@link LobbyEventListener#onFightConfirmedByPeer},
  * {@link LobbyEventListener#onMatchFound}) and from the local user clicking
- * the confirm button.
- *
- * <p>Created as part of {@code p1-plugin-mock-refactor}. Replaces the
- * panel-local {@code FightSession} inner class which owned a mutable
- * {@code mockOpponentConfirmTimer} — that timer is now owned by
- * {@link DevLobbyFixture}. Public final fields match the {@code LobbyMember}
- * idiom.
+ * the confirm button. Timer ownership lives in the service implementation,
+ * keeping this type a pure data carrier.
  */
 public final class FightSession
 {

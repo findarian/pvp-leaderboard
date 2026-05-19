@@ -25,11 +25,10 @@ import java.util.Map;
  *
  * <p><b>Trust boundary.</b> This gate is UX-only — it gives the user
  * immediate feedback without having to attempt a {@code lobby/join} the
- * server would reject. The backend enforces the same rule at
- * {@code lobby/join} time (see {@code BACKEND_HANDOFF_TO_PLUGIN.md} →
- * "SMURF_GUARD v2"); a modified plugin that bypasses this gate still
- * trips the server-side check and receives an {@code error/lobby
- * SMURF_GUARD} response.
+ * server would reject. The server enforces the same rule at
+ * {@code lobby/join} time; a modified plugin that bypasses this gate
+ * still trips the server-side check and receives an
+ * {@code error/lobby SMURF_GUARD} response.
  *
  * <p><b>Threading.</b> Listeners fire on the EDT; getters are safe to
  * call from any thread but their return values are point-in-time.

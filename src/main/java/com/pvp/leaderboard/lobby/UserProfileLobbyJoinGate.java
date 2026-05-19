@@ -130,11 +130,10 @@ public final class UserProfileLobbyJoinGate implements LobbyJoinGate
         // Fast-retry schedule for the initial-fetch window: every
         // minute until the first refresh succeeds. The refresh()
         // success path replaces this with the {@link
-        // #AUTO_REFRESH_INTERVAL_MS} hourly schedule. Used to be
-        // initialDelay=1h period=1h — meaning a failed initial fetch
-        // left the user waiting an hour for the next attempt. See
-        // 2026-05-18 fix in PLUGIN_PROGRESS.md for the failure modes
-        // this catches.
+        // #AUTO_REFRESH_INTERVAL_MS} hourly schedule. Without the
+        // fast-retry, a failed initial fetch would leave the user
+        // waiting an hour for the next attempt (and the gate stuck
+        // on "Please log into the game" the whole time).
         autoRefresh = scheduler.scheduleAtFixedRate(
             this::autoTick,
             INITIAL_RETRY_INTERVAL_MS,
@@ -443,7 +442,7 @@ public final class UserProfileLobbyJoinGate implements LobbyJoinGate
             for (Style s : Style.values()) counts.put(s, 0);
             // Soft-404 / brand-new player: leave rankIdxByStyle empty.
             // The self-preview row falls back to "rank unknown" and
-            // suppresses the rank chip rather than showing a fake
+            // suppresses the rank chip rather than showing a default
             // Bronze 3.
             rankIdxByStyle.clear();
         }

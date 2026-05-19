@@ -6,16 +6,12 @@ package com.pvp.leaderboard.lobby;
  * {@code [Invited M:SS]} chip state on the sender's row.
  *
  * <p>{@link #expiresAtEpochMs} is the absolute wall-clock instant the invite
- * lapses (10 min from server-stamped {@code createdAtEpochMs} per the
- * architecture's {@code LOBBY_INVITE_TTL_SEC=600}). When it elapses, the
- * panel removes the chip and re-enables {@code [Fight]} on the opponent's
- * row.
+ * lapses (10 min from server-stamped {@code createdAtEpochMs} matching the
+ * server's {@code LOBBY_INVITE_TTL_SEC=600}). When it elapses, the panel
+ * removes the chip and re-enables {@code [Fight]} on the opponent's row.
  *
- * <p>Created as part of {@code p1-plugin-mock-refactor}. Replaces the
- * panel-local {@code OutgoingInvite} inner class — the old version owned a
- * mock {@code Timer} for the fake opponent's auto-accept; the timer now
- * lives inside {@link DevLobbyFixture} so this type can be a pure data
- * carrier. Public final fields match the {@code LobbyMember} idiom.
+ * <p>Pure immutable data carrier — timer ownership lives in the service
+ * implementation, not on this type.
  */
 public final class OutgoingInvite
 {

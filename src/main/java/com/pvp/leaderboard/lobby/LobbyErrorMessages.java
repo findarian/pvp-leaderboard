@@ -5,18 +5,14 @@ import java.util.HashMap;
 import java.util.Map;
 
 /**
- * Localized message lookup for {@code error/lobby} envelope codes. Matches
- * the stable enum in {@code BACKEND_HANDOFF_TO_PLUGIN.md §3}. The backend
- * sends a debug {@code message} field too but it's English-only and
- * subject to change without notice — the plugin must never display the
- * raw {@code message} directly, only the localized one from here.
+ * Localized message lookup for {@code error/lobby} envelope codes. The
+ * server sends a debug {@code message} field too but it's English-only
+ * and subject to change without notice — the plugin must never display
+ * the raw {@code message} directly, only the localized one from here.
  *
  * <p>Unknown codes fall back to a generic "Something went wrong" so a
- * backend that introduces a new error code without a plugin release
+ * server that introduces a new error code without a plugin release
  * doesn't surface a raw enum to the user.
- *
- * <p>This is the {@code xc-plugin-localized-errors} cross-cutting item
- * from {@code PLUGIN_PROGRESS.md}.
  */
 public final class LobbyErrorMessages
 {
@@ -25,9 +21,8 @@ public final class LobbyErrorMessages
      *  happened, only that something failed. */
     public static final String UNKNOWN_FALLBACK = "Something went wrong. Try again in a moment.";
 
-    /** Stable code → user-facing string map. Keep in sync with the list
-     *  in {@code BACKEND_HANDOFF_TO_PLUGIN.md §3} every time a new code
-     *  is added server-side. */
+    /** Stable code → user-facing string map. Keep in sync with the
+     *  server-side error enum every time a new code is added. */
     private static final Map<String, String> MESSAGES;
     static
     {

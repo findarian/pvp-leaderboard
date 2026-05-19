@@ -5,20 +5,13 @@ package com.pvp.leaderboard.lobby;
  * {@code lobby/invite_received}; the panel pins one card per active invite
  * at the top of the lobby with Accept / Decline buttons + a TTL countdown.
  *
- * <p>{@link #expiresAtEpochMs} is the server-stamped wall-clock instant the
- * invite expires (10 min from {@code created_at} per
- * {@code LOBBY_INVITE_TTL_SEC=600} in the architecture). The panel computes
- * the visible countdown locally against this absolute deadline so client
- * clock drift doesn't shift the visible expiry.
+ * <p>{@link #expiresAtEpochMs} is the server-stamped wall-clock instant
+ * the invite expires (10 min from {@code created_at}). The panel
+ * computes the visible countdown locally against this absolute deadline
+ * so client clock drift doesn't shift the visible expiry.
  *
- * <p>Mirror of the now-removed panel-local invite-card data; the
- * {@link #build} field carries the sender's pick of which of <i>your</i>
- * advertised builds they want to fight (see {@code MatchmakingLobbyPanel}
- * docs around "Pick a Build" step for context).
- *
- * <p>Created as part of {@code p1-plugin-mock-refactor}. Public final
- * fields match the {@code LobbyMember} idiom (see that class for the
- * rationale).
+ * <p>The {@link #build} field carries the sender's pick of which of
+ * <i>your</i> advertised builds they want to fight.
  */
 public final class IncomingInvite
 {

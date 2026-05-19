@@ -7,19 +7,19 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.function.Consumer;
 
 /**
- * In-memory blocked-player registry.
+ * In-memory blocked-player registry for the Player Lookup tab's
+ * per-row Block button. This is a UI-side block list scoped to the
+ * lookup view; the matchmaking lobby maintains its own server-backed
+ * block set via {@link com.pvp.leaderboard.lobby.LobbyService#block}.
  *
- * <p>Mock-only for the pre-socket era — the eventual {@code LobbyService} will
- * mirror these entries to the server so muted invites are dropped server-side
- * (see {@code p2-plugin-service} in the architecture doc). For now the set
- * lives in process memory only; closing RuneLite drops it.
+ * <p>Names are normalised (lowercase, trimmed, single-spaced) before
+ * storage so display-time casing differences don't lead to duplicate
+ * entries. The set lives in process memory only; closing RuneLite
+ * drops it.
  *
- * <p>Names are normalised (lowercase, trimmed, single-spaced) before storage
- * so display-time casing differences don't lead to duplicate entries.
- *
- * <p>Listeners (via {@link #addListener(Consumer)}) are invoked on whichever
- * thread mutates the set — callers that need EDT delivery should wrap with
- * {@code SwingUtilities.invokeLater} themselves.
+ * <p>Listeners (via {@link #addListener(Consumer)}) are invoked on
+ * whichever thread mutates the set — callers that need EDT delivery
+ * should wrap with {@code SwingUtilities.invokeLater} themselves.
  */
 public final class BlockedPlayersService
 {

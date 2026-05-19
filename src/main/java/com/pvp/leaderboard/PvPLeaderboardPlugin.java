@@ -84,6 +84,9 @@ public class PvPLeaderboardPlugin extends Plugin
 	@Inject
 	private com.pvp.leaderboard.lobby.UserProfileLobbyJoinGate lobbyJoinGate;
 
+	@Inject
+	private com.pvp.leaderboard.lobby.LobbyPreferences lobbyPreferences;
+
 	private DashboardPanel dashboardPanel;
 	private NavigationButton navButton;
 	private int pendingSelfRankLookupTicks = -1;
@@ -142,7 +145,7 @@ public class PvPLeaderboardPlugin extends Plugin
 		// the local player isn't loaded yet.
 		lobbyJoinGate.configure(this::getLocalPlayerName, this::getClientUniqueId);
 		dashboardPanel = new DashboardPanel(this, pvpDataService, cognitoAuthService,
-			webSocketLobbyService, lobbyJoinGate);
+			webSocketLobbyService, lobbyJoinGate, lobbyPreferences);
 
 		navButton = NavigationButton.builder()
 			.tooltip("PvP Leaderboard")

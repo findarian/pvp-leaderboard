@@ -116,7 +116,7 @@ public class LoginPanel extends JPanel
         String username = searchField.getText();
         if (username == null || username.trim().isEmpty() || PLACEHOLDER.equals(username))
         {
-            LinkBrowser.browse(PvPLeaderboardConstants.PUBLIC_SITE_BASE_URL + "/index.html");
+            LinkBrowser.browse(PvPLeaderboardConstants.PUBLIC_SITE_BASE_URL);
             return;
         }
         if (!isValidUsername(username)) return;

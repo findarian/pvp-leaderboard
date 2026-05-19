@@ -10,18 +10,17 @@ import java.util.Set;
  * MUST marshal via {@code SwingUtilities.invokeLater} so listeners can
  * directly mutate Swing components.
  *
- * <p>Mirrors the architecture's server-to-client command set
- * ({@code lobby/roster}, {@code lobby/invite_received}, etc. — see
- * {@code docs/SOCKET_LOBBY_ARCHITECTURE.md} → Phase 2 → "Server-only
- * outbound cmds"). Naming uses {@code onSomething} convention rather than
- * mirroring the wire command names verbatim because some events have no
- * 1-to-1 wire equivalent in this release (e.g.
- * {@link #onFightConfirmedByPeer} maps to {@code lobby/fight_confirmed_by_peer}
- * but is named for what the panel does with it).
+ * <p>Mirrors the server-to-client lobby command set ({@code lobby/roster},
+ * {@code lobby/invite_received}, etc.). Method names follow the
+ * {@code onSomething} convention rather than mirroring the wire command
+ * names verbatim, because some events have no 1-to-1 wire equivalent
+ * (e.g. {@link #onFightConfirmedByPeer} maps to
+ * {@code lobby/fight_confirmed_by_peer} but is named for what the panel
+ * does with it).
  *
- * <p>Created as part of {@code p1-plugin-mock-refactor}. Default no-op
- * methods let implementations override only the events they care about
- * (e.g. unit tests that only assert one callback fires).
+ * <p>All methods are {@code default} no-ops so implementations override
+ * only the events they care about (e.g. unit tests that only assert one
+ * callback fires).
  */
 public interface LobbyEventListener
 {
@@ -63,22 +62,14 @@ public interface LobbyEventListener
     default void onMatchFound(MatchInfo match) {}
 
     /** The 30-s confirm window elapsed without both players confirming.
-     *  Panel returns the user to the lobby with no penalty (matches the
-     *  mock-UI "Find a new match" exit path). */
+     *  Panel returns the user to the lobby with no penalty. */
     default void onFightSessionExpired(String fightSessionId) {}
 
-    /** An operation failed with a stable error code from the architecture's
+    /** An operation failed with a stable error code from the server's
      *  error envelope (e.g. {@code INVITE_EXPIRED}, {@code RANK_OUT_OF_RANGE},
-     *  {@code BLOCKED}). Panel renders human-readable text via the
-     *  {@code xc-plugin-localized-errors} table — never the raw code. */
+     *  {@code BLOCKED}). Panel renders human-readable text via
+     *  {@link LobbyErrorMessages} — never the raw code. */
     default void onError(String code, String message) {}
-
-    // ---------------------------------------------------------------
-    // Cross-device-sync pushes added 2026-05-18 per
-    // BACKEND_HANDOFF_TO_PLUGIN.md §3.3. Only onBlockListSnapshot is
-    // functionally required (drives the gray-out feature); the other
-    // three are cross-device sync hooks the panel can ignore for now.
-    // ---------------------------------------------------------------
 
     /** Server's ACK of a {@code lobby/join} cmd. Useful for surfacing
      *  "joined as observer" feedback or starting a session-scoped clock;
@@ -86,19 +77,20 @@ public interface LobbyEventListener
      *  exists for future telemetry. */
     default void onJoinedEcho() {}
 
-    /** Authoritative snapshot of UUIDs the local user has blocked.
-     *  Pushed once on join + after every block/unblock the server applies.
-     *  Panel uses this to gray out matching rows in the roster. */
-    default void onBlockListSnapshot(Set<String> blockedUuids) {}
+    /** Authoritative snapshot of canonical player IDs (lowercased display
+     *  names) the local user has blocked. Pushed once on join and after
+     *  every block/unblock the server applies. Panel uses this to gray
+     *  out matching rows in the roster. */
+    default void onBlockListSnapshot(Set<String> blockedPlayerIds) {}
 
-    /** Cross-device delta: the local user (on another device or this
-     *  one) just blocked {@code uuid}. Panel adds to its block set and
+    /** Cross-device delta: the local user (on another device or this one)
+     *  just blocked {@code playerId}. Panel adds to its block set and
      *  re-renders the row. Mostly redundant with {@link #onBlockListSnapshot}
      *  since the server also re-pushes the full snapshot, but the delta
      *  arrives first so the UI feels snappier. */
-    default void onBlockAdded(String uuid) {}
+    default void onBlockAdded(String playerId) {}
 
     /** Cross-device delta inverse of {@link #onBlockAdded}. Panel removes
-     *  {@code uuid} from its block set and re-renders the row. */
-    default void onBlockRemoved(String uuid) {}
+     *  {@code playerId} from its block set and re-renders the row. */
+    default void onBlockRemoved(String playerId) {}
 }

@@ -41,7 +41,12 @@ tasks.register('shadowJar', Jar) {
 
 	duplicatesStrategy = DuplicatesStrategy.EXCLUDE
 	from sourceSets.main.output
-	from sourceSets.test.output
+	// Only the side-loader launcher class needs to come from the test
+	// source set (it's the JAR's Main-Class). Test fixtures + unit tests
+	// MUST NOT ship in the production shadow JAR.
+	from(sourceSets.test.output) {
+		include 'com/pvp/leaderboard/PvPLeaderboardPluginTest.class'
+	}
 	from {
 		// Use lenient resolution to skip missing native JARs
 		configurations.testRuntimeClasspath.resolvedConfiguration.lenientConfiguration.files.collect { file ->

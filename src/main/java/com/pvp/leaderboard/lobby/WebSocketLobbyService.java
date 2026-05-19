@@ -22,47 +22,41 @@ import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Production {@link LobbyService} that adapts the wire protocol to the
- * panel's domain types. Lands as {@code p2-plugin-service} per
- * {@code docs/PLUGIN_PROGRESS.md}.
+ * panel's domain types.
  *
  * <p>Two key concerns this class owns:
  * <ol>
- *   <li><b>Wire ↔ domain marshalling</b>: server pushes are "flat" (e.g.
+ *   <li><b>Wire ↔ domain marshalling</b>: server pushes are flat (e.g.
  *   {@code lobby/invite_received} carries
- *   {@code from_player_id + from_name + sender_styles + ...} post-{@code
- *   p2-scrub-uuids-from-lobby}, not a nested {@code sender} object).
- *   This service holds an in-memory roster cache keyed by canonical
- *   {@code player_id} and reconstructs {@link LobbyMember} instances
- *   for the panel's nested {@link IncomingInvite#sender} /
- *   {@link FightSession#opponent} / {@link MatchInfo#opponent} fields.
- *   If a flat payload references a player id not in the cache (rare —
- *   only if the push arrives before the {@code lobby/roster} that
- *   introduced the member), the service falls back to a synthetic
- *   {@link LobbyMember} built from whatever fields the push carried.</li>
+ *   {@code from_player_id + from_name + sender_styles + ...}, not a
+ *   nested {@code sender} object). This service holds an in-memory
+ *   roster cache keyed by canonical {@code player_id} and reconstructs
+ *   {@link LobbyMember} instances for the panel's nested
+ *   {@link IncomingInvite#sender} / {@link FightSession#opponent} /
+ *   {@link MatchInfo#opponent} fields. If a flat payload references a
+ *   player id not in the cache (rare — only if the push arrives before
+ *   the {@code lobby/roster} that introduced the member), the service
+ *   falls back to a synthetic {@link LobbyMember} built from whatever
+ *   fields the push carried.</li>
  *
  *   <li><b>Reconnect re-join</b>: caches the last {@link #joinLobby}
  *   args and re-sends them via {@link WebSocketManager#addConnectListener}
- *   on every socket open so server-side state rebuilds without the panel
- *   knowing about reconnects.</li>
+ *   on every socket open so server-side state rebuilds without the
+ *   panel knowing about reconnects.</li>
  * </ol>
  *
  * <p><b>Threading</b>: server pushes arrive on OkHttp's dispatcher
  * thread via {@link SocketEventBus}; this service marshals every
  * {@link LobbyEventListener} callback through
- * {@link SwingUtilities#invokeLater} per the
- * {@link LobbyService} contract. The injected {@link WebSocketManager}
- * is thread-safe and {@link #send(String, JsonObject)} just hands off
- * to its internal {@code WebSocket.send(String)} which is thread-safe.
+ * {@link SwingUtilities#invokeLater} per the {@link LobbyService}
+ * contract. The injected {@link WebSocketManager} is thread-safe and
+ * {@link #send(String, JsonObject)} just hands off to its internal
+ * {@code WebSocket.send(String)} which is thread-safe.
  *
- * <p><b>Leave-cascade fast-path</b>: server pushes
- * {@code lobby/roster {members: null, stale: true}} after another
- * member's leave invalidates this viewer's filtered roster. Per the
- * handoff doc §3.5 the plugin re-issues {@code lobby/join} so the
- * server rebuilds + repushes. This service does so transparently.
- *
- * <p>Not yet wired: tournament cmds (Phase 4), application-layer
- * keepalive (uses OkHttp native ping/pong — see
- * {@code WebSocketManager}'s 8-min {@code pingInterval}).
+ * <p><b>Leave-cascade fast-path</b>: when another member's leave
+ * invalidates this viewer's filtered roster the server pushes
+ * {@code lobby/roster {members: null, stale: true}}. This service
+ * re-issues {@code lobby/join} so the server rebuilds + repushes.
  */
 @Slf4j
 @Singleton
@@ -72,9 +66,9 @@ public final class WebSocketLobbyService implements LobbyService
     private final SocketEventBus bus;
 
     /**
-     * Roster cache keyed by member UUID. Updated wholesale on every
-     * {@code lobby/roster} (not merged — the server's snapshot is
-     * authoritative). Read on every flat-payload push to enrich
+     * Roster cache keyed by canonical {@code player_id}. Updated wholesale
+     * on every {@code lobby/roster} (not merged — the server's snapshot
+     * is authoritative). Read on every flat-payload push to enrich
      * {@code LobbyMember} fields. {@link ConcurrentHashMap} for the
      * snapshot-on-OkHttp-thread + lookup-on-OkHttp-thread access
      * pattern; lookups never race a snapshot write because both happen
@@ -83,12 +77,10 @@ public final class WebSocketLobbyService implements LobbyService
      */
     private final Map<String, LobbyMember> rosterByPlayerId = new ConcurrentHashMap<>();
 
-    /** Block-list snapshot, mirroring {@code lobby/block_list_snapshot} +
-     *  the {@code lobby/block_added}/{@code lobby/block_removed} deltas.
-     *  Keys are canonical lowercase player ids (matches the new wire
-     *  shape post-{@code p2-scrub-uuids-from-lobby} — raw UUIDs no
-     *  longer appear on the wire). Exposed to the panel via
-     *  {@link LobbyEventListener#onBlockListSnapshot}. */
+    /** Block-list snapshot, mirroring {@code lobby/block_list_snapshot}
+     *  + the {@code lobby/block_added}/{@code lobby/block_removed}
+     *  deltas. Keys are canonical lowercase player ids. Exposed to the
+     *  panel via {@link LobbyEventListener#onBlockListSnapshot}. */
     private final Set<String> blockedPlayerIds = ConcurrentHashMap.newKeySet();
 
     /** Last successful (sent — not necessarily ACKed) join args, replayed
@@ -208,13 +200,12 @@ public final class WebSocketLobbyService implements LobbyService
     @Override
     public void confirmFight()
     {
-        // The panel doesn't track its own fight_session_id — it relied
-        // on the mock fixture's implicit "one fight at a time" model.
-        // The wire requires fight_session_id explicitly. We cache the
-        // most recently proposed session id and use it here. This is
-        // safe because the architecture forbids overlapping confirm
-        // windows for a single user (joining a fight removes you from
-        // the lobby — see LOBBY_SYSTEM.md §3 "FightSession state machine").
+        // The panel works against a "one fight at a time" model — there's
+        // no concept of overlapping confirm windows in the UI — so the
+        // service caches the most recently proposed session id and uses
+        // it here. The server-side state machine enforces the same rule:
+        // joining a fight removes you from the lobby, so overlapping
+        // sessions for one user are impossible.
         String sid = currentFightSessionId;
         if (sid == null)
         {
@@ -356,13 +347,10 @@ public final class WebSocketLobbyService implements LobbyService
         LobbyMember sender = rosterByPlayerId.get(fromPlayerId);
         if (sender == null)
         {
-            // Reconstruct from flat sender_* / from_* fields per
-            // _invite_payload_for_receiver in lobby_handler.py. The
-            // post-UUID-scrub wire carries a display-cased `from_name`
-            // companion to `from_player_id`; we prefer that for the
-            // visible roster row but fall back to `sender_name`
-            // (legacy) and finally the canonical id itself if both
-            // are missing.
+            // Reconstruct a synthetic sender from the flat fields when
+            // the roster cache doesn't have a row yet. Prefer the
+            // display-cased `from_name`; fall back to `sender_name`
+            // and finally to the canonical id itself.
             String displayName = optString(data, "from_name");
             if (displayName.isEmpty()) displayName = optString(data, "sender_name");
             if (displayName.isEmpty()) displayName = fromPlayerId;
@@ -382,15 +370,13 @@ public final class WebSocketLobbyService implements LobbyService
         SwingUtilities.invokeLater(() -> l.onIncomingInvite(invite));
     }
 
-    /** {@code lobby/invite_cancelled} is dual-purpose post-{@code
-     *  p2-scrub-uuids-from-lobby}: the <b>cancel branch</b> carries
-     *  {@code from_player_id} (sender retracted) and the <b>decline
-     *  branch</b> carries {@code declined_by_player_id} (receiver said
-     *  no). Both close the same invite from the panel's perspective,
-     *  so we route on {@code invite_id} alone — the branching
-     *  identifier matters only if a future UI wants to distinguish
-     *  "they cancelled" from "they declined" in the toast. The
-     *  branch hint is silently dropped today. */
+    /** {@code lobby/invite_cancelled} is dual-purpose: the <b>cancel
+     *  branch</b> carries {@code from_player_id} (sender retracted) and
+     *  the <b>decline branch</b> carries {@code declined_by_player_id}
+     *  (receiver said no). Both close the same invite from the panel's
+     *  perspective, so we route on {@code invite_id} alone — the
+     *  branching identifier would only matter if a future UI wants to
+     *  distinguish "they cancelled" from "they declined". */
     private void handleInviteCancelled(JsonObject data)
     {
         String inviteId = optString(data, "invite_id");
@@ -440,9 +426,8 @@ public final class WebSocketLobbyService implements LobbyService
         LobbyMember opponent = resolveOpponent(data);
         if (opponent == null) return;
         // Server has already deleted both LobbyMembers rows + the
-        // session at this point (per BACKEND_HANDOFF_TO_PLUGIN.md
-        // §1) — the lobby state is consumed, clear our local
-        // session-id cache.
+        // session at this point — the lobby state is consumed, clear
+        // our local session-id cache.
         currentFightSessionId = null;
         MatchInfo match = new MatchInfo(sid, opponent, style, build, location, world, meetingPlace);
         LobbyEventListener l = listener;
@@ -490,46 +475,39 @@ public final class WebSocketLobbyService implements LobbyService
 
     /** Reconstructs a {@link LobbyMember} for the opponent of a
      *  fight_proposed / match_found push. The wire carries
-     *  {@code player_a_player_id} and {@code player_b_player_id}
-     *  post-{@code p2-scrub-uuids-from-lobby}; the local user is one
-     *  of them, the opponent is the other. Falls back to a synthetic
-     *  minimal member if the roster cache has no row for the opponent
-     *  (rare reconnect-race case). */
+     *  {@code player_a_player_id} and {@code player_b_player_id}; the
+     *  local user is one of them, the opponent is the other. Falls
+     *  back to a synthetic minimal member if the roster cache has no
+     *  row for the opponent (rare reconnect-race case). */
     private LobbyMember resolveOpponent(JsonObject data)
     {
         String a = optString(data, "player_a_player_id");
         String b = optString(data, "player_b_player_id");
         if (a.isEmpty() || b.isEmpty()) return null;
-        // We don't know "self player_id" here without injecting
-        // ClientIdentityService — but the panel does. Defer to
-        // whichever side IS in the roster cache; the local user's own
-        // row is never in the cache (server filters it out per
-        // get_visible_roster.viewer_player_id skip).
+        // Self is never in the roster cache (server filters the
+        // viewer's own row out of every roster push), so the opponent
+        // is whichever side IS in the cache.
         LobbyMember aRow = rosterByPlayerId.get(a);
         LobbyMember bRow = rosterByPlayerId.get(b);
         if (aRow != null && bRow == null) return aRow;
         if (bRow != null && aRow == null) return bRow;
         if (aRow == null && bRow == null)
         {
-            // Both player ids unknown to us — synthesise a minimal
-            // record for the FIRST one (the panel renders whatever
-            // it gets). This branch is reachable only if
-            // fight_proposed arrives before the lobby/roster that
-            // introduced the opponent — shouldn't happen in steady
-            // state but defends against reordering at the API GW.
+            // Both player ids unknown — synthesise a minimal record
+            // for player_a so the panel can still render the row.
+            // Reachable only if fight_proposed arrives before the
+            // lobby/roster that introduced the opponent.
             log.debug("resolveOpponent: both player ids absent from roster cache (a={}, b={}) — synthesising", a, b);
             return synthesiseMinimalMember(a);
         }
-        // Both present — shouldn't happen (we'd be in our own lobby?).
-        // Pick whichever the wire put as player_a as a stable choice.
+        // Both present (shouldn't happen). Pick player_a as a stable choice.
         return aRow;
     }
 
-    /** Used when a flat-payload push references a player id not in
-     *  the roster cache. Renders a member with only the canonical id
-     *  known (and reused as the display name, since we have no other
-     *  source for the proper-cased form) so the panel can still
-     *  display the row without NPE. */
+    /** Synthesises a minimal {@link LobbyMember} when a flat-payload
+     *  push references a player id not in the roster cache. The
+     *  canonical id is reused as the display name (no proper-cased
+     *  form available) so the panel can still render the row. */
     private LobbyMember synthesiseMinimalMember(String playerId)
     {
         return new LobbyMember(playerId, playerId,
