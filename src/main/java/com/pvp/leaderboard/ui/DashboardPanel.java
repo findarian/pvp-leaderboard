@@ -2,8 +2,9 @@ package com.pvp.leaderboard.ui;
 
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
+import com.pvp.leaderboard.PvPLeaderboardConstants;
 import com.pvp.leaderboard.PvPLeaderboardPlugin;
-import com.pvp.leaderboard.config.PvPLeaderboardConfig;
+import com.pvp.leaderboard.service.BlockedPlayersService;
 import com.pvp.leaderboard.service.CognitoAuthService;
 import com.pvp.leaderboard.service.PvPDataService;
 import com.pvp.leaderboard.service.RankInfo;
@@ -18,8 +19,7 @@ import java.util.concurrent.CompletableFuture;
 
 public class DashboardPanel extends PluginPanel
 {
-    private final PvPLeaderboardConfig config;
-    private final PvPLeaderboardPlugin plugin; 
+    private final PvPLeaderboardPlugin plugin;
     private final PvPDataService pvpDataService;
     private final CognitoAuthService cognitoAuthService;
 
@@ -39,6 +39,32 @@ public class DashboardPanel extends PluginPanel
     private JScrollPane rankTierScrollPane;
     private JPanel statsContainer;
 
+    // Top-level navigation (Segment 1.5): Matchmaking + Player Lookup. Two
+    // tabs only so each label has plenty of horizontal room (no cutoff).
+    private static final String CARD_MATCHMAKING = "matchmaking";
+    private static final String CARD_LOOKUP = "lookup";
+    private JButton tabMatchmakingBtn;
+    private JButton tabLookupBtn;
+    private CardLayout viewCards;
+    private JPanel viewContainer;
+
+    // Matchmaking sub-tabs (Segment 1.5): "Matchmaking Lobby" + greyed
+    // "Tournaments" with the same Coming-soon-flash UX as the old top-level
+    // matchmaking button.
+    private static final String SUBCARD_LOBBY = "lobby";
+    private static final String SUBCARD_TOURNAMENTS = "tournaments";
+    private JButton subTabLobbyBtn;
+    private JButton subTabTournamentsBtn;
+    private CardLayout matchmakingSubCards;
+    private JPanel matchmakingSubCardContainer;
+    /** Held as a field so the dashboard can wire the profile-click → Player
+     *  Lookup tab callback after construction. */
+    private MatchmakingLobbyPanel matchmakingLobbyPanel;
+
+    /** Block / Unblock toggle that lives just above {@link #playerNameLabel}.
+     *  Hidden until a non-self player has been searched. */
+    private JButton blockPlayerBtn;
+
     // State
     private String currentMatchesPlayerId = null;
     private JsonArray allMatches = null;
@@ -48,16 +74,52 @@ public class DashboardPanel extends PluginPanel
     private static final int MATCHES_PAGE_SIZE = 100;
     private static final long STALE_DATA_THRESHOLD_MS = 60L * 60L * 1000L; // 1 hour
     
-    public DashboardPanel(PvPLeaderboardConfig config, PvPLeaderboardPlugin plugin, PvPDataService pvpDataService, CognitoAuthService cognitoAuthService)
+    /** Single {@link com.pvp.leaderboard.lobby.LobbyService} dependency used
+     *  by {@link #createMatchmakingCard}. Injected from
+     *  {@code PvPLeaderboardPlugin.startUp()} so production gets the
+     *  real {@code WebSocketLobbyService} and tests can pass a no-op
+     *  fixture or mock. Never null — the plugin always provides one. */
+    private final com.pvp.leaderboard.lobby.LobbyService lobbyService;
+
+    /** Anti-smurf gate driving {@link MatchmakingLobbyPanel}'s
+     *  per-style lock state. Production uses
+     *  {@code UserProfileLobbyJoinGate} (auto-refresh every hour via
+     *  {@link PvPDataService}); tests typically pass
+     *  {@code NoOpLobbyJoinGate}. Falls back to a no-op gate at
+     *  construction if {@code null} is provided so callers that don't
+     *  know about the gate yet still build cleanly. */
+    private final com.pvp.leaderboard.lobby.LobbyJoinGate joinGate;
+
+    /** Three-arg ctor kept for source-compatibility with any pre-gate
+     *  call sites; substitutes a {@link com.pvp.leaderboard.lobby.NoOpLobbyJoinGate}
+     *  so the panel still builds (server-side {@code SMURF_GUARD v2}
+     *  remains the authoritative check). */
+    public DashboardPanel(PvPLeaderboardPlugin plugin, PvPDataService pvpDataService,
+                          CognitoAuthService cognitoAuthService,
+                          com.pvp.leaderboard.lobby.LobbyService lobbyService)
     {
-        this.config = config;
+        this(plugin, pvpDataService, cognitoAuthService, lobbyService,
+            new com.pvp.leaderboard.lobby.NoOpLobbyJoinGate());
+    }
+
+    public DashboardPanel(PvPLeaderboardPlugin plugin, PvPDataService pvpDataService,
+                          CognitoAuthService cognitoAuthService,
+                          com.pvp.leaderboard.lobby.LobbyService lobbyService,
+                          com.pvp.leaderboard.lobby.LobbyJoinGate joinGate)
+    {
         this.plugin = plugin;
         this.pvpDataService = pvpDataService;
         this.cognitoAuthService = cognitoAuthService;
-        
+        this.joinGate = joinGate != null
+            ? joinGate
+            : new com.pvp.leaderboard.lobby.NoOpLobbyJoinGate();
+        this.lobbyService = lobbyService != null
+            ? lobbyService
+            : new com.pvp.leaderboard.lobby.NoOpLobbyService();
+
         setLayout(new BorderLayout());
         setBorder(BorderFactory.createEmptyBorder(10, 10, 10, 10));
-        
+
         JPanel mainPanel = createMainPanel();
         disableNestedWheelScrolling(mainPanel);
         add(mainPanel, BorderLayout.CENTER);
@@ -67,45 +129,35 @@ public class DashboardPanel extends PluginPanel
     {
         JPanel mainPanel = new JPanel();
         mainPanel.setLayout(new BoxLayout(mainPanel, BoxLayout.Y_AXIS));
-        
-        // 1. Community (kept simple here)
+
+        // Build the rank-tier toggle button up front so the community box can
+        // own it (the listener is wired below, once statsContainer +
+        // rankTierScrollPane exist).
+        rankTierToggle = new JButton("What are the ranks");
+        rankTierToggle.setMaximumSize(new Dimension(Integer.MAX_VALUE, 25));
+        rankTierToggle.setHorizontalAlignment(SwingConstants.CENTER);
+
+        // 1. Community box — always pinned to the very top, never inside a tab.
         JPanel communityBox = createCommunityBox();
         communityBox.setAlignmentX(LEFT_ALIGNMENT);
         mainPanel.add(communityBox);
-        mainPanel.add(Box.createVerticalStrut(12));
-
-        // 2. Matchmaking & Tournaments (coming soon)
-        String matchmakingDefault = "<html><center>Matchmaking & Tournaments</center></html>";
-        String matchmakingClicked = "<html><center>Coming soon, check<br>Discord for updates</center></html>";
-        JButton matchmakingBtn = new JButton(matchmakingDefault);
-        matchmakingBtn.setAlignmentX(LEFT_ALIGNMENT);
-        matchmakingBtn.setMaximumSize(new Dimension(Integer.MAX_VALUE, 40));
-        matchmakingBtn.setEnabled(false);
-        matchmakingBtn.addMouseListener(new java.awt.event.MouseAdapter() {
-            @Override
-            public void mouseClicked(java.awt.event.MouseEvent e) {
-                if (!matchmakingBtn.isEnabled() && matchmakingBtn.getText().equals(matchmakingDefault)) {
-                    matchmakingBtn.setText(matchmakingClicked);
-                    Timer revertTimer = new Timer(15000, ev -> {
-                        matchmakingBtn.setText(matchmakingDefault);
-                    });
-                    revertTimer.setRepeats(false);
-                    revertTimer.start();
-                }
-            }
-        });
-        mainPanel.add(matchmakingBtn);
         mainPanel.add(Box.createVerticalStrut(8));
 
-        rankTierToggle = new JButton("What are the ranks");
-        rankTierToggle.setAlignmentX(LEFT_ALIGNMENT);
-        rankTierToggle.setMaximumSize(new Dimension(Integer.MAX_VALUE, 28));
-        rankTierToggle.setHorizontalAlignment(SwingConstants.CENTER);
-        rankTierToggle.setVisible(true);
-        mainPanel.add(rankTierToggle);
-        mainPanel.add(Box.createVerticalStrut(8));
+        // 2. Two-tab navigation row (Matchmaking / Player Lookup). Tournaments
+        // is now a sub-tab inside Matchmaking, so each top-level button gets
+        // ~half the panel width — no cutoff.
+        JPanel navRow = createTabNavRow();
+        navRow.setAlignmentX(LEFT_ALIGNMENT);
+        mainPanel.add(navRow);
+        mainPanel.add(Box.createVerticalStrut(6));
 
-        // --- Stats view (everything below the toggle) ---
+        // 3. Card-switched view container. Each tab maps to one card; the
+        // greyed Tournaments tab doesn't have a card and never switches.
+        viewCards = new CardLayout();
+        viewContainer = new JPanel(viewCards);
+        viewContainer.setAlignmentX(LEFT_ALIGNMENT);
+
+        // --- Stats view (everything that used to live below the rank-tier toggle) ---
         statsContainer = new JPanel();
         statsContainer.setLayout(new BoxLayout(statsContainer, BoxLayout.Y_AXIS));
         statsContainer.setAlignmentX(LEFT_ALIGNMENT);
@@ -123,7 +175,21 @@ public class DashboardPanel extends PluginPanel
         statsContainer.add(loginBtn);
         statsContainer.add(Box.createVerticalStrut(16));
 
-        // 5. Player name label
+        // 5. Block Player toggle — lives directly above the player name label
+        // so the affordance is obvious ("this is the person you're about to
+        // block"). Hidden by default; loadMatchHistory toggles visibility +
+        // text once a player is selected (and never for self).
+        blockPlayerBtn = new JButton("Block Player");
+        blockPlayerBtn.setAlignmentX(LEFT_ALIGNMENT);
+        blockPlayerBtn.setMaximumSize(new Dimension(Integer.MAX_VALUE, 25));
+        blockPlayerBtn.setHorizontalAlignment(SwingConstants.CENTER);
+        blockPlayerBtn.setVisible(false);
+        blockPlayerBtn.setToolTipText("Block this player from sending you matchmaking invites");
+        blockPlayerBtn.addActionListener(e -> handleBlockPlayerToggle());
+        statsContainer.add(blockPlayerBtn);
+        statsContainer.add(Box.createVerticalStrut(4));
+
+        // 6. Player name label
         playerNameLabel = new JLabel("");
         playerNameLabel.setFont(playerNameLabel.getFont().deriveFont(Font.BOLD, 18f));
         playerNameLabel.setHorizontalAlignment(SwingConstants.CENTER);
@@ -221,17 +287,34 @@ public class DashboardPanel extends PluginPanel
             });
         });
 
-        mainPanel.add(statsContainer);
-
         // --- Rank tier view (hidden by default, swapped in when toggle is clicked) ---
         RankTierPanel rankTierPanel = new RankTierPanel();
         rankTierScrollPane = new JScrollPane(rankTierPanel);
         rankTierScrollPane.setAlignmentX(LEFT_ALIGNMENT);
         rankTierScrollPane.setBorder(BorderFactory.createTitledBorder("Rank Tiers"));
         rankTierScrollPane.setVisible(false);
-        mainPanel.add(rankTierScrollPane);
+
+        // Player Lookup card holds both the stats container and the rank-tier
+        // scroll pane. Only one is visible at a time; the rank-tier toggle (now
+        // living in the community box) flips between them and also forces the
+        // active tab to Player Lookup.
+        JPanel lookupCard = new JPanel();
+        lookupCard.setLayout(new BoxLayout(lookupCard, BoxLayout.Y_AXIS));
+        lookupCard.setAlignmentX(LEFT_ALIGNMENT);
+        lookupCard.add(statsContainer);
+        lookupCard.add(rankTierScrollPane);
+
+        // Matchmaking card hosts its own sub-tab nav + sub-card layout.
+        JPanel matchmakingCard = createMatchmakingCard();
+
+        viewContainer.add(matchmakingCard, CARD_MATCHMAKING);
+        viewContainer.add(lookupCard, CARD_LOOKUP);
+        mainPanel.add(viewContainer);
 
         rankTierToggle.addActionListener(e -> {
+            // Always pull focus into the Player Lookup tab so the toggle is
+            // useful regardless of which tab the user is on.
+            setActiveTab(CARD_LOOKUP);
             boolean showingTiers = rankTierScrollPane.isVisible();
             statsContainer.setVisible(showingTiers);
             rankTierScrollPane.setVisible(!showingTiers);
@@ -239,8 +322,233 @@ public class DashboardPanel extends PluginPanel
             mainPanel.revalidate();
             mainPanel.repaint();
         });
-        
+
+        // Default tab: Matchmaking Lobby (per design — encourages people to
+        // explore the new lobby; stats keep loading in the background so
+        // switching to Player Lookup is instant).
+        setActiveTab(CARD_MATCHMAKING);
+
         return mainPanel;
+    }
+
+    /**
+     * Two-tab nav row (Matchmaking + Player Lookup). Active tab uses a bold
+     * font; inactive uses plain. Tournaments is no longer here — it's a
+     * sub-tab inside Matchmaking now.
+     */
+    private JPanel createTabNavRow()
+    {
+        JPanel nav = new JPanel(new GridLayout(1, 2, 4, 0));
+        nav.setName("top-tab-nav");
+        // Tall enough to fit NAV_FONT_PT (16pt BOLD) without clipping the descenders.
+        nav.setMaximumSize(new Dimension(Integer.MAX_VALUE, 40));
+        nav.setPreferredSize(new Dimension(220, 40));
+
+        tabMatchmakingBtn = makeTabButton("Matchmaking", true);
+        tabMatchmakingBtn.addActionListener(e -> { revertRankTierIfShowing(); setActiveTab(CARD_MATCHMAKING); });
+        nav.add(tabMatchmakingBtn);
+
+        tabLookupBtn = makeTabButton("Player Lookup", false);
+        tabLookupBtn.addActionListener(e -> { revertRankTierIfShowing(); setActiveTab(CARD_LOOKUP); });
+        nav.add(tabLookupBtn);
+
+        return nav;
+    }
+
+    private static JButton makeTabButton(String label, boolean active)
+    {
+        JButton b = new JButton(label);
+        b.setMargin(new Insets(2, 4, 2, 4));
+        // Always BOLD — switching weight per-state changes the text width and
+        // clipped longer labels ("Player Lookup" → "Player Loo...") when active.
+        // Active state is now indicated purely by the bottom underline below.
+        b.setFont(b.getFont().deriveFont(Font.BOLD, NAV_FONT_PT));
+        b.setHorizontalAlignment(SwingConstants.CENTER);
+        b.setFocusPainted(false);
+        applyTabActiveStyle(b, active);
+        return b;
+    }
+
+    /** Stable client-property key tests use to assert active-tab state without
+     *  depending on visual styling internals. Value is a {@link Boolean}. */
+    public static final String TAB_ACTIVE_PROPERTY = "pvp.tab.active";
+
+    /** Active-tab indicator: a 3px bottom underline in {@link #TAB_ACCENT}. The
+     *  inactive state uses the same height border but in the panel background
+     *  colour, so flipping active/inactive doesn't shift the layout by a pixel.
+     *  Critically, font weight + size never change — that was the source of
+     *  the "Player Loo..." clipping bug (BOLD vs PLAIN have different metrics).
+     *  Also stamps {@link #TAB_ACTIVE_PROPERTY} for test introspection. */
+    private static void applyTabActiveStyle(JButton b, boolean active)
+    {
+        if (b == null) return;
+        Color underline = active ? TAB_ACCENT : TAB_UNDERLINE_BG;
+        b.setBorder(BorderFactory.createCompoundBorder(
+            BorderFactory.createMatteBorder(0, 0, 3, 0, underline),
+            BorderFactory.createEmptyBorder(2, 4, 0, 4)));
+        b.putClientProperty(TAB_ACTIVE_PROPERTY, Boolean.valueOf(active));
+    }
+
+    /** Underline colour for the active tab. Matches the gate's "Go to lobby"
+     *  green so the accent reads as one product across the panel. */
+    private static final Color TAB_ACCENT = new Color(0x2e, 0x7d, 0x32);
+    /** Same-height underline colour for inactive tabs — keeps every tab the
+     *  exact same height regardless of selection. */
+    private static final Color TAB_UNDERLINE_BG = new Color(0x40, 0x40, 0x40);
+
+    /** Single font size shared by every navigation button — top tabs
+     *  ([Matchmaking] / [Player Lookup]) and Matchmaking sub-tabs
+     *  ([Lobby] / [Tournaments]) — and by every community-box button
+     *  ([Discord], [Website], [Report Bugs], [What are the ranks]).
+     *  Matches {@code MatchmakingLobbyPanel.GATE_HEADER_PT} so the whole
+     *  sidepanel reads as one consistent typographic block.
+     *
+     *  <p>Was 18pt; trimmed to 16pt because at 18pt "Player Lookup" was
+     *  clipping at the right edge of its half-width tab cell on the
+     *  default 215px sidepanel. 16pt fits comfortably with ~6px slack. */
+    private static final float NAV_FONT_PT = 16f;
+
+    /** Per-row height the community-box buttons are sized to. Tracks
+     *  {@link #NAV_FONT_PT} — at 16pt BOLD the button needs ~34px to
+     *  show without clipping descenders or wasting whitespace. */
+    private static final int COMMUNITY_BTN_H = 34;
+
+    /** Switch the visible top-level card and re-style nav buttons. */
+    /** If the rank-tier explainer is currently showing, fold it back to the
+     *  stats view (same effect as clicking "Back to stats" on the toggle).
+     *  Called from the top-tab action listeners so switching tabs while the
+     *  tier view is up automatically takes the user back to stats — they
+     *  don't have to remember to click the toggle off first. Intentionally
+     *  not called from inside {@link #setActiveTab} because the toggle's own
+     *  listener calls setActiveTab(CARD_LOOKUP) and would double-flip. */
+    private void revertRankTierIfShowing()
+    {
+        if (rankTierScrollPane == null || statsContainer == null || rankTierToggle == null) return;
+        if (!rankTierScrollPane.isVisible()) return;
+        statsContainer.setVisible(true);
+        rankTierScrollPane.setVisible(false);
+        rankTierToggle.setText("What are the ranks");
+    }
+
+    private void setActiveTab(String key)
+    {
+        if (viewCards != null && viewContainer != null) {
+            viewCards.show(viewContainer, key);
+        }
+        applyTabActiveStyle(tabMatchmakingBtn, CARD_MATCHMAKING.equals(key));
+        applyTabActiveStyle(tabLookupBtn, CARD_LOOKUP.equals(key));
+    }
+
+    /**
+     * Matchmaking top-level card. Hosts its own sub-tab row (Matchmaking
+     * Lobby / Tournaments-greyed) plus a sub-card layout swapping between
+     * the lobby panel and an empty tournaments placeholder. The Tournaments
+     * sub-tab is greyed and flashes "Coming soon" on click.
+     */
+    private JPanel createMatchmakingCard()
+    {
+        JPanel card = new JPanel();
+        card.setLayout(new BoxLayout(card, BoxLayout.Y_AXIS));
+        card.setAlignmentX(LEFT_ALIGNMENT);
+
+        // Sub-tab nav row — same 40px height as the top tab nav so the four nav
+        // buttons render at identical heights (they share NAV_FONT_PT).
+        JPanel subNav = new JPanel(new GridLayout(1, 2, 4, 0));
+        subNav.setName("matchmaking-subtab-nav");
+        subNav.setMaximumSize(new Dimension(Integer.MAX_VALUE, 40));
+        subNav.setBorder(BorderFactory.createEmptyBorder(0, 0, 4, 0));
+        // CRITICAL: every direct child of `card` (BoxLayout.Y_AXIS) must share the
+        // same alignmentX. The sub-card container below is LEFT_ALIGNMENT, so subNav
+        // must match — otherwise BoxLayout's off-axis alignment math right-shifts the
+        // wider sibling (the sub-card container) into a half-width gutter on the right
+        // and leaves the rest of the card empty. This is the SAME failure mode that
+        // bit MatchmakingLobbyPanel.buildUi() — see leftAlignedStrut() there.
+        subNav.setAlignmentX(LEFT_ALIGNMENT);
+
+        // Renamed from "Matchmaking Lobby" → "Lobby" so the sub-tab fits next
+        // to "Tournaments" at NAV_FONT_PT (18pt) without clipping in a 220px
+        // sidepanel. The matchmaking context is already established by the
+        // parent top-level "Matchmaking" tab.
+        subTabLobbyBtn = new JButton("Lobby");
+        subTabLobbyBtn.setMargin(new Insets(1, 4, 1, 4));
+        // Always BOLD — same rationale as the top tab buttons (see makeTabButton).
+        subTabLobbyBtn.setFont(subTabLobbyBtn.getFont().deriveFont(Font.BOLD, NAV_FONT_PT));
+        subTabLobbyBtn.setFocusPainted(false);
+        applyTabActiveStyle(subTabLobbyBtn, true);
+        subTabLobbyBtn.addActionListener(e -> setActiveMatchmakingSubTab(SUBCARD_LOBBY));
+        subNav.add(subTabLobbyBtn);
+
+        final String tournamentsDefault = "Tournaments";
+        final String tournamentsClicked = "<html><center>Coming soon,<br>check Discord</center></html>";
+        subTabTournamentsBtn = new JButton(tournamentsDefault);
+        subTabTournamentsBtn.setMargin(new Insets(1, 4, 1, 4));
+        subTabTournamentsBtn.setFont(subTabTournamentsBtn.getFont().deriveFont(Font.BOLD, NAV_FONT_PT));
+        subTabTournamentsBtn.setEnabled(false);
+        subTabTournamentsBtn.setFocusPainted(false);
+        applyTabActiveStyle(subTabTournamentsBtn, false);
+        subTabTournamentsBtn.setToolTipText("Coming soon — check Discord for updates");
+        subTabTournamentsBtn.addMouseListener(new java.awt.event.MouseAdapter() {
+            @Override
+            public void mouseClicked(java.awt.event.MouseEvent e) {
+                if (!subTabTournamentsBtn.isEnabled() && subTabTournamentsBtn.getText().equals(tournamentsDefault)) {
+                    subTabTournamentsBtn.setText(tournamentsClicked);
+                    Timer revertTimer = new Timer(15000, ev -> subTabTournamentsBtn.setText(tournamentsDefault));
+                    revertTimer.setRepeats(false);
+                    revertTimer.start();
+                }
+            }
+        });
+        subNav.add(subTabTournamentsBtn);
+        card.add(subNav);
+
+        // Sub-card container: lobby panel + (currently empty) tournaments placeholder
+        matchmakingSubCards = new CardLayout();
+        matchmakingSubCardContainer = new JPanel(matchmakingSubCards);
+        matchmakingSubCardContainer.setAlignmentX(LEFT_ALIGNMENT);
+
+        // Production wiring is the empty placeholder service until
+        // WebSocketLobbyService (task p2-plugin-service, blocked on the
+        // backend deployment described in docs/BACKEND_HANDOFF_LOBBY.md)
+        // lands. The mock fixture (DevLobbyFixture) is kept in the
+        // codebase for tests but is intentionally NOT wired here so beta
+        // jars don't ship a fake roster to real users.
+        matchmakingLobbyPanel = new MatchmakingLobbyPanel(lobbyService, joinGate);
+        // Lobby profile-row clicks → same code path as right-click "PvP lookup".
+        matchmakingLobbyPanel.setOnOpenProfile(this::openPlayerLookup);
+        // Self-profile preview ("Your profile displayed to others") above
+        // the rank slider — supplies the local OSRS name + client UUID
+        // lazily so the row pre-login renders empty (suppliers return
+        // null) and auto-populates on the next gate refresh after the
+        // user logs in. No-op when running without a plugin handle
+        // (e.g. DevLobbyFixture-driven unit tests).
+        if (plugin != null)
+        {
+            matchmakingLobbyPanel.setSelfIdentity(
+                plugin::getLocalPlayerName,
+                plugin::getClientUniqueId);
+        }
+        matchmakingSubCardContainer.add(matchmakingLobbyPanel, SUBCARD_LOBBY);
+
+        JPanel tournamentsPlaceholder = new JPanel();
+        tournamentsPlaceholder.setLayout(new BorderLayout());
+        JLabel tphint = new JLabel("Tournaments — coming soon", SwingConstants.CENTER);
+        tphint.setFont(tphint.getFont().deriveFont(Font.ITALIC, 11f));
+        tphint.setForeground(new Color(0x999999));
+        tournamentsPlaceholder.add(tphint, BorderLayout.CENTER);
+        matchmakingSubCardContainer.add(tournamentsPlaceholder, SUBCARD_TOURNAMENTS);
+
+        card.add(matchmakingSubCardContainer);
+        return card;
+    }
+
+    private void setActiveMatchmakingSubTab(String key)
+    {
+        if (matchmakingSubCards != null && matchmakingSubCardContainer != null) {
+            matchmakingSubCards.show(matchmakingSubCardContainer, key);
+        }
+        applyTabActiveStyle(subTabLobbyBtn, SUBCARD_LOBBY.equals(key));
+        // Tournaments stays inactive (no underline) — it's greyed and never lights up.
+        applyTabActiveStyle(subTabTournamentsBtn, false);
     }
     
     // --- UI Creation Helpers ---
@@ -249,35 +557,75 @@ public class DashboardPanel extends PluginPanel
     {
         JPanel box = new JPanel();
         box.setLayout(new BoxLayout(box, BoxLayout.Y_AXIS));
-        box.setBorder(BorderFactory.createTitledBorder("Join the community"));
-        box.setMaximumSize(new Dimension(220, 90));
-        box.setPreferredSize(new Dimension(220, 90));
-        JPanel row = new JPanel(new FlowLayout(FlowLayout.LEFT, 2, 0));
-        JButton discordBtn = new JButton("Discord");
-        discordBtn.setPreferredSize(new Dimension(90, 25));
-        discordBtn.setToolTipText("Join our Discord");
+        // TitledBorder font matches NAV_FONT_PT (18pt BOLD) so the "Join the
+        // community" header reads at the same weight as the gate's
+        // "Set up matchmaking" header and the nav buttons below it.
+        javax.swing.border.TitledBorder titled = BorderFactory.createTitledBorder("Join the community");
+        Font titleFont = box.getFont().deriveFont(Font.BOLD, NAV_FONT_PT);
+        titled.setTitleFont(titleFont);
+        box.setBorder(titled);
+        // Sized for: title (~28px) + 3 button rows × COMMUNITY_BTN_H (38) + 3
+        // small inter-row gaps + bottom slack.
+        int boxH = 28 + 3 * COMMUNITY_BTN_H + 12;
+        box.setMaximumSize(new Dimension(220, boxH));
+        box.setPreferredSize(new Dimension(220, boxH));
+
+        // Discord + Website share a row via GridLayout(1,2) so each button
+        // gets exactly half the panel width — at 18pt they no longer fit
+        // side-by-side under FlowLayout's preferred-size sizing.
+        JPanel row = new JPanel(new GridLayout(1, 2, 4, 0));
+        row.setMaximumSize(new Dimension(Integer.MAX_VALUE, COMMUNITY_BTN_H));
+        JButton discordBtn = makeCommunityBtn("Discord", "Join our Discord");
         discordBtn.addActionListener(e -> {
             try { LinkBrowser.browse("https://discord.gg/TmFzcbW3Rp"); } catch (Exception ignore) {}
         });
         row.add(discordBtn);
-        JButton websiteBtn = new JButton("Website");
-        websiteBtn.setPreferredSize(new Dimension(90, 25));
-        websiteBtn.setToolTipText("Open the website");
+        JButton websiteBtn = makeCommunityBtn("Website", "Open the website");
         websiteBtn.addActionListener(e -> {
-            try { LinkBrowser.browse("https://devsecopsautomated.com/index.html"); } catch (Exception ignore) {}
+            try { LinkBrowser.browse(PvPLeaderboardConstants.PUBLIC_SITE_BASE_URL + "/index.html"); } catch (Exception ignore) {}
         });
         row.add(websiteBtn);
         box.add(row);
-        JPanel row2 = new JPanel(new FlowLayout(FlowLayout.LEFT, 2, 0));
-        JButton reportBugsBtn = new JButton("Report Bugs");
-        reportBugsBtn.setPreferredSize(new Dimension(184, 25));
-        reportBugsBtn.setToolTipText("Report bugs on Discord");
+
+        JPanel row2 = new JPanel(new GridLayout(1, 1, 0, 0));
+        row2.setMaximumSize(new Dimension(Integer.MAX_VALUE, COMMUNITY_BTN_H));
+        JButton reportBugsBtn = makeCommunityBtn("Report Bugs", "Report bugs on Discord");
         reportBugsBtn.addActionListener(e -> {
             try { LinkBrowser.browse("https://discord.gg/TmFzcbW3Rp"); } catch (Exception ignore) {}
         });
         row2.add(reportBugsBtn);
         box.add(row2);
+
+        // "What are the ranks" lives here (below Report Bugs) so it's reachable
+        // from any active tab. The action listener is wired in createMainPanel
+        // once statsContainer + rankTierScrollPane exist.
+        JPanel row3 = new JPanel(new GridLayout(1, 1, 0, 0));
+        row3.setMaximumSize(new Dimension(Integer.MAX_VALUE, COMMUNITY_BTN_H));
+        rankTierToggle.setFont(rankTierToggle.getFont().deriveFont(Font.BOLD, NAV_FONT_PT));
+        rankTierToggle.setToolTipText("Show every rank tier from Bronze 3 to 3rd Age");
+        // Override the earlier setMaximumSize(MAX,25) — that 25px ceiling
+        // would cap the button at the nav-bar height instead of letting it
+        // grow to fit 18pt text.
+        rankTierToggle.setMaximumSize(new Dimension(Integer.MAX_VALUE, COMMUNITY_BTN_H));
+        rankTierToggle.setPreferredSize(null);
+        row3.add(rankTierToggle);
+        box.add(row3);
+
         return box;
+    }
+
+    /** Community-box button factory — uniform NAV_FONT_PT BOLD font, no
+     *  per-button preferred size (parent {@link GridLayout} controls width),
+     *  focus painting off to match the nav buttons. */
+    private static JButton makeCommunityBtn(String label, String tooltip)
+    {
+        JButton b = new JButton(label);
+        b.setFont(b.getFont().deriveFont(Font.BOLD, NAV_FONT_PT));
+        b.setMargin(new Insets(2, 6, 2, 6));
+        b.setHorizontalAlignment(SwingConstants.CENTER);
+        b.setFocusPainted(false);
+        b.setToolTipText(tooltip);
+        return b;
     }
     
     
@@ -296,6 +644,9 @@ public class DashboardPanel extends PluginPanel
     private void onLoginStateChanged() {
         boolean loggedIn = cognitoAuthService.isLoggedIn();
         extraStatsPanel.setVisible(loggedIn);
+
+        // Site auth gates extraStatsPanel + match-history reload below.
+
         // If we just logged in, reload current view to potentially show more info (or self if nothing loaded)
         if (loggedIn) {
             String search = loginPanel.getPluginSearchText();
@@ -310,6 +661,68 @@ public class DashboardPanel extends PluginPanel
         } else {
              // Logged out
              if (currentMatchesPlayerId != null) loadMatchHistory(currentMatchesPlayerId);
+        }
+    }
+
+    /**
+     * Toggles the blocked state for the currently-displayed player. Updates
+     * the button label so the user gets immediate confirmation of the new
+     * state. Real socket-side mute will arrive with {@code p2-plugin-service};
+     * for now this only affects the in-memory {@link BlockedPlayersService}
+     * registry (consulted by the lobby roster filter once the real lobby
+     * service ships).
+     */
+    private void handleBlockPlayerToggle()
+    {
+        if (currentMatchesPlayerId == null || currentMatchesPlayerId.isEmpty()) return;
+        boolean nowBlocked = BlockedPlayersService.toggle(currentMatchesPlayerId);
+        refreshBlockButtonState(nowBlocked);
+    }
+
+    /** Updates the Block / Unblock button text + tooltip based on the
+     *  {@code blocked} state. Visibility is managed separately by
+     *  {@link #updateBlockButtonVisibility(String)}. The Block state gets a
+     *  red text + red outline treatment to mark it as a destructive action;
+     *  Unblock reverts to default styling because allowing invites again is
+     *  not destructive. */
+    private void refreshBlockButtonState(boolean blocked)
+    {
+        if (blockPlayerBtn == null) return;
+        if (blocked)
+        {
+            blockPlayerBtn.setText("Unblock Player");
+            blockPlayerBtn.setToolTipText("Allow this player to send you matchmaking invites again");
+            blockPlayerBtn.setForeground(null); // restore L&F default
+            blockPlayerBtn.setBorder(UIManager.getBorder("Button.border"));
+        }
+        else
+        {
+            blockPlayerBtn.setText("Block Player");
+            blockPlayerBtn.setToolTipText("Block this player from sending you matchmaking invites");
+            Color danger = new Color(0xd0, 0x45, 0x45);
+            blockPlayerBtn.setForeground(danger);
+            blockPlayerBtn.setBorder(BorderFactory.createCompoundBorder(
+                BorderFactory.createLineBorder(danger, 1),
+                BorderFactory.createEmptyBorder(2, 6, 2, 6)));
+        }
+    }
+
+    /** Shows the Block / Unblock toggle for non-self lookups, hides it
+     *  otherwise (you can't block yourself). Called from
+     *  {@link #loadMatchHistory(String)}'s UI reset. */
+    private void updateBlockButtonVisibility(String playerId)
+    {
+        if (blockPlayerBtn == null) return;
+        String normalized = normalizePlayerId(playerId);
+        String selfName = plugin != null ? plugin.getLocalPlayerName() : null;
+        String selfNormalized = normalizePlayerId(selfName);
+        boolean isSelf = normalized != null && selfNormalized != null
+            && normalized.equalsIgnoreCase(selfNormalized);
+        boolean show = normalized != null && !normalized.isEmpty() && !isSelf;
+        blockPlayerBtn.setVisible(show);
+        if (show)
+        {
+            refreshBlockButtonState(BlockedPlayersService.isBlocked(normalized));
         }
     }
 
@@ -350,6 +763,35 @@ public class DashboardPanel extends PluginPanel
     }
     
     /**
+     * Public entry point for the right-click "PvP lookup" menu (and any future
+     * caller that wants to surface a specific player). Forces the Player Lookup
+     * tab to the foreground BEFORE kicking off the match-history load so the
+     * user actually sees the data they asked for.
+     *
+     * <p>Kept separate from {@link #loadMatchHistory(String)} on purpose:
+     * loadMatchHistory is also invoked by auto-paths (login, game events,
+     * refresh) where forcibly switching tabs would yank focus away from the
+     * Matchmaking Lobby unexpectedly. Right-click menu = explicit intent =
+     * tab switch is desired; everything else = silent background load.
+     */
+    public void openPlayerLookup(String playerId)
+    {
+        Runnable open = () ->
+        {
+            setActiveTab(CARD_LOOKUP);
+            loadMatchHistory(playerId);
+        };
+        if (SwingUtilities.isEventDispatchThread())
+        {
+            open.run();
+        }
+        else
+        {
+            SwingUtilities.invokeLater(open);
+        }
+    }
+
+    /**
      * Forces a full refresh of match history. Called from explicit user actions (search, refresh button).
      */
     public void loadMatchHistory(String playerId)
@@ -365,6 +807,7 @@ public class DashboardPanel extends PluginPanel
             matchHistoryBtn.setVisible(false);
             advancedToggle.setVisible(false);
             extraStatsPanel.setPlayerName(currentMatchesPlayerId);
+            updateBlockButtonVisibility(currentMatchesPlayerId);
             resetUiForNewSearch();
         };
         if (SwingUtilities.isEventDispatchThread()) {

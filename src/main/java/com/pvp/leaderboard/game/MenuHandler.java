@@ -90,13 +90,17 @@ public class MenuHandler
             // (RuneScape treats space, underscore, hyphen as equivalent, but we preserve original format)
             String playerName = cleaned.replace('\u00A0', ' ').trim().replaceAll("\\s+", " ");
 
-            if (dashboardPanel != null) {
-                dashboardPanel.loadMatchHistory(playerName);
-            }
-
-            // Open plugin side panel
+            // Open plugin side panel first so the panel exists/visible by the time
+            // we ask it to switch tabs. openPlayerLookup() handles its own EDT
+            // marshalling + forces the Player Lookup tab to the foreground (the
+            // 2-tab revamp introduced the Matchmaking Lobby as the default; the
+            // old single-view code didn't need to switch).
             if (clientToolbar != null && navButton != null) {
                 SwingUtilities.invokeLater(() -> clientToolbar.openPanel(navButton));
+            }
+
+            if (dashboardPanel != null) {
+                dashboardPanel.openPlayerLookup(playerName);
             }
         }
         catch (Exception e)

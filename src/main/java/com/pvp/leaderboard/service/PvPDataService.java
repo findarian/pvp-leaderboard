@@ -4,6 +4,7 @@ import com.google.gson.Gson;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonSyntaxException;
+import com.pvp.leaderboard.PvPLeaderboardConstants;
 import com.pvp.leaderboard.cache.MatchesCacheEntry;
 import com.pvp.leaderboard.cache.ShardEntry;
 import com.pvp.leaderboard.cache.UserStatsCache;
@@ -37,7 +38,7 @@ import java.util.concurrent.ConcurrentHashMap;
 public class PvPDataService
 {
 	private static final String API_BASE_URL = "https://l5xya0wf0d.execute-api.us-east-1.amazonaws.com/prod";
-    private static final String SHARD_BASE_URL = "https://devsecopsautomated.com/rank_idx";
+    private static final String SHARD_BASE_URL = PvPLeaderboardConstants.PUBLIC_SITE_BASE_URL + "/rank_idx";
 
 	private final OkHttpClient okHttpClient;
 	private final Gson gson;

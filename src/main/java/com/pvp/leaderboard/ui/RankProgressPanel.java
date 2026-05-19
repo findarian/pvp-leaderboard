@@ -1,38 +1,15 @@
 package com.pvp.leaderboard.ui;
 
+import com.pvp.leaderboard.util.RankUtils;
 import javax.swing.*;
 import javax.swing.plaf.basic.BasicProgressBarUI;
 import java.awt.*;
-import java.util.HashMap;
-import java.util.Map;
 
 public class RankProgressPanel extends JPanel
 {
     private static final int SIDEBAR_SCROLLBAR_RESERVE_PX = 16;
     private static final int PROGRESS_BAR_WIDTH = 200;
     private static final int PROGRESS_BAR_HEIGHT = 16;
-
-    private static final Map<String, Color> RANK_COLORS = new HashMap<>();
-    static
-    {
-        RANK_COLORS.put("Bronze", new Color(0xB8, 0x73, 0x33));
-        RANK_COLORS.put("Iron", new Color(0xC0, 0xC0, 0xC0));
-        RANK_COLORS.put("Steel", new Color(0x9A, 0xA2, 0xA6));
-        RANK_COLORS.put("Black", new Color(0x6A, 0x6A, 0x6A));
-        RANK_COLORS.put("Mithril", new Color(0x3B, 0xA7, 0xD6));
-        RANK_COLORS.put("Adamant", new Color(0x1A, 0x8B, 0x6F));
-        RANK_COLORS.put("Rune", new Color(0x4E, 0x9F, 0xE3));
-        RANK_COLORS.put("Dragon", new Color(0xE5, 0x39, 0x35));
-        RANK_COLORS.put("3rd Age", new Color(0xE5, 0xC1, 0x00));
-    }
-
-    private static Color getRankColor(String rankName)
-    {
-        if (rankName == null) return Color.GRAY;
-        String base = rankName.split(" ")[0];
-        if ("3rd".equals(base)) return RANK_COLORS.getOrDefault("3rd Age", Color.GRAY);
-        return RANK_COLORS.getOrDefault(base, Color.GRAY);
-    }
 
     private final JProgressBar[] progressBars;
     private final JLabel[] bucketNameLabels;
@@ -98,7 +75,7 @@ public class RankProgressPanel extends JPanel
         if (idx >= 0 && idx < progressBars.length)
         {
             SwingUtilities.invokeLater(() -> {
-                Color rankColor = getRankColor(rankLabel);
+                Color rankColor = RankUtils.getRankColor(rankLabel);
                 
                 if (rankLabels[idx] != null)
                 {

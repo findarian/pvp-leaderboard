@@ -64,7 +64,44 @@ INVALID_MESSAGE            UNKNOWN_COMMAND
 
 ---
 
-## 2. ~~Open question — `lobby/join` MMR source~~ — **RESOLVED 2026-05-18**
+## 2a. SMURF_GUARD v2 — match-count gate (plugin-side shipped 2026-05-18, backend side **TODO**)
+
+> **Dedicated handoff doc**: [`BACKEND_HANDOFF_SMURF_GUARD_V2.md`](./BACKEND_HANDOFF_SMURF_GUARD_V2.md) — concrete code diffs, test specs, and the 6-item sign-off checklist for the backend team. The summary below mirrors that doc's TL;DR.
+>
+> **Decision** (user, 2026-05-18): the lobby's anti-smurf gate is no longer MMR-based — it's a **per-style match-count** gate. Players must have **≥ 20 `wins + losses + ties` in a style** to advertise that style. The legacy `current_overall_mmr < LOBBY_MIN_CURRENT_OVERALL_MMR` check is dropped entirely.
+
+### Plugin side (shipped this commit)
+
+The plugin owns a {@link com.pvp.leaderboard.lobby.LobbyJoinGate} that fetches `cumulative_stats.{nh,veng,multi,dmm}.{wins,losses,ties}` from the existing `GET /user` endpoint once on `GameState.LOGGED_IN` and every hour thereafter (manual refresh button also available). Style toggles in the pre-lobby gate render disabled with a tooltip + "NH: 17 more needed" status line below; Go-to-lobby is blocked until every selected style is unlocked. Production impl: `UserProfileLobbyJoinGate`; tests use `NoOpLobbyJoinGate`.
+
+The plugin gate is **UX only** — it gives the user immediate feedback without round-tripping `lobby/join` for every gate-fail. The backend still has the final word.
+
+### Backend side (TODO — required before plugin can claim release-ready)
+
+1. **`validate_join_payload` in `backend/core/lobby.py`** — drop the `current_overall_mmr` parameter + `SMURF_GUARD` branch on it. Replace with a per-style check against a new `connection_match_count_per_bucket: dict[str, int]` kwarg. For each style in the (already-validated) `style_set`:
+   - If `connection_match_count_per_bucket.get(style, 0) < 20`, raise `SmurfGuardError(f"insufficient matches in {style}: ... < 20")`.
+   - Mods (UUIDs in `OSRS-LobbyMods`) bypass the check entirely. Pass an `is_mod: bool` kwarg sourced the same way the existing `lobby/roster` enrichment does.
+
+2. **`websocket_handler.handle_default`** (the `lobby/*` branch) — replace the `connection_mmr_per_bucket` read from `OSRS-Connections` with `connection_match_count_per_bucket`. The `$connect` snapshot step needs to be updated to write the trusted match-count dict in addition to (or in place of) the MMR dict.
+
+3. **`$connect` snapshot writer** (the existing step 9 that reads `OSRS-MMR-table` and writes the trusted MMR dict onto the `OSRS-Connections` row) — also read the same row's `total_wins` + `total_losses` + `total_ties` (or the per-bucket `ratings.<bucket>.{wins,losses,ties}` fields the `/user` endpoint already returns) and write `current_match_count_per_bucket: {nh: int, veng: int, multi: int, dmm: int}` onto the same row.
+
+4. **Regression tests** mirroring the existing `TestLobbyJoinMmrTrustBoundary` class — pin the contract:
+   - `test_below_threshold_per_style_fires_smurf_guard` — user with `{nh: 18, veng: 0, multi: 22, dmm: 22}` joining with `styles=[nh]` → `SMURF_GUARD`.
+   - `test_unlocked_styles_admit` — same user joining with `styles=[multi]` → join succeeds.
+   - `test_mixed_locked_and_unlocked_still_fires_if_any_locked` — `styles=[nh, multi]` → `SMURF_GUARD` because nh is locked.
+   - `test_mod_bypasses_gate` — `is_mod=True` + zero matches everywhere → join succeeds.
+   - `test_missing_connection_dict_fails_closed` — `connection_match_count_per_bucket=None` → `SMURF_GUARD` (matches the existing fail-closed defense-in-depth pattern for the MMR case).
+
+5. **Stable error codes** — `SMURF_GUARD` keeps its name; the underlying meaning changes but the wire-level code is unchanged so the plugin's localized error-message table doesn't need an update.
+
+### Plugin → backend contract until backend ships
+
+Until the backend lands the v2 logic, the existing `current_overall_mmr` SMURF_GUARD still fires server-side. The plugin's local 20-match gate is a strict superset of the MMR check (any user with ≥ 20 matches in a style trivially has non-zero MMR there), so users who pass the local gate will also pass the legacy server check. No release-blocker on the backend transition.
+
+---
+
+## 2b. ~~Open question — `lobby/join` MMR source~~ — **RESOLVED 2026-05-18**
 
 > **Decision**: option 2 (backend reads from `OSRS-Connections` `$connect` snapshot). Shipped as `p2-mmr-trust-fix`. The plugin's `LobbyService.joinLobby(...)` signature stays as-is — **does NOT carry MMR**.
 

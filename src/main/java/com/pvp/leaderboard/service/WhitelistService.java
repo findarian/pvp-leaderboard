@@ -2,6 +2,7 @@ package com.pvp.leaderboard.service;
 
 import com.google.gson.Gson;
 import com.google.gson.JsonObject;
+import com.pvp.leaderboard.PvPLeaderboardConstants;
 import com.pvp.leaderboard.cache.WhitelistPlayerCache;
 import com.pvp.leaderboard.config.PvPLeaderboardConfig;
 import lombok.extern.slf4j.Slf4j;
@@ -45,7 +46,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 @Singleton
 public class WhitelistService
 {
-    private static final String WHITELIST_URL = "https://devsecopsautomated.com/whitelist.json";
+    private static final String WHITELIST_URL = PvPLeaderboardConstants.PUBLIC_SITE_BASE_URL + "/whitelist.json";
     private static final String HEARTBEAT_URL = "https://l5xya0wf0d.execute-api.us-east-1.amazonaws.com/prod/heartbeat";
     private static final String USER_AGENT = "RuneLite/" + RuneLiteProperties.getVersion();
     

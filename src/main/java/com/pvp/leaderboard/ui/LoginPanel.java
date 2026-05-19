@@ -1,5 +1,6 @@
 package com.pvp.leaderboard.ui;
 
+import com.pvp.leaderboard.PvPLeaderboardConstants;
 import com.pvp.leaderboard.service.CognitoAuthService;
 import javax.swing.*;
 import java.awt.*;
@@ -115,7 +116,7 @@ public class LoginPanel extends JPanel
         String username = searchField.getText();
         if (username == null || username.trim().isEmpty() || PLACEHOLDER.equals(username))
         {
-            LinkBrowser.browse("https://devsecopsautomated.com/index.html");
+            LinkBrowser.browse(PvPLeaderboardConstants.PUBLIC_SITE_BASE_URL + "/index.html");
             return;
         }
         if (!isValidUsername(username)) return;
@@ -123,7 +124,7 @@ public class LoginPanel extends JPanel
         {
             String normalizedUsername = normalizeUsername(username);
             String encodedUsername = URLEncoder.encode(normalizedUsername, "UTF-8");
-            String url = "https://devsecopsautomated.com/profile.html?player=" + encodedUsername;
+            String url = PvPLeaderboardConstants.PUBLIC_SITE_BASE_URL + "/profile.html?player=" + encodedUsername;
             LinkBrowser.browse(url);
         }
         catch (Exception ignore) {}

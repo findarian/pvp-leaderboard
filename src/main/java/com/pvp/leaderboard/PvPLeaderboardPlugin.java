@@ -75,6 +75,15 @@ public class PvPLeaderboardPlugin extends Plugin
 	@Inject
 	private WhitelistService whitelistService;
 
+	@Inject
+	private com.pvp.leaderboard.service.socket.WebSocketManager webSocketManager;
+
+	@Inject
+	private com.pvp.leaderboard.lobby.WebSocketLobbyService webSocketLobbyService;
+
+	@Inject
+	private com.pvp.leaderboard.lobby.UserProfileLobbyJoinGate lobbyJoinGate;
+
 	private DashboardPanel dashboardPanel;
 	private NavigationButton navButton;
 	private int pendingSelfRankLookupTicks = -1;
@@ -118,10 +127,22 @@ public class PvPLeaderboardPlugin extends Plugin
 	@Override
 	protected void startUp() throws Exception
 	{
-		dashboardPanel = new DashboardPanel(config, this, pvpDataService, cognitoAuthService);
-
-		// Initialize identity
+		// Identity must be loaded BEFORE the socket service starts so
+		// the reconnect-replay handler has a UUID to send with
+		// lobby/join. The socket itself only opens on LOGGED_IN below
+		// — but webSocketLobbyService.start() subscribes to push
+		// events and the connect-listener now so they're ready when
+		// the first frame arrives.
 		clientIdentityService.loadOrGenerateId();
+		webSocketLobbyService.start();
+		// Wire the anti-smurf gate's identity suppliers BEFORE the
+		// dashboard ctor so the first listener fire (still empty counts)
+		// triggers the panel's "Loading your match count…" state. The
+		// suppliers resolve at refresh time, not now, so it's fine that
+		// the local player isn't loaded yet.
+		lobbyJoinGate.configure(this::getLocalPlayerName, this::getClientUniqueId);
+		dashboardPanel = new DashboardPanel(this, pvpDataService, cognitoAuthService,
+			webSocketLobbyService, lobbyJoinGate);
 
 		navButton = NavigationButton.builder()
 			.tooltip("PvP Leaderboard")
@@ -155,6 +176,15 @@ public class PvPLeaderboardPlugin extends Plugin
 				log.debug("[Plugin] Already logged in on startUp, resuming heartbeat for: {}", self);
 				whitelistService.onLogin(self);
 			}
+			// Resume the socket too — the player is past $connect's
+			// prerequisites (UUID stamped, MMR snapshot taken) so the
+			// server already has its trusted dict for SMURF_GUARD.
+			String uuid = getClientUniqueId();
+			if (uuid != null) webSocketManager.connect(uuid);
+			// Player is logged in already (plugin toggled off/on while
+			// in-game) — kick the gate so the dashboard shows real
+			// counts from the get-go instead of "Not yet refreshed".
+			lobbyJoinGate.onLogin();
 		}
 
 		log.debug("PvP Leaderboard started!");
@@ -171,6 +201,13 @@ public class PvPLeaderboardPlugin extends Plugin
 		}
 		clientToolbar.removeNavigation(navButton);
 		whitelistService.onLogout();
+		// Hard-close the socket and forbid future reconnects — the
+		// plugin is going away. WebSocketManager.shutdown() is
+		// idempotent + safe to call without ever having connected.
+		webSocketManager.shutdown();
+		// Cancel the gate's hourly auto-refresh + clear cached counts
+		// so a re-toggle of the plugin starts fresh.
+		lobbyJoinGate.onLogout();
 		log.debug("PvP Leaderboard stopped!");
 	}
 
@@ -221,6 +258,13 @@ public class PvPLeaderboardPlugin extends Plugin
 				pendingSelfRankLookupTicks = 10;
 				pendingHeartbeatStart = true;
 				log.debug("[Plugin] LOGGED_IN - scheduling delayed init in 10 ticks");
+				// Open the socket immediately — UUID is available on
+				// startUp() via clientIdentityService and the server
+				// resolves the trusted MMR snapshot at $connect time
+				// (no need to wait for the player to be fully loaded
+				// in-game like the heartbeat path does).
+				String uuid = getClientUniqueId();
+				if (uuid != null) webSocketManager.connect(uuid);
 			}
 			else if (gameStateChanged.getGameState() == GameState.LOGIN_SCREEN)
 			{
@@ -229,6 +273,15 @@ public class PvPLeaderboardPlugin extends Plugin
 				// Stop heartbeats
 				whitelistService.onLogout();
 				pendingHeartbeatStart = false;
+				// Close the socket cleanly so the server frees the
+				// OSRS-Connections row + cascades any outstanding
+				// invites/sessions. CLOSE_GOING_AWAY tells the server
+				// "intentional logout, no reconnect".
+				webSocketManager.disconnect();
+				// Stop the hourly auto-refresh + clear cached counts so
+				// the next login (potentially a different character)
+				// doesn't see stale stats.
+				lobbyJoinGate.onLogout();
 			}
 			else if (gameStateChanged.getGameState() == GameState.HOPPING || gameStateChanged.getGameState() == GameState.LOADING)
 			{
@@ -298,6 +351,15 @@ public class PvPLeaderboardPlugin extends Plugin
 								whitelistService.onLogin(self);
 								pendingHeartbeatStart = false;
 							}
+
+							// Kick the anti-smurf gate now that the local
+							// player name resolves. We delay this 10 ticks
+							// instead of firing on LOGGED_IN directly so
+							// the name supplier (client.getLocalPlayer().
+							// getName()) has actually populated — firing
+							// at LOGGED_IN would bail with the empty-name
+							// branch.
+							lobbyJoinGate.onLogin();
 						}
 					}
 				}

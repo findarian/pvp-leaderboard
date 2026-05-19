@@ -29,11 +29,11 @@ public class RankUtils
         RANK_COLORS.put("Iron", new Color(192, 192, 192));
         RANK_COLORS.put("Steel", new Color(154, 162, 166));
         RANK_COLORS.put("Black", Color.GRAY);
-        RANK_COLORS.put("Mithril", new Color(59, 167, 214));
+        RANK_COLORS.put("Mithril", new Color(98, 104, 199));
         RANK_COLORS.put("Adamant", new Color(26, 139, 111));
         RANK_COLORS.put("Rune", new Color(78, 159, 227));
         RANK_COLORS.put("Dragon", new Color(229, 57, 53));
-        RANK_COLORS.put("3rd", new Color(229, 193, 0));
+        RANK_COLORS.put("3rd", Color.WHITE);
     }
 
     public static Color getRankColor(String rankName)
