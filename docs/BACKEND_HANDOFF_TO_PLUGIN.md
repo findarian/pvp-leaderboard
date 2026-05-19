@@ -14,7 +14,7 @@ Once CI for `f5bbe41` finishes applying the Terraform (Lambda zip-source change 
 
 | Wire cmd | `LobbyService` method | Backend validation |
 |---|---|---|
-| `lobby/join` | `joinLobby(region, styles, builds, minRankIdx, maxRankIdx)` | `UNKNOWN_REGION` / `INVALID_STYLE` / `INVALID_BUILD` / `INVALID_DISPLAY_RANK` / `SMURF_GUARD` |
+| `lobby/join` | `joinLobby(region, styles, builds, minRankIdx, maxRankIdx)` | `UNKNOWN_REGION` / `INVALID_STYLE` / `INVALID_BUILD` / `INVALID_DISPLAY_RANK` / `SMURF_GUARD` (per-style match-count, mods bypass) |
 | `lobby/leave` | `leaveLobby()` | (idempotent) |
 | `lobby/invite` | `sendInvite(opponent, style, build, location)` | `PEER_NOT_IN_LOBBY` / `INVALID_STYLE` / `INVALID_BUILD` / `INVALID_LOCATION` / `RANK_OUT_OF_RANGE` / `BLOCKED` / `DUPLICATE_INVITE` |
 | `lobby/cancel_invite` | `cancelInvite(opponent)` | (idempotent) |
@@ -62,69 +62,55 @@ DUPLICATE_INVITE           INVITE_EXPIRED         FIGHT_SESSION_EXPIRED
 INVALID_MESSAGE            UNKNOWN_COMMAND
 ```
 
----
-
-## 2a. SMURF_GUARD v2 — match-count gate (plugin-side shipped 2026-05-18, backend side **TODO**)
-
-> **Dedicated handoff doc**: [`BACKEND_HANDOFF_SMURF_GUARD_V2.md`](./BACKEND_HANDOFF_SMURF_GUARD_V2.md) — concrete code diffs, test specs, and the 6-item sign-off checklist for the backend team. The summary below mirrors that doc's TL;DR.
->
-> **Decision** (user, 2026-05-18): the lobby's anti-smurf gate is no longer MMR-based — it's a **per-style match-count** gate. Players must have **≥ 20 `wins + losses + ties` in a style** to advertise that style. The legacy `current_overall_mmr < LOBBY_MIN_CURRENT_OVERALL_MMR` check is dropped entirely.
-
-### Plugin side (shipped this commit)
-
-The plugin owns a {@link com.pvp.leaderboard.lobby.LobbyJoinGate} that fetches `cumulative_stats.{nh,veng,multi,dmm}.{wins,losses,ties}` from the existing `GET /user` endpoint once on `GameState.LOGGED_IN` and every hour thereafter (manual refresh button also available). Style toggles in the pre-lobby gate render disabled with a tooltip + "NH: 17 more needed" status line below; Go-to-lobby is blocked until every selected style is unlocked. Production impl: `UserProfileLobbyJoinGate`; tests use `NoOpLobbyJoinGate`.
-
-The plugin gate is **UX only** — it gives the user immediate feedback without round-tripping `lobby/join` for every gate-fail. The backend still has the final word.
-
-### Backend side (TODO — required before plugin can claim release-ready)
-
-1. **`validate_join_payload` in `backend/core/lobby.py`** — drop the `current_overall_mmr` parameter + `SMURF_GUARD` branch on it. Replace with a per-style check against a new `connection_match_count_per_bucket: dict[str, int]` kwarg. For each style in the (already-validated) `style_set`:
-   - If `connection_match_count_per_bucket.get(style, 0) < 20`, raise `SmurfGuardError(f"insufficient matches in {style}: ... < 20")`.
-   - Mods (UUIDs in `OSRS-LobbyMods`) bypass the check entirely. Pass an `is_mod: bool` kwarg sourced the same way the existing `lobby/roster` enrichment does.
-
-2. **`websocket_handler.handle_default`** (the `lobby/*` branch) — replace the `connection_mmr_per_bucket` read from `OSRS-Connections` with `connection_match_count_per_bucket`. The `$connect` snapshot step needs to be updated to write the trusted match-count dict in addition to (or in place of) the MMR dict.
-
-3. **`$connect` snapshot writer** (the existing step 9 that reads `OSRS-MMR-table` and writes the trusted MMR dict onto the `OSRS-Connections` row) — also read the same row's `total_wins` + `total_losses` + `total_ties` (or the per-bucket `ratings.<bucket>.{wins,losses,ties}` fields the `/user` endpoint already returns) and write `current_match_count_per_bucket: {nh: int, veng: int, multi: int, dmm: int}` onto the same row.
-
-4. **Regression tests** mirroring the existing `TestLobbyJoinMmrTrustBoundary` class — pin the contract:
-   - `test_below_threshold_per_style_fires_smurf_guard` — user with `{nh: 18, veng: 0, multi: 22, dmm: 22}` joining with `styles=[nh]` → `SMURF_GUARD`.
-   - `test_unlocked_styles_admit` — same user joining with `styles=[multi]` → join succeeds.
-   - `test_mixed_locked_and_unlocked_still_fires_if_any_locked` — `styles=[nh, multi]` → `SMURF_GUARD` because nh is locked.
-   - `test_mod_bypasses_gate` — `is_mod=True` + zero matches everywhere → join succeeds.
-   - `test_missing_connection_dict_fails_closed` — `connection_match_count_per_bucket=None` → `SMURF_GUARD` (matches the existing fail-closed defense-in-depth pattern for the MMR case).
-
-5. **Stable error codes** — `SMURF_GUARD` keeps its name; the underlying meaning changes but the wire-level code is unchanged so the plugin's localized error-message table doesn't need an update.
-
-### Plugin → backend contract until backend ships
-
-Until the backend lands the v2 logic, the existing `current_overall_mmr` SMURF_GUARD still fires server-side. The plugin's local 20-match gate is a strict superset of the MMR check (any user with ≥ 20 matches in a style trivially has non-zero MMR there), so users who pass the local gate will also pass the legacy server check. No release-blocker on the backend transition.
+`SMURF_GUARD` semantics changed at `p2-smurf-guard-v2` (2026-05-18): the wire code is unchanged, but it now means "this advertised style has < 20 finished matches on your account". The plugin's localised message-table entry should be updated to reflect the new meaning (e.g. "Need more matches in {style}" instead of "Rank too low to lobby").
 
 ---
 
-## 2b. ~~Open question — `lobby/join` MMR source~~ — **RESOLVED 2026-05-18**
+## 2. ~~Open question — `lobby/join` MMR source~~ — **RESOLVED 2026-05-18**
 
 > **Decision**: option 2 (backend reads from `OSRS-Connections` `$connect` snapshot). Shipped as `p2-mmr-trust-fix`. The plugin's `LobbyService.joinLobby(...)` signature stays as-is — **does NOT carry MMR**.
 
 ### What's now live on the backend
 
-`websocket_handler.handle_default` extracts `current_mmr_per_bucket` from the same `OSRS-Connections` row it already reads for `connection_uuid` (the row was written at `$connect` step 9 from `OSRS-MMR-table`), and passes it through as the new `connection_mmr_per_bucket` kwarg of `handle_lobby_cmd`. `lobby_handler._handle_join` uses that trusted value as the SOLE input to `validate_join_payload`'s `SMURF_GUARD` check. **Any `current_mmr_per_bucket` in the wire payload is ignored entirely.**
-
-Regression tests pin the contract (`tests/unit/lambda_code/test_lobby_handler.py::TestLobbyJoinMmrTrustBoundary`):
-
-- `test_spoofed_high_wire_mmr_does_not_bypass_smurf_guard` — wire `{overall: 9999}` + trusted `{overall: 800}` → SMURF_GUARD fires.
-- `test_wire_mmr_absent_with_trusted_high_is_admitted` — no wire MMR + trusted `{overall: 1500}` → join succeeds, `put_item` carries the trusted value.
-- `test_member_row_persists_only_trusted_mmr_not_wire_value` — wire `{overall: 9999}` + trusted `{overall: 1200}` → join succeeds, stored row carries `1200`, never `9999`.
-- `test_no_trusted_mmr_at_all_emits_smurf_guard` — defense-in-depth: if the conn_row somehow lacks the MMR field (e.g. DDB outage during `$connect` step 9), join fails closed with SMURF_GUARD, never silently bypasses.
+`websocket_handler.handle_default` extracts `current_mmr_per_bucket` from the same `OSRS-Connections` row it already reads for `connection_uuid` (the row was written at `$connect` step 9 from `OSRS-MMR-table`), and passes it through as the `connection_mmr_per_bucket` kwarg of `handle_lobby_cmd`. **Any `current_mmr_per_bucket` in the wire payload is ignored entirely.** The trusted MMR is still used by `send_invite`'s `RANK_OUT_OF_RANGE` check (and persisted onto `OSRS-LobbyMembers` for that downstream read), but it no longer gates `lobby/join` itself — see §2a.
 
 ### Plugin wire-format implication
 
-Don't include `current_mmr_per_bucket` in the `lobby/join` payload — it's silently ignored. The full `data` keys for `lobby/join` are now exactly:
+Don't include `current_mmr_per_bucket` in the `lobby/join` payload — it's silently ignored. Per-cmd field reference table in §4 below is the authoritative list.
 
-```
-region, styles, builds, min_rank_idx, max_rank_idx, sort_bucket  (optional)
-```
+---
 
-Per-cmd field reference table in §4 below is the authoritative list.
+## 2a. SMURF_GUARD v2 — match-count gate, mods bypass — **SHIPPED 2026-05-18**
+
+> Plugin team's request from [`BACKEND_HANDOFF_SMURF_GUARD_V2.md`](./BACKEND_HANDOFF_SMURF_GUARD_V2.md) — **shipped as `p2-smurf-guard-v2`** in the same delivery as `p2-mmr-trust-fix`.
+
+### Behaviour live on the wire
+
+`lobby/join` now gates per advertised style. Each style in `data.styles` must have ≥ 20 finished matches (`wins + losses + ties`) on the player's `OSRS-MMR-table.ratings.<bucket>` row. Mods bypass.
+
+`SMURF_GUARD` is the same wire-level error code — the underlying meaning shifted from "MMR-based" to "match-count-based, per advertised style". Plugin's `LobbyJoinGate.THRESHOLD = 20` is the single source of truth for the number; ping the backend team if it changes.
+
+### Trusted source
+
+Both `current_match_count_per_bucket` and `is_mod` are written onto the `OSRS-Connections` row at `$connect` step 9:
+
+- `current_match_count_per_bucket`: aggregated from `OSRS-MMR-table.ratings.<bucket>.{wins,losses,ties}` (same get_item that already populated `current_mmr_per_bucket`).
+- `is_mod`: separate `OSRS-LobbyMods.GetItem` lookup; frozen at `$connect` (mid-session promotions take effect on next reconnect).
+
+The trio (`current_mmr_per_bucket` + `current_match_count_per_bucket` + `is_mod`) is threaded through `handle_default` → `handle_lobby_cmd` → `_handle_join` → `validate_join_payload`. The wire-payload counterparts are ignored — a modified plugin cannot spoof past these gates.
+
+### Regression tests
+
+Backend repo:
+
+- `tests/unit/lambda_code/test_lobby_handler.py::TestLobbyJoinMatchCountGate` — 9 cases mirroring the handoff §3 table (boundary, locked-style mix, mod bypass, fail-closed on missing snapshot, mod bypass overrides fail-closed, etc.).
+- `tests/unit/lambda_code/test_lobby_handler.py::TestLobbyJoinMmrRowStorageTrustBoundary` — pins that wire-payload MMR / match-count / is_mod values are all ignored.
+- `tests/unit/lambda_code/test_websocket_handler.py::TestConnectHappyPath` — pins that `$connect` step 9 populates `current_match_count_per_bucket` + `is_mod` on the conn row.
+- `tests/unit/lambda_code/test_websocket_handler.py::TestDefaultLobbyDispatch` — pins that the dispatcher reads both fields from the conn row and threads them into `handle_lobby_cmd`.
+
+### Live count refresh — DEFERRED
+
+Per the handoff §2.4, the optional `match_handler` post-match hook to bump open conn rows' `current_match_count_per_bucket` was **not shipped** in this delivery. A user playing their 21st match still needs to reconnect (game logout/login) before the gate unlocks. Manual `[Refresh count]` against `/user` shows the new total but the server still rejects until the snapshot is refreshed at the next `$connect`. Acceptable per the handoff — track as a follow-up if it becomes an actual UX paper-cut during beta.
 
 ---
 
@@ -149,7 +135,7 @@ Specifically: don't include `from_uuid` in `lobby/invite` payloads. The fields e
 
 | Cmd | Wire `data` keys |
 |---|---|
-| `lobby/join` | `region`, `styles`, `builds`, `min_rank_idx`, `max_rank_idx`, optional `sort_bucket`. **MMR is server-resolved** from the `$connect` snapshot — do not include `current_mmr_per_bucket` (silently ignored per `p2-mmr-trust-fix`). |
+| `lobby/join` | `region`, `styles`, `builds`, `min_rank_idx`, `max_rank_idx`, optional `sort_bucket`. **MMR, match-count, and `is_mod` are server-resolved** from the `$connect` snapshot — do not include `current_mmr_per_bucket`, `current_match_count_per_bucket`, or `is_mod` in the payload (all silently ignored per `p2-mmr-trust-fix` + `p2-smurf-guard-v2`). |
 | `lobby/leave` | (none — empty `{}` is fine) |
 | `lobby/invite` | `to_uuid`, `style`, `build`, `location` |
 | `lobby/cancel_invite` | `to_uuid` |
