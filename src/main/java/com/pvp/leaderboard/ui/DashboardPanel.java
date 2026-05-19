@@ -516,16 +516,21 @@ public class DashboardPanel extends PluginPanel
         // Lobby profile-row clicks → same code path as right-click "PvP lookup".
         matchmakingLobbyPanel.setOnOpenProfile(this::openPlayerLookup);
         // Self-profile preview ("Your profile displayed to others") above
-        // the rank slider — supplies the local OSRS name + client UUID
-        // lazily so the row pre-login renders empty (suppliers return
-        // null) and auto-populates on the next gate refresh after the
-        // user logs in. No-op when running without a plugin handle
-        // (e.g. DevLobbyFixture-driven unit tests).
+        // the rank slider — supplies the local OSRS name lazily so the
+        // row pre-login renders empty (supplier returns null) and
+        // auto-populates on the next gate refresh after the user logs
+        // in. No-op when running without a plugin handle (e.g.
+        // DevLobbyFixture-driven unit tests).
+        //
+        // Pre-{@code p2-scrub-uuids-from-lobby} this also passed
+        // {@code plugin::getClientUniqueId} as a second arg. With raw
+        // UUIDs scrubbed from every wire field and from the
+        // {@link LobbyMember} model, the panel no longer needs it —
+        // the client UUID lives only on the {@code WebSocketManager}
+        // side as the {@code $connect} auth credential.
         if (plugin != null)
         {
-            matchmakingLobbyPanel.setSelfIdentity(
-                plugin::getLocalPlayerName,
-                plugin::getClientUniqueId);
+            matchmakingLobbyPanel.setSelfIdentity(plugin::getLocalPlayerName);
         }
         matchmakingSubCardContainer.add(matchmakingLobbyPanel, SUBCARD_LOBBY);
 

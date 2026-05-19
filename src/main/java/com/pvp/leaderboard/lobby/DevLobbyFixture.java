@@ -3,7 +3,6 @@ package com.pvp.leaderboard.lobby;
 import com.pvp.leaderboard.util.RankUtils;
 
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.Collections;
 import java.util.EnumSet;
 import java.util.HashMap;
@@ -90,7 +89,8 @@ public final class DevLobbyFixture implements LobbyService
     /** Cached deterministic roster — generated once on first {@link #joinLobby}. */
     private List<LobbyMember> roster;
 
-    /** Pending sent invites keyed by opponent UUID. One per opponent. */
+    /** Pending sent invites keyed by opponent {@code player_id}. One per
+     *  opponent. */
     private final Map<String, PendingOutgoing> outgoing = new HashMap<>();
 
     /** Pending received invites keyed by invite id. The fixture owns these
@@ -181,22 +181,22 @@ public final class DevLobbyFixture implements LobbyService
     @Override
     public void sendInvite(LobbyMember opponent, Style style, BuildType build, String location)
     {
-        if (opponent == null || opponent.uuid == null) return;
-        if (outgoing.containsKey(opponent.uuid)) return; // idempotent
+        if (opponent == null || opponent.playerId == null) return;
+        if (outgoing.containsKey(opponent.playerId)) return; // idempotent
         long now = System.currentTimeMillis();
         final OutgoingInvite oi = new OutgoingInvite(
             genId("oi"), opponent, style, build, location,
             now, now + FIGHT_INVITE_TTL_MS);
         MockScheduler.Cancellable handle = scheduler.schedule(
             () -> mockOpponentAccepts(oi), autoAcceptDelayMs);
-        outgoing.put(opponent.uuid, new PendingOutgoing(oi, handle));
+        outgoing.put(opponent.playerId, new PendingOutgoing(oi, handle));
     }
 
     @Override
     public void cancelInvite(LobbyMember opponent)
     {
-        if (opponent == null || opponent.uuid == null) return;
-        PendingOutgoing po = outgoing.remove(opponent.uuid);
+        if (opponent == null || opponent.playerId == null) return;
+        PendingOutgoing po = outgoing.remove(opponent.playerId);
         if (po != null) po.cancellable.cancel();
     }
 
@@ -240,10 +240,10 @@ public final class DevLobbyFixture implements LobbyService
     @Override
     public void block(LobbyMember member)
     {
-        if (member == null || member.uuid == null) return;
+        if (member == null || member.playerId == null) return;
         cancelInvite(member);
         if (session != null
-            && member.uuid.equals(session.session.opponent.uuid))
+            && member.playerId.equals(session.session.opponent.playerId))
         {
             cancelSessionTimers();
             session = null;
@@ -262,7 +262,7 @@ public final class DevLobbyFixture implements LobbyService
      *  local user calls {@link #sendInvite}. */
     private void mockOpponentAccepts(OutgoingInvite oi)
     {
-        PendingOutgoing po = outgoing.remove(oi.opponent.uuid);
+        PendingOutgoing po = outgoing.remove(oi.opponent.playerId);
         if (po == null) return; // was cancelled
         beginSession(oi.opponent, oi.style, oi.build, oi.location);
     }
@@ -464,7 +464,7 @@ public final class DevLobbyFixture implements LobbyService
             assert name.length() <= MAX_NAME_LENGTH;
             Set<Style> styles = rollStyles(r, 0.55, 0.30, 0.15);
             out.add(new LobbyMember(
-                deriveUuid(name), name, styles, rollBuilds(r),
+                derivePlayerId(name), name, styles, rollBuilds(r),
                 Math.min(rankCount - 1, stressRanks[i]),
                 regions[r.nextInt(regions.length)], false));
         }
@@ -477,7 +477,7 @@ public final class DevLobbyFixture implements LobbyService
             assert name.length() <= MAX_NAME_LENGTH;
             Set<Style> styles = rollStyles(r, 0.55, 0.30, 0.15);
             out.add(new LobbyMember(
-                deriveUuid(name), name, styles, rollBuilds(r),
+                derivePlayerId(name), name, styles, rollBuilds(r),
                 Math.min(rankCount - 1, coreRanks[i]),
                 regions[r.nextInt(regions.length)], false));
         }
@@ -489,19 +489,19 @@ public final class DevLobbyFixture implements LobbyService
             int rankIdx = Math.max(0, Math.min(rankCount - 1,
                 3 + r.nextInt(Math.max(1, rankCount - 4))));
             out.add(new LobbyMember(
-                deriveUuid(name), name, styles, rollBuilds(r), rankIdx,
+                derivePlayerId(name), name, styles, rollBuilds(r), rankIdx,
                 regions[r.nextInt(regions.length)], false));
         }
 
         // Hand-picked mod players so [MOD] chip rendering is verifiable on
         // distinct build combos (one Main+Pure, one solo Zerker).
         out.add(new LobbyMember(
-            deriveUuid("StaffMike"), "StaffMike",
+            derivePlayerId("StaffMike"), "StaffMike",
             EnumSet.of(Style.NH, Style.VENG),
             EnumSet.of(BuildType.MAIN, BuildType.PURE),
             22, "NA-E", true));
         out.add(new LobbyMember(
-            deriveUuid("ModBeauty"), "ModBeauty",
+            derivePlayerId("ModBeauty"), "ModBeauty",
             EnumSet.of(Style.NH, Style.MULTI),
             EnumSet.of(BuildType.ZERKER),
             20, "EU", true));
@@ -509,13 +509,19 @@ public final class DevLobbyFixture implements LobbyService
         return Collections.unmodifiableList(out);
     }
 
-    /** Deterministic UUID derived from a player name. Same name → same
-     *  UUID across launches, so a test asserting "this member's UUID" doesn't
-     *  flake on the random seed. Mirrors {@code UUID.nameUUIDFromBytes} so
-     *  format is wire-compatible with a real UUIDv3. */
-    private static String deriveUuid(String name)
+    /** Canonical {@code player_id} derived from a mock player's display
+     *  name — the lowercased form, mirroring the server's
+     *  {@code canon_name()}. Same name → same id across launches, so
+     *  tests asserting "this member's id" don't flake on the random
+     *  seed. Pre-{@code p2-scrub-uuids-from-lobby} this returned a
+     *  {@code UUID.nameUUIDFromBytes(name)} string — that was the
+     *  pre-{@code p2-plugin-acct-sha-cutover} identity for mock
+     *  members. With UUIDs scrubbed from the wire and the
+     *  {@link LobbyMember} model, the canonical lowercase name is the
+     *  correct identifier. */
+    private static String derivePlayerId(String name)
     {
-        return UUID.nameUUIDFromBytes(name.getBytes()).toString();
+        return name == null ? "" : name.toLowerCase();
     }
 
     /** Styles roll: NH is always set, then probabilistic for Veng / Multi /
@@ -563,7 +569,7 @@ public final class DevLobbyFixture implements LobbyService
     List<LobbyMember> currentRoster() { return roster == null ? Collections.emptyList() : roster; }
 
     /** Pending outgoing invite + cancellable timer handle. Held in a map
-     *  keyed by opponent UUID so cancel-by-opponent is O(1). */
+     *  keyed by opponent {@code player_id} so cancel-by-opponent is O(1). */
     static final class PendingOutgoing
     {
         final OutgoingInvite invite;

@@ -42,10 +42,19 @@ import java.util.regex.Pattern;
  * <p><b>Reconnect policy</b>: exponential backoff
  * {@code 1s → 2s → 4s → 8s → 16s → 32s → 60s} (cap), reset to 1 s on
  * successful open. Triggered by abnormal close codes (anything other
- * than 1000 / 1001) AND by network-level {@code onFailure}. <b>NOT</b>
- * triggered by HTTP 401 (server stealth-refuse — repeated retries
- * would compound the WAF ban). When the manager sees a 401 it logs +
- * gives up until the next explicit {@link #connect(String)} call.
+ * than 1000 / 1001) AND by network-level {@code onFailure}.
+ *
+ * <p>HTTP 401 (server stealth-refuse — missing UUID, banned IP,
+ * WAF block) drops into a fixed <b>1-minute slow-retry</b> instead
+ * of the fast 1s/2s/4s ladder. Bounded enough that a server-side
+ * unban or WAF policy change is picked up within a minute without
+ * requiring a RuneLite restart; spaced enough that the per-IP hit
+ * rate stays well under any auto-ban trigger. The panel surfaces a
+ * "Attempting to reconnect" banner with the countdown so the user
+ * sees the retry is in flight (see {@link
+ * #getNextReconnectAttemptEpochMs()}). Earlier "hard stop on 401"
+ * stranded users whose unban landed mid-session; the prior 5/15/30
+ * min ladder was too slow for a beta where unbans happen interactively.
  *
  * <p><b>Keepalive</b>: RFC 6455 native ping every 8 min
  * ({@link OkHttpClient.Builder#pingInterval}). API Gateway's idle
@@ -89,6 +98,14 @@ public final class WebSocketManager
     private static final long BACKOFF_INITIAL_MS = 1_000L;
     private static final long BACKOFF_MAX_MS = 60_000L;
 
+    /** Fixed 1-minute retry interval used after an HTTP 401
+     *  stealth-refuse. Separate from {@link #BACKOFF_INITIAL_MS} /
+     *  {@link #BACKOFF_MAX_MS} so a normal-close reconnect doesn't
+     *  promote into the slow lane and a 401 doesn't drop into the
+     *  1-second cadence. See class javadoc on the reconnect policy
+     *  for the rationale. */
+    private static final long AUTH_REFUSED_RETRY_MS = 60_000L;
+
     private final OkHttpClient sharedHttpClient;
     private final SocketEventBus eventBus;
     private final ScheduledExecutorService scheduler;
@@ -110,6 +127,16 @@ public final class WebSocketManager
     private String activeUuid;
     private long currentBackoffMs = BACKOFF_INITIAL_MS;
     private ScheduledFuture<?> pendingReconnect;
+    /** Epoch ms when {@link #pendingReconnect} is scheduled to fire,
+     *  or {@code 0} when no retry is queued. Exposed via
+     *  {@link #getNextReconnectAttemptEpochMs()} so the lobby panel
+     *  can render a countdown banner. Set on every
+     *  {@link #scheduleReconnect()} / {@link #scheduleAuthRefusedRetry()}
+     *  and cleared on {@link #reconnectTick()} entry / a successful
+     *  {@link Listener#onOpen}. {@code volatile} since the panel's
+     *  Swing-EDT ticker reads it from a different thread than the
+     *  scheduler thread that writes it. */
+    private volatile long nextReconnectEpochMs = 0L;
 
     /** Set to {@code true} when the manager has been asked to disconnect
      *  cleanly (logout / plugin shutdown). The listener's {@code onClosed}
@@ -241,6 +268,22 @@ public final class WebSocketManager
         return activeSocket != null;
     }
 
+    /** Epoch ms at which the next reconnect attempt is scheduled to
+     *  fire, or {@code 0} when no retry is pending (either because
+     *  the socket is connected, or because no UUID has been set yet).
+     *
+     *  <p>Read on the Swing EDT by the lobby panel's 1Hz banner
+     *  ticker; written on the scheduler/OkHttp threads. The field is
+     *  {@code volatile} so the read sees the latest write without
+     *  taking the manager's monitor (the ticker fires every second —
+     *  contending on the monitor would serialize it behind in-flight
+     *  sends). Stale-by-up-to-one-second is fine for a countdown
+     *  display. */
+    public long getNextReconnectAttemptEpochMs()
+    {
+        return nextReconnectEpochMs;
+    }
+
     /**
      * Registers {@code l} to be called every time the socket completes
      * an {@code $connect} handshake ({@code onOpen}). Invoked on
@@ -294,6 +337,7 @@ public final class WebSocketManager
             pendingReconnect.cancel(false);
             pendingReconnect = null;
         }
+        nextReconnectEpochMs = 0L;
     }
 
     /** Schedules a reconnect with the current backoff and doubles it
@@ -306,12 +350,30 @@ public final class WebSocketManager
         long delay = currentBackoffMs;
         currentBackoffMs = Math.min(currentBackoffMs * 2, BACKOFF_MAX_MS);
         log.debug("WebSocketManager: reconnect scheduled in {} ms", delay);
+        nextReconnectEpochMs = System.currentTimeMillis() + delay;
+        pendingReconnect = scheduler.schedule(this::reconnectTick, delay, TimeUnit.MILLISECONDS);
+    }
+
+    /** Slow-retry counterpart to {@link #scheduleReconnect()} for the
+     *  HTTP 401 stealth-refuse path. Fixed 1-minute cadence so a
+     *  server-side ban being lifted is picked up within a minute
+     *  without compounding the WAF auto-ban. The panel surfaces a
+     *  reconnect banner with a countdown driven by
+     *  {@link #getNextReconnectAttemptEpochMs()}. */
+    private synchronized void scheduleAuthRefusedRetry()
+    {
+        if (shutdownCalled.get() || intentionalDisconnect || activeUuid == null) return;
+        if (pendingReconnect != null && !pendingReconnect.isDone()) return;
+        long delay = AUTH_REFUSED_RETRY_MS;
+        log.debug("WebSocketManager: 401 slow-retry scheduled in {} ms", delay);
+        nextReconnectEpochMs = System.currentTimeMillis() + delay;
         pendingReconnect = scheduler.schedule(this::reconnectTick, delay, TimeUnit.MILLISECONDS);
     }
 
     private synchronized void reconnectTick()
     {
         pendingReconnect = null;
+        nextReconnectEpochMs = 0L;
         if (shutdownCalled.get() || intentionalDisconnect || activeUuid == null) return;
         if (activeSocket != null) return;
         openSocketLocked();
@@ -325,7 +387,12 @@ public final class WebSocketManager
         {
             synchronized (WebSocketManager.this)
             {
+                // Reset the fast-cadence backoff on a successful open
+                // so the next normal-close blip starts at 1 s again.
+                // The 401 retry cadence is fixed (1 min) so there's
+                // nothing to reset there.
                 currentBackoffMs = BACKOFF_INITIAL_MS;
+                nextReconnectEpochMs = 0L;
             }
             log.debug("WebSocketManager: open");
             for (Runnable l : connectListeners)
@@ -387,19 +454,55 @@ public final class WebSocketManager
         public void onFailure(WebSocket webSocket, Throwable t, Response response)
         {
             int status = response == null ? -1 : response.code();
-            boolean shouldReconnect;
+            boolean intentional;
             synchronized (WebSocketManager.this)
             {
                 activeSocket = null;
-                // 401 = server stealth-refuse on $connect (missing UUID,
-                // banned IP, etc.). Retrying compounds the WAF ban.
-                // Wait for an explicit connect(uuid) call instead.
-                shouldReconnect = !intentionalDisconnect && status != 401;
+                intentional = intentionalDisconnect;
             }
-            log.debug("WebSocketManager: failure status={} cause={} reconnect={}",
-                status, t == null ? "null" : t.getClass().getSimpleName(), shouldReconnect);
+            log.debug("WebSocketManager: failure status={} cause={} intentional={}",
+                status, t == null ? "null" : t.getClass().getSimpleName(), intentional);
             if (response != null) response.close();
-            if (shouldReconnect) scheduleReconnect();
+            if (intentional) return;
+            // 401 = server stealth-refuse on $connect. Three known
+            // soft-refuse reason codes today (visible in CloudWatch
+            // via the WAF response body's X-Refuse-Reason header,
+            // and as `_SOFT_REFUSE_REASON_CODES` on the backend per
+            // HANDOFF_TO_PLUGIN_SCRUB_UUIDS_FROM_LOBBY.md §2):
+            //
+            //   - missing_user_agent / invalid_user_agent —
+            //     plugin bug or out-of-spec client.
+            //   - no_player_id (added 2026-05-19) — brand-new
+            //     player who has never submitted a match, so the
+            //     server's MMR-row-derived player_id resolves
+            //     empty. Self-heals as soon as the user submits
+            //     one match (which creates the MMR row).
+            //
+            // All three soft-refuse codes are handled identically
+            // here: drop into the fixed 1-minute slow-retry so a
+            // server-side unban, WAF policy change, OR a brand-new
+            // player's first match submission recovers automatically
+            // without forcing the user to restart RuneLite. The
+            // panel renders a visible countdown banner from
+            // getNextReconnectAttemptEpochMs() so the user sees the
+            // retry is in flight. Earlier "hard stop on 401" build
+            // stranded users whose unban landed mid-session; see
+            // class javadoc on the reconnect policy.
+            //
+            // We don't read X-Refuse-Reason on the plugin side
+            // today — the same 1-min retry recovers from all three
+            // codes, and surfacing the distinction in the UI would
+            // require differentiating "you're banned" from "your
+            // first match is still pending" which we punt on until
+            // telemetry says it's worth the UX.
+            if (status == 401)
+            {
+                scheduleAuthRefusedRetry();
+            }
+            else
+            {
+                scheduleReconnect();
+            }
         }
     }
 }

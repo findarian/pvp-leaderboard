@@ -56,9 +56,14 @@ import java.util.function.Supplier;
  * keeps locally — {@link #outgoingInvitesByOpponent} mirrors what the
  * user has sent so the per-row {@code [Invited M:SS]} chip + countdown can
  * render without round-tripping the service for every paint. Keyed by
- * display name in mock mode (deterministic uniqueness via the seeded
- * roster); the production {@code WebSocketLobbyService} will switch the
- * key to opponent UUID when {@code p2-plugin-service} lands.
+ * the opponent's canonical {@code player_id} (the lowercased display
+ * name produced server-side by {@code canon_name()}). Post-{@code
+ * p2-scrub-uuids-from-lobby} (2026-05-19) {@code player_id} is the only
+ * stable correlation identifier the wire carries — raw player UUIDs
+ * are scrubbed from every push and cmd. The display-cased {@code name}
+ * is also pushed alongside {@code player_id} on every roster row +
+ * invite-received push so the panel can render the proper-cased label
+ * without losing the canonical lookup key.
  */
 public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
 {
@@ -206,18 +211,33 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
     /** Outgoing invites we've sent that are still in INVITED state (waiting
      *  for opponent to accept). Drives the row [Invited M:SS] chip; entries
      *  are removed on opponent-accept (transition to mutual-confirm), TTL
-     *  expiry, or user-cancel. Keyed by opponent name. */
+     *  expiry, or user-cancel.
+     *
+     *  <p><b>Keyed by opponent {@code player_id}</b> (canonical lowercase
+     *  name) — the only stable per-peer wire identifier the post-{@code
+     *  p2-scrub-uuids-from-lobby} protocol exposes. Server guarantees
+     *  {@code player_id} is non-empty on every roster + invite-received
+     *  push (derived from the player's MMR row's sorted-first
+     *  {@code player_names} entry, refused at {@code $connect} with
+     *  soft-refuse code {@code no_player_id} if absent). Display-cased
+     *  {@code name} is pushed alongside but isn't unique enough to key
+     *  by — two peers can render identically-cased names in edge cases.
+     *  Pre-2026-05-18: was keyed by name; 2026-05-18 — 2026-05-19: was
+     *  keyed by raw UUID (scrubbed from the wire on 2026-05-19). */
     private final Map<String, OutgoingInvite> outgoingInvitesByOpponent = new HashMap<>();
 
-    /** UUIDs the local user has blocked. Driven by
+    /** Canonical {@code player_id}s the local user has blocked. Driven by
      *  {@link #onBlockListSnapshot} / {@link #onBlockAdded} /
      *  {@link #onBlockRemoved} per {@code BACKEND_HANDOFF_TO_PLUGIN.md
      *  §3.3}. Server does NOT filter blocked rows out of the roster
      *  (that would leak presence — block-toggle would let the user
      *  probe who is online) so the panel grays them client-side.
      *  Clicking a greyed row routes to Player Lookup so the user can
-     *  Unblock from there. */
-    private final Set<String> blockedUuids = new HashSet<>();
+     *  Unblock from there. Set membership is by canonical lowercase
+     *  player_id — matches the new wire shape of
+     *  {@code lobby/block_list_snapshot} (carries
+     *  {@code blocked_player_ids}, not {@code blocked_uuids}). */
+    private final Set<String> blockedPlayerIds = new HashSet<>();
 
     /** Active fight session occupying the FIGHT card. One at a time — set
      *  on opponent-accept (sender side) or on receiver Accept Fight click;
@@ -345,13 +365,11 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
      *  name. Wired by {@code DashboardPanel} via
      *  {@link #setSelfIdentity}; {@code null} until then (the panel
      *  hides the self-profile preview entirely when no supplier or
-     *  no name). */
+     *  no name). Post-{@code p2-scrub-uuids-from-lobby} this is the
+     *  ONLY identity supplier the panel needs — the raw client UUID
+     *  is kept on the {@code WebSocketManager} side as the {@code
+     *  $connect} auth credential and never leaks into UI state. */
     private Supplier<String> selfNameSupplier;
-
-    /** Companion to {@link #selfNameSupplier} — the local client UUID.
-     *  Used as the self {@link LobbyMember#uuid} so the preview row
-     *  uses the same identity as the server-side member echo. */
-    private Supplier<String> selfUuidSupplier;
 
     /** Container + row references for the self-profile preview shown
      *  above the rank slider. {@link #selfPreviewContainer} hosts the
@@ -395,6 +413,20 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
      *  banner's [×] button anytime. */
     private static final int ERROR_BANNER_DISMISS_MS = 6_000;
 
+    /** Reconnect-status banner pinned above the error banner. Shown
+     *  whenever {@link LobbyService#isConnected()} returns
+     *  {@code false} and {@link LobbyService#getNextReconnectAttemptEpochMs()}
+     *  returns a non-zero scheduled retry. Displays the localized
+     *  reconnect copy + a live countdown of seconds remaining until
+     *  the next attempt. Driven by {@link #reconnectBannerTicker} at
+     *  1 Hz; we deliberately use polling instead of a callback from
+     *  {@link com.pvp.leaderboard.service.socket.WebSocketManager}
+     *  because the countdown needs a 1Hz redraw anyway — a callback
+     *  would only add complexity. */
+    private JPanel reconnectBanner;
+    private JLabel reconnectBannerLabel;
+    private Timer reconnectBannerTicker;
+
     public MatchmakingLobbyPanel(LobbyService service)
     {
         this(service, new NoOpLobbyJoinGate());
@@ -422,7 +454,22 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
 
         errorBanner = buildErrorBanner();
         errorBanner.setVisible(false);
-        add(errorBanner, BorderLayout.NORTH);
+        reconnectBanner = buildReconnectBanner();
+        reconnectBanner.setVisible(false);
+        // Stack the two banners (reconnect on top, error below) in a
+        // single NORTH slot. BorderLayout allows only one component
+        // per region, so the vertical box is the cheapest way to keep
+        // both pinned without rebuilding the outer layout. Reconnect
+        // sits above the error banner because it represents a more
+        // urgent, ongoing condition — a transient validation error
+        // shouldn't visually hide the persistent "we're disconnected"
+        // state.
+        JPanel northStack = new JPanel();
+        northStack.setLayout(new BoxLayout(northStack, BoxLayout.Y_AXIS));
+        northStack.setOpaque(false);
+        northStack.add(reconnectBanner);
+        northStack.add(errorBanner);
+        add(northStack, BorderLayout.NORTH);
 
         rootCards = new CardLayout();
         rootCardHost = new JPanel(rootCards);
@@ -440,6 +487,10 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         rosterRefreshTicker = new Timer((int) ROSTER_REFRESH_INTERVAL_MS, e -> applyPendingRosterUpdate());
         rosterRefreshTicker.setRepeats(true);
         rosterRefreshTicker.start();
+
+        reconnectBannerTicker = new Timer(1000, e -> refreshReconnectBanner());
+        reconnectBannerTicker.setRepeats(true);
+        reconnectBannerTicker.start();
 
         // Register for server (or fixture) pushes. The roster + initial
         // incoming-invite cards arrive via these callbacks when the user
@@ -1216,20 +1267,25 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         this.onOpenProfile = cb;
     }
 
-    /** Wire the local OSRS identity suppliers so the panel can render
-     *  the "Your profile displayed to others" preview row above the
-     *  rank slider. Both suppliers are read at every {@link
-     *  #renderSelfPreview} call (i.e. lazily) so they pick up
-     *  game-state transitions without needing a re-wire.
+    /** Wire the local OSRS name supplier so the panel can render the
+     *  "Your profile displayed to others" preview row above the rank
+     *  slider. Read at every {@link #renderSelfPreview} call (i.e.
+     *  lazily) so it picks up game-state transitions without needing
+     *  a re-wire.
      *
      *  <p>Wired from {@code DashboardPanel} just like
      *  {@link #setOnOpenProfile}; not part of the constructor so
      *  existing test call sites (and the source-compat 1-arg ctor)
-     *  don't need updating. */
-    public void setSelfIdentity(Supplier<String> nameSup, Supplier<String> uuidSup)
+     *  don't need updating.
+     *
+     *  <p>Pre-{@code p2-scrub-uuids-from-lobby} this also took a
+     *  client-UUID supplier; that argument was removed when the
+     *  self-preview {@link LobbyMember} was migrated off raw UUIDs
+     *  (the panel synthesises its own canonical {@code player_id}
+     *  from the lowercased name — see {@link #renderSelfPreview}). */
+    public void setSelfIdentity(Supplier<String> nameSup)
     {
         this.selfNameSupplier = nameSup;
-        this.selfUuidSupplier = uuidSup;
         renderSelfPreview();
     }
 
@@ -1269,7 +1325,16 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         caption.setBorder(BorderFactory.createEmptyBorder(2, 2, 4, 2));
         selfPreviewContainer.add(caption);
 
-        String uuid = selfUuidSupplier != null ? selfUuidSupplier.get() : null;
+        // Self-preview LobbyMember.playerId is set to the lowercased
+        // display name purely as a stable in-process identifier — this
+        // synthetic member never crosses the wire (the server filters
+        // the viewer's own row out of every roster push), so the
+        // value only has to be non-null + non-empty for the renderer.
+        // Pre-2026-05-19 this used the raw {@code $connect} UUID via
+        // {@code selfUuidSupplier}; with raw UUIDs scrubbed from the
+        // wire and from {@link LobbyMember}, the canonical lowercase
+        // name is the right local stand-in.
+        String selfPlayerId = name != null && !name.isEmpty() ? name.toLowerCase() : "self";
         // Pick the displayed rank by Style priority NH > Veng > Multi
         // > DMM among the user's currently-selected styles (Style
         // enum declaration order matches the priority). Falls back
@@ -1281,7 +1346,7 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         // than mis-rendering as Bronze 3.
         int peakIdx = pickSelfPreviewRankIdx();
         LobbyMember self = new LobbyMember(
-            uuid != null ? uuid : "self",
+            selfPlayerId,
             name,
             selectedStyles,
             selectedBuildTypes,
@@ -1371,12 +1436,34 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         return incomingInviteNames.contains(p.name) && rankInRange(p);
     }
 
+    /** User-facing display name for a roster row / invite card.
+     *  Prefers the display-cased {@link LobbyMember#name} (the
+     *  server pushes it alongside {@link LobbyMember#playerId} on
+     *  every roster + invite-received push post-{@code
+     *  p2-scrub-uuids-from-lobby}). Falls back to the canonical
+     *  {@code player_id} (the lowercased form) if the display name
+     *  field is empty — that's still a real player-visible
+     *  identifier, never a UUID. Returns {@code "Unknown"} only when
+     *  both are empty (shouldn't happen with the new backend, but
+     *  the synthetic fallback in {@code synthesiseMinimalMember}
+     *  could in theory hand us empty strings during a reconnect
+     *  race). */
+    private static String displayNameOf(LobbyMember m)
+    {
+        if (m == null) return "";
+        String n = m.name;
+        if (n != null && !n.isEmpty()) return n;
+        String pid = m.playerId;
+        if (pid != null && !pid.isEmpty()) return pid;
+        return "Unknown";
+    }
+
     /** Returns the active outgoing invite to {@code p} if one is pending
      *  acceptance (drives the [Invited M:SS] row chip). Null otherwise. */
     private OutgoingInvite getOutgoingInvite(LobbyMember p)
     {
-        if (p == null || p.name == null) return null;
-        return outgoingInvitesByOpponent.get(p.name);
+        if (p == null || p.playerId == null || p.playerId.isEmpty()) return null;
+        return outgoingInvitesByOpponent.get(p.playerId);
     }
 
     private void routeOpenProfile(String name)
@@ -1393,8 +1480,8 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
      *  full-screen Pick Style step. */
     private void onFightClicked(LobbyMember opponent)
     {
-        if (opponent == null) return;
-        if (outgoingInvitesByOpponent.containsKey(opponent.name)) return; // already invited; chip should have been [Invited]
+        if (opponent == null || opponent.playerId == null) return;
+        if (outgoingInvitesByOpponent.containsKey(opponent.playerId)) return; // already invited; chip should have been [Invited]
         scrollRosterToTop();
         showFightSetup(buildPickStyleView(opponent));
     }
@@ -1437,7 +1524,7 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
             // Per spec: any FIGHT-view exit clears the 10-min block on that opponent
             // (only the natural 10-min TTL holds the block). Cancel any matching
             // outgoing invite that may still be in INVITED state too.
-            cancelOutgoingInvite(currentFightSession.opponent.name, false);
+            cancelOutgoingInvite(currentFightSession.opponent.playerId, false);
             currentFightSession = null;
         }
         rootCards.show(rootCardHost, CARD_LOBBY);
@@ -1563,10 +1650,11 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
     private void submitOutgoingInvite(LobbyMember opponent, Style style, BuildType build, String location)
     {
         if (opponent == null || style == null || build == null) return;
+        if (opponent.playerId == null || opponent.playerId.isEmpty()) return;
         // Defensive: don't double-invite. The service is also idempotent
         // per the LobbyService contract, but skipping the call here avoids
         // a redundant socket round-trip.
-        if (outgoingInvitesByOpponent.containsKey(opponent.name)) return;
+        if (outgoingInvitesByOpponent.containsKey(opponent.playerId)) return;
 
         // Local tracking record for the [Invited M:SS] chip + the
         // 10-min client-side TTL countdown. Invite-id is locally-minted
@@ -1576,7 +1664,7 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         final OutgoingInvite oi = new OutgoingInvite(
             "local-" + UUID.randomUUID(), opponent, style, build, location,
             now, now + FIGHT_INVITE_TTL_MS);
-        outgoingInvitesByOpponent.put(opponent.name, oi);
+        outgoingInvitesByOpponent.put(opponent.playerId, oi);
 
         service.sendInvite(opponent, style, build, location);
 
@@ -1587,11 +1675,20 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
     /** User clicked [Invited M:SS] on a row to abort their pending invite.
      *  Drops the local tracking record (so the chip flips back to [Fight])
      *  and asks the service to cancel server-side — which in mock mode
-     *  stops the fixture's pending auto-accept timer. */
-    private void cancelOutgoingInvite(String opponentName, boolean rerender)
+     *  stops the fixture's pending auto-accept timer.
+     *
+     *  <p>Keyed by canonical {@code player_id} (not display name) —
+     *  display names can collide across peers (case-insensitive
+     *  matches, leading/trailing whitespace edge cases) but
+     *  {@code player_id} is the canonical lowercase form the server
+     *  derives from {@code canon_name()} and uses as the wire key
+     *  for {@code lobby/invite} / {@code lobby/cancel_invite}.
+     *  Keying by it here keeps panel state in lockstep with what
+     *  the server will accept for the cancel cmd. */
+    private void cancelOutgoingInvite(String opponentPlayerId, boolean rerender)
     {
-        if (opponentName == null) return;
-        OutgoingInvite oi = outgoingInvitesByOpponent.remove(opponentName);
+        if (opponentPlayerId == null || opponentPlayerId.isEmpty()) return;
+        OutgoingInvite oi = outgoingInvitesByOpponent.remove(opponentPlayerId);
         if (oi != null) service.cancelInvite(oi.opponent);
         if (rerender) renderRoster();
     }
@@ -1668,10 +1765,26 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         return wrapInScroll(card);
     }
 
-    /** Terminal MeetAt view — shown after both confirmed. World numbers are
-     *  intentionally "TBD" until the real world tables land server-side (see
-     *  PLUGIN_PROGRESS.md `meet-at-worlds-tbd`). */
-    private JComponent buildMeetAtView()
+    /** Terminal MeetAt view — shown after both confirmed. The server
+     *  resolves the world + meeting place authoritatively via
+     *  {@code resolve_match_world} / {@code resolve_meeting_place} in
+     *  {@code backend/core/lobby.py}: NH Arena → W370 (AUS) / W558 (EU)
+     *  / W578 (NA) with random-pick-of-the-two on mixed regions
+     *  defaulting to W578; NH Wildy/FFA + Multi → world + Ferox Enclave;
+     *  Veng → random PvP world from the member list + Grand Exchange;
+     *  DMM → W345 + Grand Exchange. The plugin renders the values
+     *  verbatim from {@link MatchInfo#world} / {@link MatchInfo#meetingPlace}
+     *  per the handoff "render verbatim, no client-side world picking"
+     *  rule — keeping the resolution logic server-side means the
+     *  world tables can be updated (e.g. when Jagex retires a PvP
+     *  world) without a plugin release.
+     *
+     *  <p>{@code match} is null only when the view is being re-rendered
+     *  outside an {@link #onMatchFound} flow (currently unreachable —
+     *  the view's only entry point is from {@link #onMatchFound}).
+     *  Falls back to "TBD" defensively so a future refactor that
+     *  invokes the view from another path doesn't NPE. */
+    private JComponent buildMeetAtView(MatchInfo match)
     {
         LocalFightState s = currentFightSession;
         JPanel card = newGateLikeCard();
@@ -1680,9 +1793,15 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         addOpponentLines(card, s);
         card.add(leftAlignedStrut(14));
 
-        card.add(makeMeetAtRow("World:", "TBD"));
+        String worldText = match != null && match.world != null && !match.world.isEmpty()
+            ? match.world : "TBD";
+        String meetingPlaceText = match != null && match.meetingPlace != null && !match.meetingPlace.isEmpty()
+            ? match.meetingPlace
+            : (s == null ? "TBD" : meetAtPlace(s.style, s.location));
+
+        card.add(makeMeetAtRow("World:", worldText));
         card.add(leftAlignedStrut(6));
-        card.add(makeMeetAtRow("Meet at:", s == null ? "TBD" : meetAtPlace(s.style, s.location)));
+        card.add(makeMeetAtRow("Meet at:", meetingPlaceText));
         card.add(leftAlignedStrut(14));
 
         // Per spec: this screen also has a Find-a-new-match exit; auto-return
@@ -1811,7 +1930,8 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
             if (c instanceof PlayerRow)
             {
                 PlayerRow row = (PlayerRow) c;
-                if (row.p != null && outgoingInvitesByOpponent.containsKey(row.p.name))
+                if (row.p != null && row.p.playerId != null
+                    && outgoingInvitesByOpponent.containsKey(row.p.playerId))
                 {
                     row.render();
                 }
@@ -1896,19 +2016,20 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         }
 
         // ---- Sender perspective: opponent declined / cascaded our outgoing ----
-        // OutgoingInvites are keyed by opponent name in the panel's
-        // map; look up by inviteId via a scan (small map, < ~10 entries).
-        String opponentName = null;
+        // OutgoingInvites are keyed by opponent player_id in the
+        // panel's map; look up by inviteId via a scan (small map, < ~10
+        // entries).
+        String opponentPlayerId = null;
         for (Map.Entry<String, OutgoingInvite> e : outgoingInvitesByOpponent.entrySet())
         {
             OutgoingInvite oi = e.getValue();
             if (oi != null && inviteId.equals(oi.inviteId))
             {
-                opponentName = e.getKey();
+                opponentPlayerId = e.getKey();
                 break;
             }
         }
-        if (opponentName != null)
+        if (opponentPlayerId != null)
         {
             // Inline rather than calling cancelOutgoingInvite() because
             // that helper echoes service.cancelInvite() back to the
@@ -1916,7 +2037,7 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
             // server-side, so echoing it back would risk a benign-but-
             // noisy unknown-invite_id log on the server. Drop the local
             // record + re-render the roster directly.
-            outgoingInvitesByOpponent.remove(opponentName);
+            outgoingInvitesByOpponent.remove(opponentPlayerId);
             renderRoster();
         }
     }
@@ -1945,7 +2066,10 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         // Drop any local outgoing-invite tracking for this opponent — the
         // invite has been promoted into a real fight session and the
         // [Invited M:SS] chip should disappear from the lobby roster.
-        outgoingInvitesByOpponent.remove(session.opponent.name);
+        if (session.opponent.playerId != null)
+        {
+            outgoingInvitesByOpponent.remove(session.opponent.playerId);
+        }
         // Also drop any incoming-invite chip-state we may still be tracking.
         // The card itself was already torn down by addIncomingInvite()'s
         // Accept runnable; this is defensive cleanup for the
@@ -1991,7 +2115,9 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         if (s.session.fightSessionId != null
             && !s.session.fightSessionId.equals(match.fightSessionId)) return;
         // Both sides confirmed — MeetAt is terminal until Find-a-new-match.
-        showFightSetup(buildMeetAtView());
+        // Server-resolved world + meeting_place travel through `match`
+        // so the view can render them verbatim (see buildMeetAtView).
+        showFightSetup(buildMeetAtView(match));
     }
 
     @Override
@@ -2092,12 +2218,127 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         if (errorBannerTimer != null) errorBannerTimer.stop();
     }
 
-    @Override
-    public void onBlockListSnapshot(Set<String> uuids)
+    /**
+     * Builds the reconnect-status banner pinned above {@link #errorBanner}.
+     * Amber-tinted strip with a wrapped two-line message + a live
+     * countdown to the next reconnect attempt. Hidden by default;
+     * {@link #refreshReconnectBanner} flips visibility based on the
+     * {@link LobbyService#isConnected()} / {@link
+     * LobbyService#getNextReconnectAttemptEpochMs()} pair.
+     *
+     * <p>No dismiss button: the banner is informational and self-clears
+     * when the socket reconnects. A manual dismiss would let users
+     * hide a real ongoing problem and then wonder why nothing works.
+     */
+    private JPanel buildReconnectBanner()
     {
-        if (uuids == null) return;
-        blockedUuids.clear();
-        blockedUuids.addAll(uuids);
+        JPanel banner = new JPanel();
+        banner.setLayout(new BoxLayout(banner, BoxLayout.X_AXIS));
+        // Amber, distinct from the red error banner — error = "your
+        // last action failed", reconnect = "we're trying to get back
+        // online". Different colors so a user who has both visible
+        // doesn't conflate the two.
+        banner.setBackground(new Color(0x6e, 0x55, 0x1f));
+        banner.setBorder(BorderFactory.createCompoundBorder(
+            BorderFactory.createMatteBorder(0, 0, 1, 0, new Color(0x40, 0x30, 0x10)),
+            BorderFactory.createEmptyBorder(6, 8, 6, 8)));
+
+        reconnectBannerLabel = new JLabel(" ");
+        reconnectBannerLabel.setForeground(new Color(0xff, 0xf2, 0xdd));
+        reconnectBannerLabel.setFont(reconnectBannerLabel.getFont().deriveFont(Font.PLAIN, 12f));
+        banner.add(reconnectBannerLabel);
+        banner.add(Box.createHorizontalGlue());
+        return banner;
+    }
+
+    /**
+     * 1Hz tick that polls the underlying service for connection state
+     * and either shows the reconnect banner (with the live countdown)
+     * or hides it. Called from {@link #reconnectBannerTicker}; safe to
+     * call from the EDT only.
+     *
+     * <p>We poll rather than wire a callback from
+     * {@link com.pvp.leaderboard.service.socket.WebSocketManager}
+     * because the countdown needs a 1Hz redraw regardless — adding a
+     * callback would only mean two notification paths for the same
+     * state. The {@link LobbyService} interface deliberately exposes
+     * the raw "is connected" + "next attempt epoch ms" pair instead of
+     * a derived "seconds remaining" so the panel owns the
+     * presentation logic (countdown formatting, edge cases when the
+     * scheduled time is in the past while a reconnect is mid-flight).
+     *
+     * <p>Test fixtures ({@link com.pvp.leaderboard.lobby.DevLobbyFixture},
+     * {@link com.pvp.leaderboard.lobby.NoOpLobbyService}) inherit the
+     * interface defaults — {@code isConnected()=true} +
+     * {@code getNextReconnectAttemptEpochMs()=0} — so the banner stays
+     * hidden in visual-review / unit-test runs without any extra
+     * mocking.
+     */
+    private void refreshReconnectBanner()
+    {
+        if (reconnectBanner == null || reconnectBannerLabel == null) return;
+        boolean connected = true;
+        long nextAttemptEpochMs = 0L;
+        try
+        {
+            connected = service.isConnected();
+            nextAttemptEpochMs = service.getNextReconnectAttemptEpochMs();
+        }
+        catch (Exception ignored)
+        {
+            // Defensive: a service impl that throws here should not
+            // take down the panel's UI thread. Treat as "no banner".
+        }
+
+        // Two suppression cases:
+        //   1. Connected — nothing to reconnect to.
+        //   2. Disconnected but no retry scheduled — pre-login, or the
+        //      manager is in the middle of a tick. Showing a banner
+        //      with "0 seconds" would flicker; hide instead.
+        if (connected || nextAttemptEpochMs <= 0L)
+        {
+            if (reconnectBanner.isVisible())
+            {
+                reconnectBanner.setVisible(false);
+                revalidate();
+                repaint();
+            }
+            return;
+        }
+
+        long remainingMs = nextAttemptEpochMs - System.currentTimeMillis();
+        // Floor at 0 so a tick that lands after the scheduled time
+        // (e.g. JVM pause, reconnect mid-flight) doesn't render a
+        // negative countdown. Once the attempt fires the manager
+        // zeroes nextReconnectEpochMs and the next tick hides the
+        // banner.
+        long remainingSec = Math.max(0L, (remainingMs + 999L) / 1000L);
+
+        // Two-line copy: instruction first, countdown second. Using
+        // an HTML <div style='width:...'> caps wrap inside the
+        // sidepanel — same trick as the gate's match-count status
+        // label. 170px matches that label so both pieces of chrome
+        // wrap at the same column.
+        String html = "<html><div style='width:170px'>"
+            + "Attempting to reconnect, if this doesn't disappear contact Toyco in discord."
+            + "<br>"
+            + remainingSec + " seconds remaining until next reconnect attempt."
+            + "</div></html>";
+        reconnectBannerLabel.setText(html);
+        if (!reconnectBanner.isVisible())
+        {
+            reconnectBanner.setVisible(true);
+            revalidate();
+            repaint();
+        }
+    }
+
+    @Override
+    public void onBlockListSnapshot(Set<String> playerIds)
+    {
+        if (playerIds == null) return;
+        blockedPlayerIds.clear();
+        blockedPlayerIds.addAll(playerIds);
         // User-state change — bypass the 60s roster coalescer so the
         // grey-out lands immediately. Block toggles are user-initiated
         // (or initiated from a different device, which is still a
@@ -2106,17 +2347,17 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
     }
 
     @Override
-    public void onBlockAdded(String uuid)
+    public void onBlockAdded(String playerId)
     {
-        if (uuid == null || uuid.isEmpty()) return;
-        if (blockedUuids.add(uuid)) renderRoster();
+        if (playerId == null || playerId.isEmpty()) return;
+        if (blockedPlayerIds.add(playerId)) renderRoster();
     }
 
     @Override
-    public void onBlockRemoved(String uuid)
+    public void onBlockRemoved(String playerId)
     {
-        if (uuid == null || uuid.isEmpty()) return;
-        if (blockedUuids.remove(uuid)) renderRoster();
+        if (playerId == null || playerId.isEmpty()) return;
+        if (blockedPlayerIds.remove(playerId)) renderRoster();
     }
 
     /** Meeting place per (style, sub-location). Per spec:
@@ -2507,7 +2748,7 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         for (LobbyMember p : visible)
         {
             // Chip precedence: [Blocked Lookup] > [Invited M:SS] > [Lookup] > [Fight].
-            //   [Blocked Lookup] — local user has blocked this UUID, card greyed
+            //   [Blocked Lookup] — local user has blocked this player_id, card greyed
             //   [Invited M:SS]   — pending outgoing invite, click cancels
             //   [Lookup]         — outstanding incoming invite from this player
             //   [Fight]          — default; opens full-screen fight-setup card
@@ -2516,8 +2757,8 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
                 this::getOutgoingInvite,
                 this::routeOpenProfile,
                 this::onFightClicked,
-                opp -> cancelOutgoingInvite(opp.name, true),
-                m -> m != null && m.uuid != null && blockedUuids.contains(m.uuid)));
+                opp -> cancelOutgoingInvite(opp.playerId, true),
+                m -> m != null && m.playerId != null && blockedPlayerIds.contains(m.playerId)));
             rosterContainer.add(Box.createVerticalStrut(2));
         }
 
@@ -2870,12 +3111,13 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
                 ? BLOCKED_FG
                 : (rankKnown ? RankUtils.getRankColor(rankLabel) : Color.WHITE);
 
-            NonEllipsisLabel name = new NonEllipsisLabel(p.name);
+            String displayName = displayNameOf(p);
+            NonEllipsisLabel name = new NonEllipsisLabel(displayName);
             name.setFont(name.getFont().deriveFont(Font.BOLD, (float) fontBase));
             name.setForeground(rankColor);
             name.setToolTipText(blocked
-                ? p.name + " (blocked — click to Unblock from Player Lookup)"
-                : p.name);
+                ? displayName + " (blocked — click to Unblock from Player Lookup)"
+                : displayName);
 
             if (!rankKnown)
             {
@@ -3098,10 +3340,11 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
 
             // Base: name spans full row width, paints its full text and
             // clips under the rank/lookup overlay (no ellipsis).
-            NonEllipsisLabel name = new NonEllipsisLabel(sender.name);
+            String displayName = displayNameOf(sender);
+            NonEllipsisLabel name = new NonEllipsisLabel(displayName);
             name.setFont(name.getFont().deriveFont(Font.BOLD, (float) ROW_FONT_PT));
             name.setForeground(rankColor);
-            name.setToolTipText(sender.name);
+            name.setToolTipText(displayName);
 
             JLabel rank = new JLabel(rankLabel);
             rank.setFont(rank.getFont().deriveFont(Font.BOLD, (float) ROW_FONT_PT));
@@ -3118,7 +3361,7 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
                 BorderFactory.createEmptyBorder(1, 4, 1, 4)));
             lookup.setOpaque(false);
             lookup.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
-            lookup.setToolTipText("Open " + sender.name + "'s profile in Player Lookup");
+            lookup.setToolTipText("Open " + displayName + "'s profile in Player Lookup");
             lookup.addMouseListener(new MouseAdapter()
             {
                 @Override

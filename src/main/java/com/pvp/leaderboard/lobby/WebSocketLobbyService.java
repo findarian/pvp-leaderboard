@@ -29,14 +29,15 @@ import java.util.concurrent.ConcurrentHashMap;
  * <ol>
  *   <li><b>Wire ↔ domain marshalling</b>: server pushes are "flat" (e.g.
  *   {@code lobby/invite_received} carries
- *   {@code from_uuid + sender_name + sender_styles + ...}, not a nested
- *   {@code sender} object). This service holds an in-memory roster
- *   cache keyed by UUID and reconstructs {@link LobbyMember} instances
+ *   {@code from_player_id + from_name + sender_styles + ...} post-{@code
+ *   p2-scrub-uuids-from-lobby}, not a nested {@code sender} object).
+ *   This service holds an in-memory roster cache keyed by canonical
+ *   {@code player_id} and reconstructs {@link LobbyMember} instances
  *   for the panel's nested {@link IncomingInvite#sender} /
  *   {@link FightSession#opponent} / {@link MatchInfo#opponent} fields.
- *   If a flat payload references a UUID not in the cache (rare — only
- *   if the push arrives before the {@code lobby/roster} that introduced
- *   the member), the service falls back to a synthetic
+ *   If a flat payload references a player id not in the cache (rare —
+ *   only if the push arrives before the {@code lobby/roster} that
+ *   introduced the member), the service falls back to a synthetic
  *   {@link LobbyMember} built from whatever fields the push carried.</li>
  *
  *   <li><b>Reconnect re-join</b>: caches the last {@link #joinLobby}
@@ -80,12 +81,15 @@ public final class WebSocketLobbyService implements LobbyService
      * on the same dispatcher thread, but the map is shared in case a
      * future refactor moves the snapshot write off-thread.
      */
-    private final Map<String, LobbyMember> rosterByUuid = new ConcurrentHashMap<>();
+    private final Map<String, LobbyMember> rosterByPlayerId = new ConcurrentHashMap<>();
 
     /** Block-list snapshot, mirroring {@code lobby/block_list_snapshot} +
      *  the {@code lobby/block_added}/{@code lobby/block_removed} deltas.
-     *  Exposed to the panel via {@link LobbyEventListener#onBlockListSnapshot}. */
-    private final Set<String> blockedUuids = ConcurrentHashMap.newKeySet();
+     *  Keys are canonical lowercase player ids (matches the new wire
+     *  shape post-{@code p2-scrub-uuids-from-lobby} — raw UUIDs no
+     *  longer appear on the wire). Exposed to the panel via
+     *  {@link LobbyEventListener#onBlockListSnapshot}. */
+    private final Set<String> blockedPlayerIds = ConcurrentHashMap.newKeySet();
 
     /** Last successful (sent — not necessarily ACKed) join args, replayed
      *  on every reconnect. {@code null} until the first {@link #joinLobby}. */
@@ -167,7 +171,7 @@ public final class WebSocketLobbyService implements LobbyService
     {
         if (opponent == null || style == null || build == null) return;
         JsonObject d = new JsonObject();
-        d.addProperty("to_uuid", opponent.uuid);
+        d.addProperty("to_player_id", opponent.playerId);
         d.addProperty("style", style.name().toLowerCase());
         d.addProperty("build", build.name().toLowerCase());
         d.addProperty("location", location == null ? "" : location);
@@ -179,7 +183,7 @@ public final class WebSocketLobbyService implements LobbyService
     {
         if (opponent == null) return;
         JsonObject d = new JsonObject();
-        d.addProperty("to_uuid", opponent.uuid);
+        d.addProperty("to_player_id", opponent.playerId);
         socket.send("lobby/cancel_invite", d);
     }
 
@@ -225,19 +229,39 @@ public final class WebSocketLobbyService implements LobbyService
     @Override
     public void block(LobbyMember member)
     {
-        if (member == null || member.uuid == null) return;
+        if (member == null || member.playerId == null) return;
         JsonObject d = new JsonObject();
-        d.addProperty("blocked_uuid", member.uuid);
+        d.addProperty("blocked_player_id", member.playerId);
         socket.send("lobby/block", d);
     }
 
     @Override
     public void unblock(LobbyMember member)
     {
-        if (member == null || member.uuid == null) return;
+        if (member == null || member.playerId == null) return;
         JsonObject d = new JsonObject();
-        d.addProperty("blocked_uuid", member.uuid);
+        d.addProperty("blocked_player_id", member.playerId);
         socket.send("lobby/unblock", d);
+    }
+
+    /** Pass-through to {@link WebSocketManager#isConnected()}. The
+     *  panel's reconnect banner reads this to decide whether to show
+     *  the countdown — the wire state is the single source of truth
+     *  for "are we online", not anything cached in this service. */
+    @Override
+    public boolean isConnected()
+    {
+        return socket.isConnected();
+    }
+
+    /** Pass-through to {@link WebSocketManager#getNextReconnectAttemptEpochMs()}.
+     *  Drives the 1Hz countdown on the panel's reconnect banner.
+     *  Returning {@code 0} suppresses the banner; any non-zero value
+     *  is interpreted as "retry scheduled at that wall-clock time". */
+    @Override
+    public long getNextReconnectAttemptEpochMs()
+    {
+        return socket.getNextReconnectAttemptEpochMs();
     }
 
     // ---------------------------------------------------------------
@@ -277,11 +301,11 @@ public final class WebSocketLobbyService implements LobbyService
             LobbyMember m = parseMember(el.getAsJsonObject());
             if (m == null) continue;
             roster.add(m);
-            nextCache.put(m.uuid, m);
+            nextCache.put(m.playerId, m);
         }
         // Replace cache wholesale — server's snapshot is authoritative.
-        rosterByUuid.clear();
-        rosterByUuid.putAll(nextCache);
+        rosterByPlayerId.clear();
+        rosterByPlayerId.putAll(nextCache);
         LobbyEventListener l = listener;
         if (l == null) return;
         SwingUtilities.invokeLater(() -> l.onRosterSnapshot(roster));
@@ -289,54 +313,62 @@ public final class WebSocketLobbyService implements LobbyService
 
     private void handleBlockListSnapshot(JsonObject data)
     {
-        Set<String> uuids = parseStringArray(data, "blocked_uuids");
-        blockedUuids.clear();
-        blockedUuids.addAll(uuids);
+        Set<String> ids = parseStringArray(data, "blocked_player_ids");
+        blockedPlayerIds.clear();
+        blockedPlayerIds.addAll(ids);
         LobbyEventListener l = listener;
         if (l == null) return;
-        Set<String> snapshot = Collections.unmodifiableSet(new HashSet<>(blockedUuids));
+        Set<String> snapshot = Collections.unmodifiableSet(new HashSet<>(blockedPlayerIds));
         SwingUtilities.invokeLater(() -> l.onBlockListSnapshot(snapshot));
     }
 
     private void handleBlockAdded(JsonObject data)
     {
-        String u = optString(data, "blocked_uuid");
-        if (u.isEmpty()) return;
-        blockedUuids.add(u);
+        String pid = optString(data, "blocked_player_id");
+        if (pid.isEmpty()) return;
+        blockedPlayerIds.add(pid);
         LobbyEventListener l = listener;
         if (l == null) return;
-        SwingUtilities.invokeLater(() -> l.onBlockAdded(u));
+        SwingUtilities.invokeLater(() -> l.onBlockAdded(pid));
     }
 
     private void handleBlockRemoved(JsonObject data)
     {
-        String u = optString(data, "blocked_uuid");
-        if (u.isEmpty()) return;
-        blockedUuids.remove(u);
+        String pid = optString(data, "blocked_player_id");
+        if (pid.isEmpty()) return;
+        blockedPlayerIds.remove(pid);
         LobbyEventListener l = listener;
         if (l == null) return;
-        SwingUtilities.invokeLater(() -> l.onBlockRemoved(u));
+        SwingUtilities.invokeLater(() -> l.onBlockRemoved(pid));
     }
 
     private void handleInviteReceived(JsonObject data)
     {
         String inviteId = optString(data, "invite_id");
-        String fromUuid = optString(data, "from_uuid");
-        if (inviteId.isEmpty() || fromUuid.isEmpty()) return;
+        String fromPlayerId = optString(data, "from_player_id");
+        if (inviteId.isEmpty() || fromPlayerId.isEmpty()) return;
         Style style = parseStyle(optString(data, "style"));
         BuildType build = parseBuild(optString(data, "build"));
         if (style == null || build == null) return;
         String location = optString(data, "location");
         long expiresAt = optLong(data, "expires_at_epoch_ms");
 
-        LobbyMember sender = rosterByUuid.get(fromUuid);
+        LobbyMember sender = rosterByPlayerId.get(fromPlayerId);
         if (sender == null)
         {
-            // Reconstruct from flat sender_* fields per
-            // _invite_payload_for_receiver in lobby_handler.py.
+            // Reconstruct from flat sender_* / from_* fields per
+            // _invite_payload_for_receiver in lobby_handler.py. The
+            // post-UUID-scrub wire carries a display-cased `from_name`
+            // companion to `from_player_id`; we prefer that for the
+            // visible roster row but fall back to `sender_name`
+            // (legacy) and finally the canonical id itself if both
+            // are missing.
+            String displayName = optString(data, "from_name");
+            if (displayName.isEmpty()) displayName = optString(data, "sender_name");
+            if (displayName.isEmpty()) displayName = fromPlayerId;
             sender = new LobbyMember(
-                fromUuid,
-                optString(data, "sender_name"),
+                fromPlayerId,
+                displayName,
                 parseStyleSet(data, "sender_styles"),
                 parseBuildSet(data, "sender_builds"),
                 /* peakRankIdx */ 0,
@@ -350,6 +382,15 @@ public final class WebSocketLobbyService implements LobbyService
         SwingUtilities.invokeLater(() -> l.onIncomingInvite(invite));
     }
 
+    /** {@code lobby/invite_cancelled} is dual-purpose post-{@code
+     *  p2-scrub-uuids-from-lobby}: the <b>cancel branch</b> carries
+     *  {@code from_player_id} (sender retracted) and the <b>decline
+     *  branch</b> carries {@code declined_by_player_id} (receiver said
+     *  no). Both close the same invite from the panel's perspective,
+     *  so we route on {@code invite_id} alone — the branching
+     *  identifier matters only if a future UI wants to distinguish
+     *  "they cancelled" from "they declined" in the toast. The
+     *  branch hint is silently dropped today. */
     private void handleInviteCancelled(JsonObject data)
     {
         String inviteId = optString(data, "invite_id");
@@ -449,33 +490,34 @@ public final class WebSocketLobbyService implements LobbyService
 
     /** Reconstructs a {@link LobbyMember} for the opponent of a
      *  fight_proposed / match_found push. The wire carries
-     *  {@code player_a_uuid} and {@code player_b_uuid}; the local
-     *  user is one of them, the opponent is the other. Falls back to
-     *  a synthetic minimal member if the roster cache has no row for
-     *  the opponent (rare reconnect-race case). */
+     *  {@code player_a_player_id} and {@code player_b_player_id}
+     *  post-{@code p2-scrub-uuids-from-lobby}; the local user is one
+     *  of them, the opponent is the other. Falls back to a synthetic
+     *  minimal member if the roster cache has no row for the opponent
+     *  (rare reconnect-race case). */
     private LobbyMember resolveOpponent(JsonObject data)
     {
-        String a = optString(data, "player_a_uuid");
-        String b = optString(data, "player_b_uuid");
+        String a = optString(data, "player_a_player_id");
+        String b = optString(data, "player_b_player_id");
         if (a.isEmpty() || b.isEmpty()) return null;
-        // We don't know "self uuid" here without injecting
+        // We don't know "self player_id" here without injecting
         // ClientIdentityService — but the panel does. Defer to
         // whichever side IS in the roster cache; the local user's own
         // row is never in the cache (server filters it out per
-        // get_visible_roster.viewer_uuid skip).
-        LobbyMember aRow = rosterByUuid.get(a);
-        LobbyMember bRow = rosterByUuid.get(b);
+        // get_visible_roster.viewer_player_id skip).
+        LobbyMember aRow = rosterByPlayerId.get(a);
+        LobbyMember bRow = rosterByPlayerId.get(b);
         if (aRow != null && bRow == null) return aRow;
         if (bRow != null && aRow == null) return bRow;
         if (aRow == null && bRow == null)
         {
-            // Both UUIDs unknown to us — synthesise a minimal record
-            // for the FIRST one (the panel renders whatever it gets).
-            // This branch is reachable only if fight_proposed arrives
-            // before the lobby/roster that introduced the opponent —
-            // shouldn't happen in steady state but defends against
-            // reordering at the API GW.
-            log.debug("resolveOpponent: both UUIDs absent from roster cache (a={}, b={}) — synthesising", a, b);
+            // Both player ids unknown to us — synthesise a minimal
+            // record for the FIRST one (the panel renders whatever
+            // it gets). This branch is reachable only if
+            // fight_proposed arrives before the lobby/roster that
+            // introduced the opponent — shouldn't happen in steady
+            // state but defends against reordering at the API GW.
+            log.debug("resolveOpponent: both player ids absent from roster cache (a={}, b={}) — synthesising", a, b);
             return synthesiseMinimalMember(a);
         }
         // Both present — shouldn't happen (we'd be in our own lobby?).
@@ -483,20 +525,22 @@ public final class WebSocketLobbyService implements LobbyService
         return aRow;
     }
 
-    /** Used when a flat-payload push references a UUID not in the
-     *  roster cache. Renders a member with only the UUID known so the
-     *  panel can still display the row without NPE. */
-    private LobbyMember synthesiseMinimalMember(String uuid)
+    /** Used when a flat-payload push references a player id not in
+     *  the roster cache. Renders a member with only the canonical id
+     *  known (and reused as the display name, since we have no other
+     *  source for the proper-cased form) so the panel can still
+     *  display the row without NPE. */
+    private LobbyMember synthesiseMinimalMember(String playerId)
     {
-        return new LobbyMember(uuid, uuid.substring(0, 8),
+        return new LobbyMember(playerId, playerId,
             EnumSet.noneOf(Style.class), EnumSet.noneOf(BuildType.class),
             0, "", false);
     }
 
     private LobbyMember parseMember(JsonObject m)
     {
-        String uuid = optString(m, "uuid");
-        if (uuid.isEmpty()) return null;
+        String playerId = optString(m, "player_id");
+        if (playerId.isEmpty()) return null;
         String name = optString(m, "name");
         Set<Style> styles = parseStyleSet(m, "styles");
         Set<BuildType> builds = parseBuildSet(m, "builds");
@@ -505,7 +549,7 @@ public final class WebSocketLobbyService implements LobbyService
         boolean isMod = m.has("is_mod") && m.get("is_mod").isJsonPrimitive()
             && m.get("is_mod").getAsJsonPrimitive().isBoolean()
             && m.get("is_mod").getAsBoolean();
-        return new LobbyMember(uuid, name, styles, builds, rankIdx, region, isMod);
+        return new LobbyMember(playerId, name, styles, builds, rankIdx, region, isMod);
     }
 
     private static String optString(JsonObject o, String key)

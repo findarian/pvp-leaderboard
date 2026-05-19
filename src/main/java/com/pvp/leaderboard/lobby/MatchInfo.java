@@ -6,10 +6,14 @@ package com.pvp.leaderboard.lobby;
  * architecture's Phase-2 flow.
  *
  * <p>{@link #world} is the world number the players should world-hop to
- * (e.g. {@code "W370"} for NA Arena, {@code "TBD"} in mock mode until
- * {@code meet-at-worlds-tbd} is wired). {@link #meetingPlace} is the
- * in-game meeting spot per style+location (e.g. {@code "Arena"},
- * {@code "Ferox Enclave"}, {@code "Grand Exchange"}).
+ * (e.g. {@code "W370"} for NA Arena), resolved server-side per the
+ * style + location + both players' regions via
+ * {@code resolve_match_world} in {@code backend/core/lobby.py}. The
+ * client renders this verbatim — no client-side world-picking — so
+ * the world tables can be updated server-side without a plugin
+ * release. {@link #meetingPlace} is the in-game meeting spot per
+ * style+location (e.g. {@code "Arena"}, {@code "Ferox Enclave"},
+ * {@code "Grand Exchange"}), resolved by {@code resolve_meeting_place}.
  *
  * <p>Created as part of {@code p1-plugin-mock-refactor}. Public final
  * fields match the {@code LobbyMember} idiom. The panel renders this in

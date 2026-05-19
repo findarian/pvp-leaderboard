@@ -93,4 +93,24 @@ public interface LobbyService
 
     /** Removes {@code member} from the local user's block list. Idempotent. */
     void unblock(LobbyMember member);
+
+    /** {@code true} when the underlying transport (WebSocket in
+     *  production, always-on in {@link DevLobbyFixture}) is in the
+     *  open state. Drives the lobby panel's reconnect banner so the
+     *  user gets visible feedback when the socket has dropped and
+     *  the manager is in the slow-retry window. Default {@code true}
+     *  keeps test fixtures + no-op services from showing the banner
+     *  on construction. */
+    default boolean isConnected() { return true; }
+
+    /** Epoch ms when the underlying transport is scheduled to make
+     *  its next reconnect attempt, or {@code 0} if no retry is
+     *  pending (either because the socket is connected, or because
+     *  the manager has no active intent — e.g. pre-login).
+     *
+     *  <p>Used by the panel's 1Hz banner ticker to render the
+     *  "XX seconds remaining until next reconnect attempt" countdown.
+     *  Default {@code 0} keeps test fixtures from feeding the panel a
+     *  bogus countdown. */
+    default long getNextReconnectAttemptEpochMs() { return 0L; }
 }
