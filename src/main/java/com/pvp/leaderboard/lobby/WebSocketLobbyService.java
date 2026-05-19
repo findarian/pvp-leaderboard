@@ -384,7 +384,8 @@ public final class WebSocketLobbyService implements LobbyService
                 displayName,
                 parseStyleSet(data, "sender_styles"),
                 parseBuildSet(data, "sender_builds"),
-                /* peakRankIdx */ 0,
+                /* currentRankIdx */ -1,
+                /* peakRankIdx */ -1,
                 optString(data, "sender_region"),
                 /* isMod */ false
             );
@@ -537,7 +538,7 @@ public final class WebSocketLobbyService implements LobbyService
     {
         return new LobbyMember(playerId, playerId,
             EnumSet.noneOf(Style.class), EnumSet.noneOf(BuildType.class),
-            0, "", false);
+            -1, -1, "", false);
     }
 
     private LobbyMember parseMember(JsonObject m)
@@ -554,12 +555,29 @@ public final class WebSocketLobbyService implements LobbyService
         if (playerId.isEmpty()) return null;
         Set<Style> styles = parseStyleSet(m, "styles");
         Set<BuildType> builds = parseBuildSet(m, "builds");
-        int rankIdx = (int) optLong(m, "rank_idx");
+        // `rank_idx` = current rank for the viewer's sort_bucket, used
+        // by the rank-slider matchmaking gate. `peak_rank_idx` =
+        // all-time peak for the same bucket, used by the card label
+        // (display only). Server emits both per get_visible_roster
+        // (backend/core/lobby.py); on a partial deploy where peak is
+        // missing, fall back to the current rank so the card still
+        // renders something rather than collapsing to "Bronze 3".
+        int currentRankIdx = (int) optLong(m, "rank_idx");
+        int peakRankIdx;
+        if (m.has("peak_rank_idx") && m.get("peak_rank_idx").isJsonPrimitive()
+            && m.get("peak_rank_idx").getAsJsonPrimitive().isNumber())
+        {
+            peakRankIdx = (int) optLong(m, "peak_rank_idx");
+        }
+        else
+        {
+            peakRankIdx = currentRankIdx;
+        }
         String region = optString(m, "region");
         boolean isMod = m.has("is_mod") && m.get("is_mod").isJsonPrimitive()
             && m.get("is_mod").getAsJsonPrimitive().isBoolean()
             && m.get("is_mod").getAsBoolean();
-        return new LobbyMember(playerId, name, styles, builds, rankIdx, region, isMod);
+        return new LobbyMember(playerId, name, styles, builds, currentRankIdx, peakRankIdx, region, isMod);
     }
 
     private static String optString(JsonObject o, String key)

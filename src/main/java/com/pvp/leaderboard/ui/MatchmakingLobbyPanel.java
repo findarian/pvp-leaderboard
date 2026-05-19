@@ -1533,12 +1533,18 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         // sentinel; PlayerRow then suppresses the rank chip rather
         // than mis-rendering as Bronze 3.
         int peakIdx = pickSelfPreviewRankIdx();
+        // Self preview is display-only — it never enters the slider
+        // matchmaking gate (the user's own row is hidden from rosters
+        // server-side and the gate excludes self). Pass currentRankIdx
+        // = peakIdx so any code that reads .currentRankIdx on the self
+        // row gets a sensible non-sentinel value.
         LobbyMember self = new LobbyMember(
             selfPlayerId,
             name,
             selectedStyles,
             selectedBuildTypes,
-            peakIdx,
+            /* currentRankIdx */ peakIdx,
+            /* peakRankIdx */ peakIdx,
             selfRegion,
             false);
 
@@ -2159,9 +2165,11 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         // The panel re-applies the same rule the PlayerRow renderer uses
         // for the lobby roster, so a push that arrives just before the
         // user widens their slider doesn't sneak past the filter.
-        if (invite.sender != null
-            && (invite.sender.peakRankIdx < rankMinIdx
-                || invite.sender.peakRankIdx > rankMaxIdx)) return;
+        // Matchmaking decisions key on **current** rank (currentRankIdx);
+        // peakRankIdx is display-only and never gates the slider band.
+        if (invite.sender != null && rankIdxKnown(invite.sender.currentRankIdx)
+            && (invite.sender.currentRankIdx < rankMinIdx
+                || invite.sender.currentRankIdx > rankMaxIdx)) return;
         addIncomingInvite(invite);
     }
 
@@ -3012,11 +3020,26 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
 
     private boolean rankInRange(LobbyMember p)
     {
-        int idx = p.peakRankIdx;
+        // Matchmaking gate: keys on **current** rank, NOT peak. Peak is
+        // display-only (the big rank label on each card). The server's
+        // RANK_OUT_OF_RANGE check on lobby/invite reads
+        // current_mmr_per_bucket, so the slider must filter on the same
+        // signal or invites will be rejected by the server even though
+        // the user could see the row.
+        int idx = p.currentRankIdx;
         // Unknown / sentinel rank — show the row rather than hiding
         // everyone when the server omits rank_idx on a roster push.
         if (idx < 0 || idx >= RANK_LABELS.length) return true;
         return idx >= rankMinIdx && idx <= rankMaxIdx;
+    }
+
+    /** True if {@code idx} is a real rank (server returned a value), not
+     *  a -1 sentinel or a label-overflow. Used to distinguish "no current
+     *  rank yet" (don't filter out) from "current rank known and out of
+     *  band" (filter out). */
+    private boolean rankIdxKnown(int idx)
+    {
+        return idx >= 0 && idx < RANK_LABELS.length;
     }
 
     // -------------------- Player row ([Fight] or [Lookup], no inline picker) --------------------

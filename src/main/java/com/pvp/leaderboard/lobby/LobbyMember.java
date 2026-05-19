@@ -29,12 +29,21 @@ public final class LobbyMember
     public final String name;
     public final Set<Style> styles;
     public final Set<BuildType> builds;
+    /** Current rank index (0..24) for the viewer's sort bucket. Source of
+     *  truth for matchmaking — drives the rank-slider filter and is what
+     *  the server's RANK_OUT_OF_RANGE check reads on
+     *  {@code lobby/invite}. -1 means the server returned no value. */
+    public final int currentRankIdx;
+    /** All-time peak rank index (0..24) for the viewer's sort bucket. The
+     *  big rank label rendered on each card. **Display-only** — never
+     *  used as a matchmaking gate. -1 means no peak has been computed
+     *  yet (brand-new player with no completed matches in this bucket). */
     public final int peakRankIdx;
     public final String region;
     public final boolean isMod;
 
     public LobbyMember(String playerId, String name, Set<Style> styles, Set<BuildType> builds,
-                       int peakRankIdx, String region, boolean isMod)
+                       int currentRankIdx, int peakRankIdx, String region, boolean isMod)
     {
         this.playerId = playerId;
         this.name = name;
@@ -44,6 +53,7 @@ public final class LobbyMember
         this.builds = builds == null
             ? Collections.unmodifiableSet(EnumSet.noneOf(BuildType.class))
             : Collections.unmodifiableSet(EnumSet.copyOf(builds));
+        this.currentRankIdx = currentRankIdx;
         this.peakRankIdx = peakRankIdx;
         this.region = region;
         this.isMod = isMod;
