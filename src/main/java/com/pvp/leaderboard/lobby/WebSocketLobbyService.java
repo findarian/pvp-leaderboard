@@ -139,15 +139,29 @@ public final class WebSocketLobbyService implements LobbyService
 
     @Override
     public void joinLobby(String region, Set<Style> styles, Set<BuildType> builds,
-                          int minDisplayRankIdx, int maxDisplayRankIdx)
+                          int minDisplayRankIdx, int maxDisplayRankIdx, String sortBucket)
     {
-        lastJoinArgs = new JoinArgs(region, styles, builds, minDisplayRankIdx, maxDisplayRankIdx);
+        // Normalise + default the bucket so a bad/empty caller-supplied
+        // value can't reach the wire as a non-string. Allowed buckets
+        // mirror backend.core.lobby.ALLOWED_BUCKETS = {"overall", "nh",
+        // "veng", "multi", "dmm"}; anything else collapses to
+        // "overall" so the server's bucket validator can't trip.
+        String normBucket = (sortBucket == null) ? "overall" : sortBucket.trim().toLowerCase();
+        switch (normBucket)
+        {
+            case "overall": case "nh": case "veng": case "multi": case "dmm":
+                break;
+            default:
+                normBucket = "overall";
+        }
+        lastJoinArgs = new JoinArgs(region, styles, builds, minDisplayRankIdx, maxDisplayRankIdx, normBucket);
         JsonObject d = new JsonObject();
         d.addProperty("region", region == null ? "" : region.toLowerCase());
         d.add("styles", toJsonArray(stylesToWire(styles)));
         d.add("builds", toJsonArray(buildsToWire(builds)));
         d.addProperty("min_rank_idx", minDisplayRankIdx);
         d.addProperty("max_rank_idx", maxDisplayRankIdx);
+        d.addProperty("sort_bucket", normBucket);
         socket.send("lobby/join", d);
     }
 
@@ -492,7 +506,7 @@ public final class WebSocketLobbyService implements LobbyService
     {
         JoinArgs j = lastJoinArgs;
         if (j == null) return;
-        joinLobby(j.region, j.styles, j.builds, j.minDisplayRankIdx, j.maxDisplayRankIdx);
+        joinLobby(j.region, j.styles, j.builds, j.minDisplayRankIdx, j.maxDisplayRankIdx, j.sortBucket);
     }
 
     // ---------------------------------------------------------------
@@ -676,15 +690,17 @@ public final class WebSocketLobbyService implements LobbyService
         final Set<BuildType> builds;
         final int minDisplayRankIdx;
         final int maxDisplayRankIdx;
+        final String sortBucket;
 
         JoinArgs(String region, Set<Style> styles, Set<BuildType> builds,
-                 int minDisplayRankIdx, int maxDisplayRankIdx)
+                 int minDisplayRankIdx, int maxDisplayRankIdx, String sortBucket)
         {
             this.region = region;
             this.styles = styles == null ? EnumSet.noneOf(Style.class) : EnumSet.copyOf(styles);
             this.builds = builds == null ? EnumSet.noneOf(BuildType.class) : EnumSet.copyOf(builds);
             this.minDisplayRankIdx = minDisplayRankIdx;
             this.maxDisplayRankIdx = maxDisplayRankIdx;
+            this.sortBucket = sortBucket == null ? "overall" : sortBucket;
         }
     }
 }

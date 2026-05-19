@@ -122,6 +122,16 @@ public final class WebSocketManager
      *  user-driven {@link #disconnect}. */
     private WebSocket activeSocket;
     private String activeUuid;
+    /** Display-cased name of the in-game character the user is currently
+     *  logged in as (e.g. {@code "Toyco"}). Sent to the server on
+     *  $connect as a {@code &name=<urlencoded>} query parameter so the
+     *  conn row + lobby member row are pinned to the active session
+     *  rather than {@code sorted(player_names)[0]}. {@code null} when
+     *  not yet known (called before {@code client.getLocalPlayer()}
+     *  resolves). Backend treats null/missing as "fall back to alphabet
+     *  default" and validates non-null names against the MMR row's
+     *  {@code player_names} set (anti-spoof). */
+    private String activeName;
     private long currentBackoffMs = BACKOFF_INITIAL_MS;
     private ScheduledFuture<?> pendingReconnect;
     /** Epoch ms when {@link #pendingReconnect} is scheduled to fire,
@@ -166,11 +176,46 @@ public final class WebSocketManager
      * a call with a different UUID tears down the prior connection and
      * connects fresh.
      *
+     * <p>Backwards-compat shim — delegates to {@link #connect(String,
+     * String)} with no display-name. The server will fall back to its
+     * alphabetical default name from the MMR row's player_names set.
+     * New code should always pass the active local player's name so the
+     * conn row matches the in-game session.
+     *
      * @param uuid OSRS client UUID, lowercase v4. Invalid UUIDs are
      *             refused without a connect attempt to avoid the WAF
      *             auto-ban that would follow.
      */
     public synchronized void connect(String uuid)
+    {
+        connect(uuid, null);
+    }
+
+    /**
+     * Opens (or resumes) the socket for {@code (uuid, displayName)}. Same
+     * idempotency contract as {@link #connect(String)} but extends the
+     * "same connection?" check to the display name as well: a call with
+     * the same UUID but a different name (e.g. user switched characters
+     * on the same client) tears down and reconnects so the server's
+     * OSRS-Connections row matches the active in-game session.
+     *
+     * <p>The {@code displayName} is sent to the server as a
+     * {@code &name=<urlencoded>} query parameter on the WebSocket URL.
+     * The server validates it against the MMR row's {@code player_names}
+     * set (anti-spoof — a modified plugin can't claim a name that isn't
+     * linked to the trusted UUID) and uses it for the conn row's
+     * {@code name} + canonical {@code player_id} attributes. Pass
+     * {@code null} when the name isn't known yet (e.g. plugin re-toggle
+     * before {@code client.getLocalPlayer()} has resolved); the server
+     * falls back to {@code sorted(player_names)[0]}.
+     *
+     * @param uuid        OSRS client UUID, lowercase v4. Invalid UUIDs
+     *                    are refused without a connect attempt to avoid
+     *                    the WAF auto-ban that would follow.
+     * @param displayName Active in-game display name (e.g. "Toyco"), or
+     *                    {@code null} if not yet known.
+     */
+    public synchronized void connect(String uuid, String displayName)
     {
         if (shutdownCalled.get())
         {
@@ -182,25 +227,33 @@ public final class WebSocketManager
             log.warn("WebSocketManager: refusing connect with invalid UUID format (would trip WAF auto-ban)");
             return;
         }
-        if (activeSocket != null && uuid.equals(activeUuid))
+        String normName = (displayName == null || displayName.trim().isEmpty())
+            ? null : displayName.trim();
+        if (activeSocket != null
+            && uuid.equals(activeUuid)
+            && java.util.Objects.equals(normName, activeName))
         {
-            // Same UUID already wired — no-op resume.
+            // Same (uuid, name) tuple already wired — no-op resume.
             return;
         }
         if (activeSocket != null)
         {
-            // Switching UUIDs: close existing cleanly so the server can
-            // free its OSRS-Connections row before we open a new one.
-            // The server also force-closes duplicates server-side, but
-            // a clean local close avoids the 60s grace-window double
-            // book-keeping.
+            // Switching UUID *or* display name: close existing cleanly
+            // so the server can free its OSRS-Connections row before we
+            // open a new one. The server also force-closes duplicates
+            // server-side (force_close_duplicate keys on player_id, and
+            // a name change with the same UUID could yield a different
+            // player_id — explicit teardown avoids racing the
+            // server-side eviction with a fresh open).
             intentionalDisconnect = true;
-            try { activeSocket.close(CLOSE_NORMAL, "uuid_change"); }
+            String reason = uuid.equals(activeUuid) ? "name_change" : "uuid_change";
+            try { activeSocket.close(CLOSE_NORMAL, reason); }
             catch (Exception ignored) { /* best-effort */ }
             activeSocket = null;
         }
         intentionalDisconnect = false;
         activeUuid = uuid;
+        activeName = normName;
         cancelPendingReconnect();
         openSocketLocked();
     }
@@ -318,12 +371,22 @@ public final class WebSocketManager
     private void openSocketLocked()
     {
         if (activeUuid == null) return;
-        String url = PvPLeaderboardConstants.WEBSOCKET_URL + "?uuid=" + activeUuid;
+        StringBuilder url = new StringBuilder(PvPLeaderboardConstants.WEBSOCKET_URL)
+            .append("?uuid=").append(activeUuid);
+        if (activeName != null)
+        {
+            // RFC 3986 reserved chars are stripped by the in-game name
+            // validator (RuneScape names are [A-Za-z0-9 _-]) so a single
+            // urlencode pass is sufficient — no double-encode risk.
+            url.append("&name=").append(java.net.URLEncoder.encode(
+                activeName, java.nio.charset.StandardCharsets.UTF_8));
+        }
         Request req = new Request.Builder()
-            .url(url)
+            .url(url.toString())
             .header("User-Agent", USER_AGENT)
             .build();
-        log.debug("WebSocketManager: connecting uuid={}...", activeUuid.substring(0, 8));
+        log.debug("WebSocketManager: connecting uuid={}... name={}",
+            activeUuid.substring(0, 8), activeName == null ? "<none>" : activeName);
         activeSocket = pingingClient().newWebSocket(req, new Listener());
     }
 

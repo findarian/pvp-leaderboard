@@ -230,6 +230,48 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
      *  the user can Unblock from there. */
     private final Set<String> blockedPlayerIds = new HashSet<>();
 
+    /** Canonical {@code player_id}s the local user has tried to invite
+     *  and the server reported back as {@code PEER_NOT_IN_LOBBY}. The
+     *  backend's {@code OSRS-LobbyMembers} row outlives a peer's
+     *  WebSocket connection — TODO p2-handler-lobby on the backend
+     *  side keeps the row up to its 30-min sliding TTL even after
+     *  {@code $disconnect} fires. So a row can appear in our roster
+     *  while the underlying connection is dead, and the server's
+     *  push to that connection silently {@code GoneException}s.
+     *
+     *  <p>When the user clicks [Fight] on such a row, the server
+     *  rejects the invite with {@code PEER_NOT_IN_LOBBY} and we mark
+     *  the player as locally-stale here. {@link #renderRoster()} then
+     *  hides those rows from the visible list until the next
+     *  authoritative {@code lobby/roster} push (which also clears the
+     *  set — see {@link #onRosterSnapshot}). Confirms the user's
+     *  intuition that "they're gone" without them having to puzzle
+     *  through a banner message. */
+    private final Set<String> recentlyStalePlayerIds = new HashSet<>();
+
+    /** {@code player_id} of the most recent {@link #submitOutgoingInvite}
+     *  target, with the wall-clock send time. Used by
+     *  {@link #onError(String, String)} to correlate a
+     *  {@code PEER_NOT_IN_LOBBY} response back to a specific row so the
+     *  panel can mark only that player stale (instead of clearing
+     *  every outgoing invite — the user might have multiple in
+     *  flight). The send timestamp also gates the correlation: a
+     *  PEER_NOT_IN_LOBBY arriving more than {@link #STALE_CORRELATION_WINDOW_MS}
+     *  after the send is treated as unrelated to the last invite (e.g.
+     *  the user clicked [Fight], then {@link #cancelOutgoingInvite}d,
+     *  then someone else sent us {@code lobby/cancel_invite} that
+     *  bounced). */
+    private String lastInviteTargetPlayerId;
+    private long lastInviteSentAtMs;
+
+    /** Window for correlating a {@code PEER_NOT_IN_LOBBY} response to
+     *  the most recent invite send. 5s is a generous upper bound on
+     *  client-server RTT under poor network conditions; anything
+     *  longer than this is almost certainly an unrelated error
+     *  (and the worst case if we mis-correlate is one extra row
+     *  greyed for one render cycle, cleared by the next roster push). */
+    private static final long STALE_CORRELATION_WINDOW_MS = 5_000L;
+
     /** Active fight session occupying the FIGHT card. One at a time — set
      *  on opponent-accept (sender side) or on receiver Accept Fight click;
      *  cleared on Find-a-new-match, 30s confirm-window expiry, or fight
@@ -797,7 +839,7 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
             // invites back through onRosterSnapshot / onIncomingInvite.
             refreshCurrentStyleLabel();
             service.joinLobby(selfRegion, selectedStyles, selectedBuildTypes,
-                rankMinIdx, rankMaxIdx);
+                rankMinIdx, rankMaxIdx, pickSortBucket());
             // Sticky-flag the lobby so a logout → login round-trip
             // (or a full plugin restart) auto-returns the user to this
             // card with their picks preserved, rather than dropping them
@@ -947,7 +989,7 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         }
 
         service.joinLobby(selfRegion, selectedStyles, selectedBuildTypes,
-            rankMinIdx, rankMaxIdx);
+            rankMinIdx, rankMaxIdx, pickSortBucket());
         autoJoinIssuedThisSession = true;
     }
 
@@ -1852,6 +1894,13 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
             now, now + FIGHT_INVITE_TTL_MS);
         outgoingInvitesByOpponent.put(opponent.playerId, oi);
 
+        // Stash the target so onError() can correlate a
+        // PEER_NOT_IN_LOBBY response back to this exact row. A row
+        // re-entering the visible roster after a fresh server snapshot
+        // will clear this — see onRosterSnapshot().
+        lastInviteTargetPlayerId = opponent.playerId;
+        lastInviteSentAtMs = now;
+
         service.sendInvite(opponent, style, build, location);
 
         rootCards.show(rootCardHost, CARD_LOBBY);
@@ -2152,6 +2201,15 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
     public void onRosterSnapshot(List<LobbyMember> snapshot)
     {
         if (snapshot == null) return;
+        // A fresh authoritative snapshot supersedes any client-side
+        // staleness assumptions: if the server still has a row for a
+        // previously-marked-stale peer, either (a) the peer reconnected
+        // and is genuinely back, or (b) the row is still there but
+        // the underlying connection is still dead — in case (b) the
+        // user will get another PEER_NOT_IN_LOBBY on the next invite
+        // attempt and we'll re-stale them. Either way: don't carry
+        // staleness across snapshots.
+        recentlyStalePlayerIds.clear();
         this.pendingRoster = new ArrayList<>(snapshot);
         applyPendingRosterUpdate();
     }
@@ -2330,6 +2388,33 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         // server that adds a new code without a plugin release degrades
         // gracefully.
         showErrorBanner(LobbyErrorMessages.forCode(code));
+
+        // PEER_NOT_IN_LOBBY arriving on the heels of a fresh
+        // submitOutgoingInvite() means the row we just clicked is dead
+        // (the OSRS-LobbyMembers row exists but the underlying socket
+        // disconnected without a graceful lobby/leave — see the
+        // recentlyStalePlayerIds field doc for the systemic backend
+        // gap). Pull the local outgoing invite back so the chip
+        // doesn't park at [Invited M:SS] for the full 10-min TTL, and
+        // hide that row from the renderer until the next authoritative
+        // roster snapshot. Other error codes (BLOCKED,
+        // RANK_OUT_OF_RANGE, DUPLICATE_INVITE, etc.) leave the row
+        // alone — the row IS still valid, just the action is gated.
+        if ("PEER_NOT_IN_LOBBY".equals(code)
+            && lastInviteTargetPlayerId != null
+            && (System.currentTimeMillis() - lastInviteSentAtMs) <= STALE_CORRELATION_WINDOW_MS)
+        {
+            String stalePlayerId = lastInviteTargetPlayerId;
+            lastInviteTargetPlayerId = null;
+            recentlyStalePlayerIds.add(stalePlayerId);
+            // Drop the now-orphaned [Invited M:SS] tracking record so
+            // the chip flips back to [Fight] for any future re-render.
+            // Pass rerender=false because we re-render below ourselves
+            // after also pruning from `roster` so the row vanishes in
+            // a single repaint instead of two.
+            cancelOutgoingInvite(stalePlayerId, false);
+            renderRoster();
+        }
     }
 
     /**
@@ -2930,10 +3015,12 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
             // Style/build overlap only greys the [Fight] chip (see
             // fightAllowed); rank outside the slider hides the row
             // entirely (server also filters, this is defense-in-depth).
-            if (rankInRange(p))
-            {
-                visible.add(p);
-            }
+            if (!rankInRange(p)) continue;
+            // Hide locally-stale rows (last invite to this player_id
+            // bounced with PEER_NOT_IN_LOBBY — see onError). The set
+            // is cleared on the next authoritative server snapshot.
+            if (p.playerId != null && recentlyStalePlayerIds.contains(p.playerId)) continue;
+            visible.add(p);
         }
         Collections.sort(visible, (a, b) -> Integer.compare(b.peakRankIdx, a.peakRankIdx));
 
@@ -3040,6 +3127,27 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
     private boolean rankIdxKnown(int idx)
     {
         return idx >= 0 && idx < RANK_LABELS.length;
+    }
+
+    /** Picks the canonical bucket key the server should compute
+     *  per-row {@code rank_idx} / {@code peak_rank_idx} for. Priority
+     *  follows the {@link Style} enum declaration order
+     *  (NH &gt; Veng &gt; Multi &gt; DMM) — first selected style wins,
+     *  with {@code "overall"} as the fallback when nothing is selected
+     *  (gate state, mid-toggle race, etc.). The slider matchmaking gate
+     *  reads the rank for this bucket, so the bucket must reflect the
+     *  user's primary advertised style or the slider hides players
+     *  based on the wrong bucket's MMR. */
+    private String pickSortBucket()
+    {
+        for (Style s : Style.values())
+        {
+            if (selectedStyles.contains(s))
+            {
+                return s.name().toLowerCase();
+            }
+        }
+        return "overall";
     }
 
     // -------------------- Player row ([Fight] or [Lookup], no inline picker) --------------------
@@ -3469,7 +3577,18 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
 
         private static JLabel makeChip(String text, boolean active, Color activeColor, int fontPt)
         {
-            JLabel chip = new JLabel(text);
+            // ChipLabel (not a vanilla JLabel) bypasses Substance L&F's
+            // LabelUI text painting. Substance treats MouseEntered /
+            // MouseExited from the row-level MouseAdapter (installed
+            // via attachListenerRecursively, which fans out to every
+            // child including these chips) as a label-rollover state
+            // change and triggers a delegate repaint that briefly
+            // erases the foreground text — visible to the user as the
+            // chip's contents disappearing while the cursor is over a
+            // row. Painting the text ourselves in paintComponent skips
+            // the delegate entirely; the border still paints normally
+            // because paintBorder is unaffected by the L&F text path.
+            ChipLabel chip = new ChipLabel(text);
             chip.setFont(chip.getFont().deriveFont(active ? Font.BOLD : Font.PLAIN, (float) fontPt));
             chip.setForeground(active ? activeColor : new Color(0x55, 0x55, 0x55));
             Color borderColor = active ? activeColor : new Color(0x3a, 0x3a, 0x3a);
@@ -3482,10 +3601,15 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
 
         /** Tight JLabel chip — much smaller than a JButton under Substance L&F.
          *  textColor / borderColor are split so callers can paint white text
-         *  inside a quiet grey outline ([Fight] / [Lookup] convention). */
+         *  inside a quiet grey outline ([Fight] / [Lookup] convention).
+         *
+         *  <p>ChipLabel (not vanilla JLabel) so the action text doesn't
+         *  flicker / disappear on hover under Substance — same fix as
+         *  {@link #makeChip}. Otherwise users can lose track of which
+         *  chip says [Fight] vs [Invited 9:42] mid-hover. */
         private JLabel makeActionChip(String text, Color textColor, Color borderColor, Runnable onClick)
         {
-            JLabel chip = new JLabel(text);
+            ChipLabel chip = new ChipLabel(text);
             chip.setFont(chip.getFont().deriveFont(Font.BOLD, (float) fontBase));
             chip.setForeground(textColor);
             chip.setHorizontalAlignment(SwingConstants.CENTER);
@@ -3769,7 +3893,11 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
     /** Outer-class twin of {@link PlayerRow#makeChip}. */
     private static JLabel makeChipStatic(String text, boolean active, Color activeColor, int fontPt)
     {
-        JLabel chip = new JLabel(text);
+        // See PlayerRow.makeChip for why this is a ChipLabel rather
+        // than a vanilla JLabel — same Substance L&F rollover-erasure
+        // bug applies to incoming-invite chips when the user hovers
+        // the receiver-side card.
+        ChipLabel chip = new ChipLabel(text);
         chip.setFont(chip.getFont().deriveFont(active ? Font.BOLD : Font.PLAIN, (float) fontPt));
         chip.setForeground(active ? activeColor : new Color(0x55, 0x55, 0x55));
         Color borderColor = active ? activeColor : new Color(0x3a, 0x3a, 0x3a);
@@ -3812,6 +3940,73 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
                 int baselineY = (getHeight() + fm.getAscent() - fm.getDescent()) / 2;
                 String t = getText();
                 if (t != null) g2.drawString(t, 0, baselineY);
+            }
+            finally
+            {
+                g2.dispose();
+            }
+        }
+    }
+
+    /** Border-aware sibling of {@link NonEllipsisLabel} used for the
+     *  per-row style/build/region chips ([Main], [Pure], [Any Build],
+     *  [NA-W], etc.). Same rationale as NonEllipsisLabel — bypass the
+     *  Substance L&F text-rendering path — but here the motivation is
+     *  hover stability, not ellipsis suppression: under Substance, a
+     *  vanilla JLabel parented inside a panel that has a row-level
+     *  MouseListener fanout (PlayerRow's attachListenerRecursively
+     *  installs the same adapter on every descendant) repaints with a
+     *  blank foreground on hover state changes, making chip text
+     *  intermittently disappear while the cursor sits over a row.
+     *
+     *  <p>Painting the text directly in paintComponent skips
+     *  Substance's LabelUI entirely. The chip's CompoundBorder
+     *  (line + empty padding) still paints normally because
+     *  {@link JComponent#paintBorder(Graphics)} is independent of the
+     *  L&F text path. Honours horizontal-alignment + border insets so
+     *  centred and left-aligned chip variants both render correctly. */
+    private static final class ChipLabel extends JLabel
+    {
+        ChipLabel(String text)
+        {
+            super(text);
+        }
+
+        @Override
+        protected void paintComponent(Graphics g)
+        {
+            Graphics2D g2 = (Graphics2D) g.create();
+            try
+            {
+                g2.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING,
+                    RenderingHints.VALUE_TEXT_ANTIALIAS_ON);
+                g2.setColor(getForeground());
+                g2.setFont(getFont());
+                Insets in = getInsets();
+                FontMetrics fm = g2.getFontMetrics();
+                String t = getText();
+                if (t == null || t.isEmpty()) return;
+                int textW = fm.stringWidth(t);
+                // Centre vertically inside the inner content box (height
+                // minus border insets). Centre or left-align horizontally
+                // based on the JLabel's horizontalAlignment setting so
+                // makeActionChip-style centred chips and the default
+                // left-aligned chips both render at the right x.
+                int innerH = getHeight() - in.top - in.bottom;
+                int baselineY = in.top + ((innerH - fm.getHeight()) / 2) + fm.getAscent();
+                int x = in.left;
+                if (getHorizontalAlignment() == SwingConstants.CENTER)
+                {
+                    int innerW = getWidth() - in.left - in.right;
+                    x = in.left + Math.max(0, (innerW - textW) / 2);
+                }
+                else if (getHorizontalAlignment() == SwingConstants.RIGHT
+                    || getHorizontalAlignment() == SwingConstants.TRAILING)
+                {
+                    int innerW = getWidth() - in.left - in.right;
+                    x = in.left + Math.max(0, innerW - textW);
+                }
+                g2.drawString(t, x, baselineY);
             }
             finally
             {

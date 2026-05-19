@@ -39,9 +39,23 @@ public interface LobbyService
 
     /** Asks the server to add the local user to the lobby or update their
      *  advertised preferences. Calling again with different preferences is
-     *  treated as an update — the server is responsible for idempotency. */
+     *  treated as an update — the server is responsible for idempotency.
+     *
+     *  <p>{@code sortBucket} drives the per-row {@code rank_idx} +
+     *  {@code peak_rank_idx} the server emits on every {@code lobby/roster}
+     *  push for this viewer. Pass the canonical bucket key for the style
+     *  the user has prioritised in their picks ({@code "nh" / "veng" /
+     *  "multi" / "dmm"} or {@code "overall"} as a catch-all when no style
+     *  is selected). The slider matchmaking gate filters on the
+     *  {@code rank_idx} the server returns for this bucket, so it must
+     *  reflect the user's primary advertised style or the slider gates
+     *  the wrong rank.
+     *
+     *  <p>When the user toggles styles inside the lobby, callers should
+     *  re-invoke this method with an updated {@code sortBucket} so the
+     *  next roster push carries fresh per-bucket ranks. */
     void joinLobby(String region, Set<Style> styles, Set<BuildType> builds,
-                   int minDisplayRankIdx, int maxDisplayRankIdx);
+                   int minDisplayRankIdx, int maxDisplayRankIdx, String sortBucket);
 
     /** Asks the server to remove the local user from the lobby. Outstanding
      *  outgoing invites and active fight sessions are cancelled server-side. */

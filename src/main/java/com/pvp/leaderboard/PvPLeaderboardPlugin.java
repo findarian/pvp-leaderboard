@@ -182,8 +182,11 @@ public class PvPLeaderboardPlugin extends Plugin
 			// Resume the socket too — the player is past $connect's
 			// prerequisites (UUID stamped, MMR snapshot taken) so the
 			// server already has its trusted dict for SMURF_GUARD.
+			// Pass the active in-game name so the server's conn row
+			// pins to the current session instead of falling back to
+			// the alphabetical default from the MMR row's player_names.
 			String uuid = getClientUniqueId();
-			if (uuid != null) webSocketManager.connect(uuid);
+			if (uuid != null) webSocketManager.connect(uuid, self);
 			// Player is logged in already (plugin toggled off/on while
 			// in-game) — kick the gate so the dashboard shows real
 			// counts from the get-go instead of "Not yet refreshed".
@@ -204,6 +207,16 @@ public class PvPLeaderboardPlugin extends Plugin
 		}
 		clientToolbar.removeNavigation(navButton);
 		whitelistService.onLogout();
+		// Send `lobby/leave` BEFORE closing the socket so the server can
+		// remove our OSRS-LobbyMembers row + broadcast a fresh roster
+		// to peers. AWS API Gateway $disconnect doesn't currently
+		// cascade to leave_lobby (TODO p2-handler-lobby), so without
+		// this explicit leave the row sticks for the 30-min sliding
+		// TTL and other plugins keep seeing us as a "live" target.
+		// Best-effort: the service no-ops if no join was ever made,
+		// and any send-failure is swallowed so we still proceed to
+		// the hard socket teardown below.
+		try { webSocketLobbyService.leaveLobby(); } catch (Exception ignored) { /* hard shutdown */ }
 		// Hard-close the socket and forbid future reconnects — the
 		// plugin is going away. WebSocketManager.shutdown() is
 		// idempotent + safe to call without ever having connected.
@@ -266,8 +279,17 @@ public class PvPLeaderboardPlugin extends Plugin
 				// resolves the trusted MMR snapshot at $connect time
 				// (no need to wait for the player to be fully loaded
 				// in-game like the heartbeat path does).
+				//
+				// The local-player name might not have populated yet
+				// (LOGGED_IN can fire a few ticks before
+				// client.getLocalPlayer() resolves). We pass whatever
+				// we have right now (often null at this point); the
+				// pendingSelfRankLookupTicks branch below re-issues
+				// connect(uuid, name) once the name is known, and the
+				// new (uuid, name) check in WebSocketManager triggers
+				// a reconnect with the correct name.
 				String uuid = getClientUniqueId();
-				if (uuid != null) webSocketManager.connect(uuid);
+				if (uuid != null) webSocketManager.connect(uuid, getLocalPlayerName());
 			}
 			else if (gameStateChanged.getGameState() == GameState.LOGIN_SCREEN)
 			{
@@ -276,6 +298,13 @@ public class PvPLeaderboardPlugin extends Plugin
 				// Stop heartbeats
 				whitelistService.onLogout();
 				pendingHeartbeatStart = false;
+				// Send `lobby/leave` BEFORE the socket close so the
+				// server removes our OSRS-LobbyMembers row + broadcasts
+				// a fresh roster to peers. $disconnect alone doesn't
+				// cascade to leave_lobby today, so without this our row
+				// sticks for the 30-min sliding TTL and remote plugins
+				// keep us in their roster as a dead invite target.
+				try { webSocketLobbyService.leaveLobby(); } catch (Exception ignored) { /* clean logout best-effort */ }
 				// Close the socket cleanly so the server frees the
 				// OSRS-Connections row + cascades any outstanding
 				// invites/sessions. CLOSE_GOING_AWAY tells the server
@@ -329,7 +358,19 @@ public class PvPLeaderboardPlugin extends Plugin
 						if (self != null && !self.trim().isEmpty())
 						{
 							log.debug("[Plugin] Init complete for: {}", self);
-							
+
+							// Re-issue connect(uuid, name) now that the
+							// local player name has resolved. WebSocketManager
+							// no-ops if the (uuid, name) tuple matches the
+							// current connection; otherwise it tears down
+							// and reopens with the correct name in the
+							// query string. This is what pins the server's
+							// conn row + lobby member row to the active
+							// in-game character instead of the alphabetical
+							// fallback.
+							String uuid = getClientUniqueId();
+							if (uuid != null) webSocketManager.connect(uuid, self);
+
 							// Force refresh DMM worlds on every login so they're cached before any fights occur
 							// This prevents a race condition where the first DMM fight would be
 							// incorrectly classified because the async fetch hadn't completed yet

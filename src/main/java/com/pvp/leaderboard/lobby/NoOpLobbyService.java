@@ -26,7 +26,8 @@ public final class NoOpLobbyService implements LobbyService
     @Override public void stop() { /* nothing to stop */ }
 
     @Override public void joinLobby(String region, Set<Style> styles, Set<BuildType> builds,
-                                    int minDisplayRankIdx, int maxDisplayRankIdx) { /* no-op */ }
+                                    int minDisplayRankIdx, int maxDisplayRankIdx,
+                                    String sortBucket) { /* no-op */ }
     @Override public void leaveLobby() { /* no-op */ }
     @Override public void sendInvite(LobbyMember opponent, Style style, BuildType build, String location) { /* no-op */ }
     @Override public void cancelInvite(LobbyMember opponent) { /* no-op */ }
