@@ -304,7 +304,32 @@ public final class WebSocketLobbyService implements LobbyService
 
     private void handleBlockListSnapshot(JsonObject data)
     {
-        Set<String> ids = parseStringArray(data, "blocked_player_ids");
+        // Backend pushes data={"blocked": [{player_id, name}, ...]} per
+        // get_block_list (backend/core/lobby.py). Older builds emitted a
+        // flat string array under "blocked_player_ids" — accept either
+        // shape so a partial deploy doesn't drop blocks silently.
+        Set<String> ids = new HashSet<>();
+        if (data != null && data.has("blocked") && data.get("blocked").isJsonArray())
+        {
+            for (JsonElement el : data.getAsJsonArray("blocked"))
+            {
+                if (el == null || el.isJsonNull()) continue;
+                if (el.isJsonObject())
+                {
+                    String pid = optString(el.getAsJsonObject(), "player_id");
+                    if (!pid.isEmpty()) ids.add(pid);
+                }
+                else if (el.isJsonPrimitive() && el.getAsJsonPrimitive().isString())
+                {
+                    String pid = el.getAsString();
+                    if (!pid.isEmpty()) ids.add(pid);
+                }
+            }
+        }
+        if (ids.isEmpty())
+        {
+            ids.addAll(parseStringArray(data, "blocked_player_ids"));
+        }
         blockedPlayerIds.clear();
         blockedPlayerIds.addAll(ids);
         LobbyEventListener l = listener;
@@ -517,9 +542,16 @@ public final class WebSocketLobbyService implements LobbyService
 
     private LobbyMember parseMember(JsonObject m)
     {
-        String playerId = optString(m, "player_id");
-        if (playerId.isEmpty()) return null;
         String name = optString(m, "name");
+        String playerId = optString(m, "player_id");
+        if (playerId.isEmpty() && !name.isEmpty())
+        {
+            // Belt-and-braces: roster rows should always carry
+            // player_id post scrub, but derive from display name so
+            // a partial backend deploy doesn't drop every row.
+            playerId = name.trim().toLowerCase();
+        }
+        if (playerId.isEmpty()) return null;
         Set<Style> styles = parseStyleSet(m, "styles");
         Set<BuildType> builds = parseBuildSet(m, "builds");
         int rankIdx = (int) optLong(m, "rank_idx");

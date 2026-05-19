@@ -1662,6 +1662,7 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
     private void onFightClicked(LobbyMember opponent)
     {
         if (opponent == null || opponent.playerId == null) return;
+        if (!fightAllowed(opponent)) return;
         if (outgoingInvitesByOpponent.containsKey(opponent.playerId)) return; // already invited; chip should have been [Invited]
         scrollRosterToTop();
         showFightSetup(buildPickStyleView(opponent));
@@ -2135,16 +2136,18 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
 
     /** {@inheritDoc}
      *
-     *  <p>Stages the snapshot into {@link #pendingRoster}; the visible
-     *  roster only updates on the next {@link #rosterRefreshTicker} tick
-     *  (bounded by {@link #ROSTER_REFRESH_INTERVAL_MS}) so rows don't
-     *  shift under the user's cursor mid-click. Defensive-copies the
+     *  <p>Commits the server snapshot immediately so another player's
+     *  card appears as soon as {@code lobby/roster} lands — the 60-s
+     *  {@link #rosterRefreshTicker} is only a backstop for any future
+     *  code path that stages into {@link #pendingRoster} without
+     *  calling {@link #applyPendingRosterUpdate()}. Defensive-copies the
      *  list so the caller can keep mutating its own collection. */
     @Override
     public void onRosterSnapshot(List<LobbyMember> snapshot)
     {
         if (snapshot == null) return;
         this.pendingRoster = new ArrayList<>(snapshot);
+        applyPendingRosterUpdate();
     }
 
     @Override
@@ -2916,7 +2919,10 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         for (LobbyMember p : roster)
         {
             // No region filter — lobby shows everyone regardless of region.
-            if (matchesStyleFilter(p) && rankInRange(p))
+            // Style/build overlap only greys the [Fight] chip (see
+            // fightAllowed); rank outside the slider hides the row
+            // entirely (server also filters, this is defense-in-depth).
+            if (rankInRange(p))
             {
                 visible.add(p);
             }
@@ -2936,7 +2942,9 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
                 this::routeOpenProfile,
                 this::onFightClicked,
                 opp -> cancelOutgoingInvite(opp.playerId, true),
-                m -> m != null && m.playerId != null && blockedPlayerIds.contains(m.playerId)));
+                m -> m != null && m.playerId != null && blockedPlayerIds.contains(m.playerId),
+                this::fightAllowed,
+                false));
             rosterContainer.add(Box.createVerticalStrut(2));
         }
 
@@ -2979,15 +2987,36 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         rosterContainer.repaint();
     }
 
-    private boolean matchesStyleFilter(LobbyMember p)
+    /** {@code true} when the local user's advertised styles/builds overlap
+     *  the opponent's — drives whether [Fight] is clickable vs greyed.
+     *  Rows stay visible either way; only rank-out-of-range hides a card. */
+    private boolean fightAllowed(LobbyMember p)
     {
-        for (Style s : p.styles) if (selectedStyles.contains(s)) return true;
+        if (p == null) return false;
+        boolean styleOverlap = false;
+        for (Style s : p.styles)
+        {
+            if (selectedStyles.contains(s))
+            {
+                styleOverlap = true;
+                break;
+            }
+        }
+        if (!styleOverlap) return false;
+        for (BuildType b : p.builds)
+        {
+            if (selectedBuildTypes.contains(b)) return true;
+        }
         return false;
     }
 
     private boolean rankInRange(LobbyMember p)
     {
-        return p.peakRankIdx >= rankMinIdx && p.peakRankIdx <= rankMaxIdx;
+        int idx = p.peakRankIdx;
+        // Unknown / sentinel rank — show the row rather than hiding
+        // everyone when the server omits rank_idx on a roster push.
+        if (idx < 0 || idx >= RANK_LABELS.length) return true;
+        return idx >= rankMinIdx && idx <= rankMaxIdx;
     }
 
     // -------------------- Player row ([Fight] or [Lookup], no inline picker) --------------------
@@ -3046,6 +3075,10 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
          *  block changes immediately (block listener overrides call
          *  renderRoster directly). */
         private final boolean blocked;
+        /** Re-queried at construction — false when style/build
+         *  advertisement doesn't overlap the local user's gate picks;
+         *  [Fight] renders greyed and is a no-op. */
+        private final boolean fightEnabled;
         /** {@code true} for the "Your profile displayed to others"
          *  row above the slider — suppresses the right-side action
          *  chip (no Fight / no Lookup chip — clicking the row body
@@ -3069,7 +3102,7 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
                   Predicate<LobbyMember> isBlocked)
         {
             this(p, fontBase, isInvited, getOutgoing, onOpenProfile, onFight,
-                onCancelInvite, isBlocked, false);
+                onCancelInvite, isBlocked, m -> true, false);
         }
 
         PlayerRow(LobbyMember p, int fontBase,
@@ -3081,6 +3114,20 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
                   Predicate<LobbyMember> isBlocked,
                   boolean selfPreview)
         {
+            this(p, fontBase, isInvited, getOutgoing, onOpenProfile, onFight,
+                onCancelInvite, isBlocked, m -> true, selfPreview);
+        }
+
+        PlayerRow(LobbyMember p, int fontBase,
+                  Predicate<LobbyMember> isInvited,
+                  Function<LobbyMember, OutgoingInvite> getOutgoing,
+                  Consumer<String> onOpenProfile,
+                  FightStartCallback onFight,
+                  InviteCancelCallback onCancelInvite,
+                  Predicate<LobbyMember> isBlocked,
+                  Predicate<LobbyMember> fightEnabled,
+                  boolean selfPreview)
+        {
             this.p = p;
             this.fontBase = fontBase;
             this.isInvited = isInvited;
@@ -3089,6 +3136,7 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
             this.onFight = onFight;
             this.onCancelInvite = onCancelInvite;
             this.blocked = isBlocked != null && isBlocked.test(p);
+            this.fightEnabled = fightEnabled == null || fightEnabled.test(p);
             this.selfPreview = selfPreview;
             setLayout(new BorderLayout());
             setBackground(new Color(0x2b, 0x2b, 0x2b));
@@ -3195,6 +3243,14 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
                     () -> { if (onOpenProfile != null) onOpenProfile.accept(p.name); });
                 chip.setName(ROW_ACTION_CHIP_NAME);
                 chip.setToolTipText("Open " + p.name + "'s profile in Player Lookup");
+                return chip;
+            }
+            if (!fightEnabled)
+            {
+                JLabel chip = makeActionChip("Fight", BLOCKED_FG, BLOCKED_BORDER, () -> {});
+                chip.setName(ROW_ACTION_CHIP_NAME);
+                chip.setCursor(Cursor.getDefaultCursor());
+                chip.setToolTipText("No matching style/build — widen your picks via Reset Options");
                 return chip;
             }
             JLabel chip = makeActionChip("Fight", Color.WHITE, CHIP_BORDER_COLOR,
