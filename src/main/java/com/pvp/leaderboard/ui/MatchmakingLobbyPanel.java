@@ -296,6 +296,32 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
      *  to commit the latest {@link #pendingRoster} snapshot. */
     private Timer rosterRefreshTicker;
 
+    /** Safety-net re-join cadence. While the panel is on
+     *  {@link #CARD_LOBBY} and the user is logged in, the panel issues
+     *  a fresh {@code service.joinLobby(...)} on this interval to
+     *  defend against silent fall-out from the server-side membership
+     *  set: 30-min TTL sweeps that fire mid-session, fight-end cleanup
+     *  that doesn't re-add the row, race conditions with reconnect
+     *  replay, etc. The server's {@code lobby/join} handler is
+     *  idempotent — a duplicate join overwrites the
+     *  {@code OSRS-LobbyMembers} row with a fresh TTL and doesn't
+     *  re-broadcast a redundant roster.
+     *
+     *  <p>60 s is the goldilocks: short enough that any silent
+     *  fall-out recovers within a minute (matching the user-perceived
+     *  cadence of "I see them, they don't see me" complaints from
+     *  QA), long enough that the wire traffic is negligible — one
+     *  frame per minute per logged-in lobby user. */
+    private static final long LOBBY_REJOIN_INTERVAL_MS = 60_000L;
+
+    /** Drives the safety-net re-join — see {@link #LOBBY_REJOIN_INTERVAL_MS}.
+     *  Started in the panel constructor; the tick handler
+     *  ({@link #forceRejoinIfEligible()}) is a no-op when the panel
+     *  isn't on {@link #CARD_LOBBY}, when the user isn't logged in,
+     *  when a fight is in progress, or when gate picks aren't
+     *  lobby-ready. */
+    private Timer lobbyRejoinTicker;
+
     /** PlayerRow → MatchmakingLobbyPanel handoff for "user clicked [Fight] on
      *  this opponent". Triggers the full-screen fight-setup card. */
     @FunctionalInterface
@@ -577,6 +603,15 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         rosterRefreshTicker = new Timer((int) ROSTER_REFRESH_INTERVAL_MS, e -> applyPendingRosterUpdate());
         rosterRefreshTicker.setRepeats(true);
         rosterRefreshTicker.start();
+
+        // Safety-net re-join — see LOBBY_REJOIN_INTERVAL_MS doc. The
+        // handler self-gates on lobby-card / logged-in / gate-ready
+        // so we can fire-and-forget; no start/stop dance around card
+        // transitions. Always-on is cheaper than wiring an extra
+        // start/stop call into every show(CARD_*) site.
+        lobbyRejoinTicker = new Timer((int) LOBBY_REJOIN_INTERVAL_MS, e -> forceRejoinIfEligible());
+        lobbyRejoinTicker.setRepeats(true);
+        lobbyRejoinTicker.start();
 
         reconnectBannerTicker = new Timer(1000, e -> refreshReconnectBanner());
         reconnectBannerTicker.setRepeats(true);
@@ -1824,7 +1859,14 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
      *  running server-side; the panel just drops its local state and
      *  ignores the late {@link #onFightConfirmedByPeer onFightConfirmedByPeer}
      *  / {@link #onMatchFound onMatchFound} push since
-     *  {@code currentFightSession} is already null. */
+     *  {@code currentFightSession} is already null.
+     *
+     *  <p>Re-issues {@code service.joinLobby(...)} on exit: the server
+     *  removed both players' {@code OSRS-LobbyMembers} rows when the
+     *  fight was accepted, and there is no implicit re-add — without
+     *  this call the user is silently ghost-joined (panel shows
+     *  CARD_LOBBY, server has no row → peers can't see them, invites
+     *  bounce with {@code PEER_NOT_IN_LOBBY}). */
     private void exitFightSetup()
     {
         if (currentFightSession != null)
@@ -1837,6 +1879,84 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         }
         rootCards.show(rootCardHost, CARD_LOBBY);
         renderRoster();
+        forceRejoinIfEligible();
+    }
+
+    /** Re-issues {@code service.joinLobby(...)} using the panel's
+     *  current gate state, provided it's safe to do so. Self-gates on:
+     *  <ul>
+     *    <li>panel is showing {@link #CARD_LOBBY} (not gate, not fight)</li>
+     *    <li>{@link #currentFightSession} is null</li>
+     *    <li>{@link #hasJoinedLobby} sticky flag is set</li>
+     *    <li>{@link LobbyJoinGate#isLoggedIn()} is true</li>
+     *    <li>{@link #selectedStyles} + {@link #selectedBuildTypes} are non-empty</li>
+     *    <li>every selected style has a known + unlocked match count
+     *        (otherwise the server's {@code SMURF_GUARD} v2 would
+     *        reject the join with a noisy {@code error/lobby} push)</li>
+     *  </ul>
+     *
+     *  <p>Three call sites:
+     *  <ol>
+     *    <li>{@link #exitFightSetup()} — user / 30-s timer exits the
+     *        fight view; the server has removed the lobby row and the
+     *        user needs to be re-added.</li>
+     *    <li>{@link #onFightSessionExpired(String)} — confirm window
+     *        elapsed without both confirms; same row-removal situation
+     *        as above.</li>
+     *    <li>{@link #lobbyRejoinTicker} 60-s tick — safety-net against
+     *        any silent server-side fall-out (TTL sweeps, transient
+     *        connection-row resets, race conditions, etc.).</li>
+     *  </ol>
+     *
+     *  <p>The server's {@code lobby/join} handler is idempotent —
+     *  duplicate joins overwrite the existing
+     *  {@code OSRS-LobbyMembers} row with a fresh TTL without
+     *  re-broadcasting a redundant roster, so calling this on every
+     *  60-s tick is essentially free wire traffic. */
+    private void forceRejoinIfEligible()
+    {
+        if (currentFightSession != null) return;
+        if (!hasJoinedLobby) return;
+        if (!joinGate.isLoggedIn()) return;
+        if (selectedStyles.isEmpty() || selectedBuildTypes.isEmpty()) return;
+        // Match counts must be loaded + unlocked for every selected
+        // style, otherwise the server's SMURF_GUARD v2 will reject
+        // the join and the user sees an error banner instead of a
+        // clean re-join. The gate listener fires another tick once
+        // counts land, at which point the next 60-s ticker run picks
+        // this up — graceful degradation rather than hard failure.
+        Map<Style, Integer> counts = joinGate.getMatchCounts();
+        for (Style s : selectedStyles)
+        {
+            Integer c = counts.get(s);
+            if (c == null || !LobbyJoinGate.isUnlocked(c)) return;
+        }
+        // Defence-in-depth: skip if the panel is on a non-lobby card.
+        // The fight / session-expired call sites have already
+        // switched to CARD_LOBBY before calling us, and the 60-s
+        // ticker runs whether the panel is visible or not — but a
+        // user who hit Reset Options mid-session would have flipped
+        // back to CARD_GATE and we don't want to silently re-join
+        // them. CardLayout updates visibility synchronously on the
+        // EDT, so this read sees the live state.
+        if (!isCurrentlyOnLobbyCard()) return;
+        service.joinLobby(selfRegion, selectedStyles, selectedBuildTypes,
+            rankMinIdx, rankMaxIdx, pickSortBucket());
+    }
+
+    /** Walks {@link #rootCardHost}'s children to find the one with
+     *  {@code isVisible()==true} and asks whether its name matches
+     *  {@link #CARD_LOBBY}. Cheap (3 components) and matches the
+     *  pattern documented at the {@code currentVisibleCard()}
+     *  comment elsewhere in this file. */
+    private boolean isCurrentlyOnLobbyCard()
+    {
+        if (rootCardHost == null) return false;
+        for (java.awt.Component c : rootCardHost.getComponents())
+        {
+            if (c.isVisible() && CARD_LOBBY.equals(c.getName())) return true;
+        }
+        return false;
     }
 
     /** Pick a fight style for {@code opponent}. Same visual treatment as the
@@ -2456,6 +2576,12 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         currentFightSession = null;
         rootCards.show(rootCardHost, CARD_LOBBY);
         renderRoster();
+        // Server removed both lobby rows when the fight was accepted.
+        // The 30-s confirm window just elapsed without resolution; both
+        // players need to be re-added to the lobby or they're ghost-joined
+        // — see the QA report on the "Confirm window expired" banner
+        // followed by PEER_NOT_IN_LOBBY on the next invite attempt.
+        forceRejoinIfEligible();
     }
 
     @Override

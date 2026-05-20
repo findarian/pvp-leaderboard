@@ -110,6 +110,20 @@ public final class WebSocketLobbyService implements LobbyService
      *  on every reconnect. {@code null} until the first {@link #joinLobby}. */
     private volatile JoinArgs lastJoinArgs;
 
+    /** Buffered {@code fight_session_id} awaiting a healthy socket so its
+     *  {@code lobby/confirm} can finally land. Populated by
+     *  {@link #confirmFight()} when the socket is closed at send time
+     *  (e.g. the user clicked Confirm Fight during the 1-3 s window
+     *  between {@code onClose} and the next {@code onOpen}); flushed
+     *  by {@link #flushPendingConfirm()} from the connect listener and
+     *  cleared by {@link #handleFightProposed}, {@link #handleMatchFound},
+     *  and {@link #handleSessionExpired} when the session it refers to
+     *  is no longer current. {@code volatile} since
+     *  {@code WebSocketManager} invokes the connect listener on the
+     *  OkHttp dispatcher thread while {@code confirmFight()} is called
+     *  from the Swing EDT. */
+    private volatile String pendingConfirmFightSessionId;
+
     private volatile LobbyEventListener listener;
     private volatile boolean started = false;
 
@@ -145,7 +159,26 @@ public final class WebSocketLobbyService implements LobbyService
         bus.register("lobby/match_found",             this::handleMatchFound);
         bus.register("lobby/session_expired",         this::handleSessionExpired);
         bus.register("error/lobby",                   this::handleError);
-        socket.addConnectListener(this::replayJoinOnReconnect);
+        // Single connect listener — runs both reconnect-resilience
+        // hooks in deterministic order: re-issue lobby/join first
+        // (restores server-side presence) then flush any
+        // buffered-during-reconnect lobby/confirm so the buffered
+        // confirm lands against a current OSRS-Connections row.
+        // Consolidated into one Runnable rather than two
+        // addConnectListener calls so existing test helpers that
+        // assert exactly one listener registration continue to work.
+        socket.addConnectListener(this::onSocketReconnected);
+    }
+
+    /** Combined connect-listener: replays the last {@code lobby/join}
+     *  then flushes any buffered {@code lobby/confirm}. See the field
+     *  docs for {@link #lastJoinArgs} and
+     *  {@link #pendingConfirmFightSessionId} for the why. Runs on
+     *  OkHttp's dispatcher thread. */
+    private void onSocketReconnected()
+    {
+        replayJoinOnReconnect();
+        flushPendingConfirm();
     }
 
     @Override
@@ -193,9 +226,21 @@ public final class WebSocketLobbyService implements LobbyService
     }
 
     @Override
-    public void leaveLobby()
+    public void leaveLobby(boolean preserveReplayState)
     {
-        lastJoinArgs = null;
+        // Two distinct call sites with different semantics:
+        //   - "Reset Options" / plugin shutdown -> preserveReplayState=false:
+        //     the user genuinely wants to leave; nuking lastJoinArgs
+        //     ensures a future reconnect doesn't silently re-join them.
+        //   - LOGIN_SCREEN transition -> preserveReplayState=true:
+        //     the socket is closing because the user dropped to the
+        //     login screen, but they're about to log back in. The
+        //     server-side row must be removed (so peers stop seeing a
+        //     dead invite target — $disconnect doesn't cascade to
+        //     leave_lobby today) but the next $connect's onOpen needs
+        //     to find lastJoinArgs populated so replayJoinOnReconnect
+        //     re-issues lobby/join automatically.
+        if (!preserveReplayState) lastJoinArgs = null;
         socket.send("lobby/leave", new JsonObject());
     }
 
@@ -255,7 +300,59 @@ public final class WebSocketLobbyService implements LobbyService
         }
         JsonObject d = new JsonObject();
         d.addProperty("fight_session_id", sid);
-        socket.send("lobby/confirm", d);
+        boolean sent = socket.send("lobby/confirm", d);
+        if (sent)
+        {
+            // Successful send wins over any stale buffer entry — if the
+            // user double-clicked Confirm during a brief reconnect,
+            // only the surviving send carries forward.
+            pendingConfirmFightSessionId = null;
+        }
+        else
+        {
+            // Socket was closed at send time (the WebSocketManager
+            // backoff ladder runs 1-2-4-8 s; if Confirm is clicked
+            // during that window the frame is silently dropped today,
+            // which surfaced as the "30-second confirm window expired"
+            // QA report). Buffer the session id so the connect
+            // listener can flush it on the next onOpen — bounded by
+            // the server's 30-s confirm window via
+            // handleSessionExpired clearing the buffer.
+            pendingConfirmFightSessionId = sid;
+            log.debug("confirmFight() buffered (socket closed) sid={}", sid);
+        }
+    }
+
+    /** Connect-listener callback: drains any {@link
+     *  #pendingConfirmFightSessionId} buffered while the socket was
+     *  closed. Runs on OkHttp's dispatcher thread alongside
+     *  {@link #replayJoinOnReconnect()}; safe because the buffer is
+     *  volatile and the failure mode (re-buffer + retry on next open)
+     *  is idempotent. */
+    private void flushPendingConfirm()
+    {
+        String sid = pendingConfirmFightSessionId;
+        if (sid == null) return;
+        // Drop the buffer first to avoid re-entry if the send below
+        // races a fresh confirmFight() call (e.g. user clicked Confirm
+        // again during the flush). The buffer is repopulated below if
+        // the send fails — single-writer semantics.
+        pendingConfirmFightSessionId = null;
+        JsonObject d = new JsonObject();
+        d.addProperty("fight_session_id", sid);
+        if (socket.send("lobby/confirm", d))
+        {
+            log.debug("WebSocketLobbyService: flushed buffered confirm sid={}", sid);
+        }
+        else
+        {
+            // The socket closed again between onOpen firing and our
+            // send. Re-buffer so the next open retries. Bounded by
+            // the 30-s server confirm window — handleSessionExpired
+            // clears the buffer once the server gives up.
+            pendingConfirmFightSessionId = sid;
+            log.debug("WebSocketLobbyService: re-buffered confirm sid={} (socket closed mid-flush)", sid);
+        }
     }
 
     @Override
@@ -611,6 +708,15 @@ public final class WebSocketLobbyService implements LobbyService
     {
         String sid = optString(data, "fight_session_id");
         if (sid.isEmpty()) return;
+        // A new fight is being proposed — any confirm buffered against
+        // a *previous* (now-defunct) session is stale. Drop it so a
+        // belated flush doesn't try to confirm a session the server
+        // has already torn down.
+        if (pendingConfirmFightSessionId != null
+            && !pendingConfirmFightSessionId.equals(sid))
+        {
+            pendingConfirmFightSessionId = null;
+        }
         currentFightSessionId = sid;
         Style style = parseStyle(optString(data, "style"));
         BuildType build = parseBuild(optString(data, "build"));
@@ -648,8 +754,11 @@ public final class WebSocketLobbyService implements LobbyService
         if (opponent == null) return;
         // Server has already deleted both LobbyMembers rows + the
         // session at this point — the lobby state is consumed, clear
-        // our local session-id cache.
+        // our local session-id cache. Also drop any buffered confirm
+        // for this session: the match landed, so a late flush would
+        // be a no-op at best, an error/lobby at worst.
         currentFightSessionId = null;
+        if (sid.equals(pendingConfirmFightSessionId)) pendingConfirmFightSessionId = null;
         MatchInfo match = new MatchInfo(sid, opponent, style, build, location, world, meetingPlace);
         LobbyEventListener l = listener;
         if (l == null) return;
@@ -661,6 +770,10 @@ public final class WebSocketLobbyService implements LobbyService
         String sid = optString(data, "fight_session_id");
         if (sid.isEmpty()) return;
         if (sid.equals(currentFightSessionId)) currentFightSessionId = null;
+        // 30-s confirm window elapsed — any buffered confirm against
+        // this session is moot, drop it so a future reconnect doesn't
+        // ship a confirm for a session that no longer exists.
+        if (sid.equals(pendingConfirmFightSessionId)) pendingConfirmFightSessionId = null;
         LobbyEventListener l = listener;
         if (l == null) return;
         SwingUtilities.invokeLater(() -> l.onFightSessionExpired(sid));

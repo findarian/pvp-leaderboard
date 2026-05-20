@@ -58,8 +58,29 @@ public interface LobbyService
                    int minDisplayRankIdx, int maxDisplayRankIdx, String sortBucket);
 
     /** Asks the server to remove the local user from the lobby. Outstanding
-     *  outgoing invites and active fight sessions are cancelled server-side. */
-    void leaveLobby();
+     *  outgoing invites and active fight sessions are cancelled server-side.
+     *
+     *  <p>Equivalent to {@link #leaveLobby(boolean) leaveLobby(false)} — a
+     *  permanent leave that clears the cached join args so a subsequent
+     *  reconnect does not silently re-join the user. */
+    default void leaveLobby() { leaveLobby(false); }
+
+    /** Asks the server to remove the local user from the lobby.
+     *
+     *  <p>When {@code preserveReplayState} is {@code true}, the service
+     *  keeps the last {@code joinLobby(...)} args around so that the
+     *  next socket {@code onOpen} re-issues them automatically. This is
+     *  the path the plugin uses for transient {@code LOGIN_SCREEN}
+     *  disconnects: the server-side row must be removed (so peers stop
+     *  seeing a dead invite target) but the user is going to log back
+     *  in moments later and should be auto-re-joined.
+     *
+     *  <p>When {@code preserveReplayState} is {@code false}, the cached
+     *  args are cleared and the user remains out of the lobby across
+     *  reconnects until something explicitly calls {@link #joinLobby}
+     *  again. This is the path for "Reset Options" and plugin
+     *  shutdown. */
+    void leaveLobby(boolean preserveReplayState);
 
     /** Sends an invite to {@code opponent} with the picked {@code style},
      *  {@code build} (which of the opponent's advertised builds you want to

@@ -341,7 +341,18 @@ public class PvPLeaderboardPlugin extends Plugin
 				// cascade to leave_lobby today, so without this our row
 				// sticks for the 30-min sliding TTL and remote plugins
 				// keep us in their roster as a dead invite target.
-				try { webSocketLobbyService.leaveLobby(); } catch (Exception ignored) { /* clean logout best-effort */ }
+				//
+				// preserveReplayState=true: the user is about to log
+				// back in. The reconnect-on-LOGGED_IN path runs
+				// replayJoinOnReconnect() from WebSocketLobbyService's
+				// connect listener, which needs lastJoinArgs to be
+				// non-null to actually re-issue lobby/join. Clearing it
+				// here (the pre-Nov 2026 behaviour) caused the silent
+				// "ghost-joined" state where the panel shows CARD_LOBBY
+				// but the server has no OSRS-LobbyMembers row, surfacing
+				// as the "we can't see each other / PEER_NOT_IN_LOBBY"
+				// QA report.
+				try { webSocketLobbyService.leaveLobby(true); } catch (Exception ignored) { /* clean logout best-effort */ }
 				// Close the socket cleanly so the server frees the
 				// OSRS-Connections row + cascades any outstanding
 				// invites/sessions. CLOSE_GOING_AWAY tells the server
