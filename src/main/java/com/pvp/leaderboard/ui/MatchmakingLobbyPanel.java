@@ -401,6 +401,20 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
      *  canonical player ids, and outbound cmds key by canonical id. */
     private Supplier<String> selfNameSupplier;
 
+    /** Eager game-state signal — returns true the moment
+     *  {@code GameState.LOGGED_IN} fires, before the 10-tick
+     *  name-resolve delay that gates {@link LobbyJoinGate#isLoggedIn()}.
+     *  Used by {@link #applyLoginGateState()} to distinguish "truly
+     *  logged out" (show "Please log into the game") from "logged in
+     *  but waiting for player name + match counts to resolve" (show
+     *  "Loading\u2026") so the brief startup window doesn't flash a
+     *  stale logged-out prompt to a user who's already in-game.
+     *
+     *  <p>Optional — when null, the panel falls back to the legacy
+     *  two-phase view (gate-or-please-login) so test fixtures that
+     *  don't wire it still render the same as before. */
+    private java.util.function.BooleanSupplier isGameLoggedInSupplier;
+
     /** Container + row references for the self-profile preview shown
      *  above the rank slider. {@link #selfPreviewContainer} hosts the
      *  caption + the self {@link PlayerRow}; {@link #selfPreviewRow}
@@ -897,9 +911,45 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
     private void applyLoginGateState()
     {
         if (gateContent == null || gateLoggedOutNotice == null) return;
-        boolean loggedIn = joinGate.isLoggedIn();
-        gateLoggedOutNotice.setVisible(!loggedIn);
-        gateContent.setVisible(loggedIn);
+        boolean gateReady = joinGate.isLoggedIn();
+        // Eager game-state probe — true the instant
+        // GameState.LOGGED_IN fires, before the 10-tick name-resolve
+        // delay that gates LobbyJoinGate.onLogin(). We use this to
+        // pick which logged-out copy to show: a true logged-out user
+        // (game state != LOGGED_IN) sees the "Please log into the
+        // game" prompt, while a freshly-logged-in user inside the
+        // 10-tick startup window sees "Loading…" instead — the gate
+        // listener fires again once name + counts resolve and flips
+        // gateReady to true, hiding the notice entirely.
+        // Defaults to true when the supplier is unwired (test
+        // fixtures, gateless construction paths) so the legacy
+        // two-phase notice still works for those callers.
+        boolean gameLoggedIn = isGameLoggedInSupplier == null
+            || isGameLoggedInSupplier.getAsBoolean();
+
+        if (gateReady)
+        {
+            gateLoggedOutNotice.setVisible(false);
+            gateContent.setVisible(true);
+        }
+        else if (gameLoggedIn)
+        {
+            // Logged into OSRS but plugin still resolving identity +
+            // smurf-guard counts. Show a low-key "Loading…" so the
+            // user knows the panel saw their login and isn't broken.
+            // Same hand-broken <br> markup as the logged-out copy
+            // (see field doc) to dodge Substance's HTML-wrap clip bug.
+            gateLoggedOutNotice.setText("<html>Loading\u2026</html>");
+            gateLoggedOutNotice.setVisible(true);
+            gateContent.setVisible(false);
+        }
+        else
+        {
+            gateLoggedOutNotice.setText(
+                "<html>Please log into the game<br>to set up matchmaking.</html>");
+            gateLoggedOutNotice.setVisible(true);
+            gateContent.setVisible(false);
+        }
         // BoxLayout doesn't auto-revalidate on child visibility changes
         // — force the parent gate panel to recompute its layout so the
         // viewport collapses around whichever child is visible.
@@ -910,7 +960,7 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
             parent.repaint();
         }
 
-        if (!loggedIn)
+        if (!gateReady)
         {
             // Tear down any in-flight fight session so a relogin doesn't
             // resume into a stale CARD_FIGHT — the server already
@@ -1521,6 +1571,35 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
     {
         this.selfNameSupplier = nameSup;
         renderSelfPreview();
+    }
+
+    /** Wires the eager "is the local player in {@code GameState.LOGGED_IN}
+     *  right now" signal — see {@link #isGameLoggedInSupplier} doc for
+     *  why this is separate from {@link LobbyJoinGate#isLoggedIn()}.
+     *  Triggers an immediate {@link #applyLoginGateState()} so the
+     *  notice flips to "Loading\u2026" the instant the supplier
+     *  reports true (which it might already, if the user opened the
+     *  panel post-login). */
+    public void setIsGameLoggedInSupplier(java.util.function.BooleanSupplier supplier)
+    {
+        this.isGameLoggedInSupplier = supplier;
+        applyLoginGateState();
+    }
+
+    /** Public re-entry point for {@link #applyLoginGateState()} so the
+     *  hosting plugin / dashboard can re-render the gate notice the
+     *  instant a {@code GameStateChanged} event fires — the gate
+     *  listener wired in this panel only fires after
+     *  {@link LobbyJoinGate#onLogin()}, which is delayed 10 ticks for
+     *  player-name resolve, so without an external poke from
+     *  {@code GameState.LOGGED_IN} the "Loading\u2026" copy would
+     *  never paint (the listener-driven re-render would already see
+     *  {@code gateReady=true} and skip past it). EDT-only. Safe to
+     *  call before {@link #setIsGameLoggedInSupplier} has wired the
+     *  supplier. */
+    public void refreshLoginGateView()
+    {
+        applyLoginGateState();
     }
 
     /** Rebuilds the contents of {@link #selfPreviewContainer} —
@@ -2757,10 +2836,16 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
     {
         JPanel bar = new JPanel();
         bar.setLayout(new BoxLayout(bar, BoxLayout.Y_AXIS));
-        // 96px = ~4 lines of 15pt + button. Build line + style line (which
-        // can wrap to 2 lines with all 4 styles) + the Reset Options button
-        // row. Real height auto-shrinks.
-        bar.setMaximumSize(new Dimension(Integer.MAX_VALUE, 96));
+        // 108px = ~4 lines of 15pt + button row at its natural height.
+        // Build line + style line (which can wrap to 2 lines with all 4
+        // styles) + the Reset Options button row. Bumped from 96 to 108
+        // so the button row gets its preferred height (~32px at 15pt bold
+        // + Substance border insets) instead of being squeezed to 28px,
+        // which Substance's ButtonUI was responding to by ellipsifying
+        // the label horizontally as well — visible to users as
+        // "Reset Opti\u2026" truncation. Real height auto-shrinks when
+        // the style line collapses to a single row.
+        bar.setMaximumSize(new Dimension(Integer.MAX_VALUE, 108));
         bar.setBorder(BorderFactory.createEmptyBorder(0, 2, 0, 2));
 
         // "Build: X / Style: Y, Z" rendered as one HTML-wrapped JLabel so the
@@ -2779,7 +2864,6 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         buttonRow.setLayout(new BoxLayout(buttonRow, BoxLayout.X_AXIS));
         buttonRow.setOpaque(false);
         buttonRow.setAlignmentX(LEFT_ALIGNMENT);
-        buttonRow.setMaximumSize(new Dimension(Integer.MAX_VALUE, 28));
         buttonRow.add(Box.createHorizontalGlue());
         JButton reset = new JButton("Reset Options");
         reset.setMargin(new Insets(2, 8, 2, 8));
@@ -2793,6 +2877,23 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
             resetGateOptions();
             rootCards.show(rootCardHost, CARD_GATE);
         });
+        // Lock the button to its natural preferred size so neither the
+        // outer BoxLayout (which would otherwise shrink it to fit a
+        // squeezed cross-axis) nor Substance's ButtonUI (which falls
+        // back to ellipsis when allocated less than preferred width)
+        // can clip "Reset Options" to "Reset Opti\u2026". Computed
+        // AFTER setFont/setMargin so the metrics reflect the bold
+        // 15pt run we actually paint with.
+        Dimension resetPref = reset.getPreferredSize();
+        reset.setMinimumSize(resetPref);
+        reset.setMaximumSize(resetPref);
+        // Match the row's max height to the button so BoxLayout doesn't
+        // squeeze the button vertically — Substance's ButtonUI clips
+        // the label horizontally when it's given less than its
+        // preferred height (the height squeeze cascades into the text
+        // layout's available horizontal run, which is what produces
+        // the "Reset Opti\u2026" symptom in narrow sidepanels).
+        buttonRow.setMaximumSize(new Dimension(Integer.MAX_VALUE, resetPref.height));
         buttonRow.add(reset);
         bar.add(buttonRow);
 
@@ -2916,10 +3017,21 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
     /** Live "current value" label for a rank-range endpoint — bold,
      *  painted in the rank's own colour so the user can spot which
      *  tier they're on without reading the text. 15pt matches the
-     *  lobby's body-text scale (style toggles + presence label). */
+     *  lobby's body-text scale (style toggles + presence label).
+     *
+     *  <p>Backed by {@link ChipLabel} (not vanilla JLabel) because
+     *  Substance L&F's LabelUI was reporting an undersized preferred
+     *  width for the slider's min / max value labels — visible to
+     *  users as "Bronz\u2026" / "3rd A\u2026" ellipsis truncation
+     *  even though there's plenty of horizontal slack inside the
+     *  225px sidepanel. ChipLabel paints the text directly in
+     *  paintComponent so the L&F's clip-and-ellipsify path is
+     *  bypassed entirely; the alignment-aware draw inside
+     *  ChipLabel honours the LEFT / RIGHT setHorizontalAlignment
+     *  set on the min / max labels respectively. */
     private static JLabel makeRankValueLabel(int idx)
     {
-        JLabel l = new JLabel(RANK_LABELS[idx]);
+        ChipLabel l = new ChipLabel(RANK_LABELS[idx]);
         l.setFont(l.getFont().deriveFont(Font.BOLD, 15f));
         l.setHorizontalAlignment(SwingConstants.RIGHT);
         l.setForeground(RankUtils.getRankColor(RANK_LABELS[idx]));
@@ -4012,6 +4124,34 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
             {
                 g2.dispose();
             }
+        }
+
+        /** Substance L&F's LabelUI computes a preferred width using its
+         *  own font metrics that under-report glyph widths for the
+         *  derived bold 15pt run we use on the rank slider — the
+         *  result is BorderLayout assigning a width slightly less
+         *  than the rendered text needs, which Swing then clips at
+         *  paint time. Recomputing preferred width from the actual
+         *  AWT FontMetrics here gets the layout-time and paint-time
+         *  metrics back in sync, so labels like "Bronze 3" /
+         *  "3rd Age 1" get exactly the width they paint into.
+         *
+         *  Pure JLabels (no border, no icon) so the calc is just
+         *  insets + text width + tiny safety margin. The +2px
+         *  belt-and-braces guards against sub-pixel rounding when
+         *  the parent uses a non-integer Graphics2D scale (HiDPI).
+         *  Height defers to super so vertical-centring inside
+         *  paintComponent agrees with the parent's row height. */
+        @Override
+        public Dimension getPreferredSize()
+        {
+            String t = getText();
+            if (t == null || t.isEmpty()) return super.getPreferredSize();
+            FontMetrics fm = getFontMetrics(getFont());
+            Insets in = getInsets();
+            int w = fm.stringWidth(t) + in.left + in.right + 2;
+            int h = super.getPreferredSize().height;
+            return new Dimension(w, h);
         }
     }
 

@@ -550,6 +550,14 @@ public class DashboardPanel extends PluginPanel
         if (plugin != null)
         {
             matchmakingLobbyPanel.setSelfIdentity(plugin::getLocalPlayerName);
+            // Eager game-state signal: flips true the instant
+            // GameState.LOGGED_IN fires, well before
+            // lobbyJoinGate.onLogin() (which waits 10 ticks for the
+            // local player name to resolve). Drives the lobby gate's
+            // three-phase notice — "Please log into the game" → "Loading…"
+            // → fully-built gate — so the user doesn't see a stale
+            // logged-out prompt during the ~6s startup window.
+            matchmakingLobbyPanel.setIsGameLoggedInSupplier(plugin::isGameLoggedIn);
         }
         matchmakingSubCardContainer.add(matchmakingLobbyPanel, SUBCARD_LOBBY);
 
@@ -750,6 +758,20 @@ public class DashboardPanel extends PluginPanel
 
     // --- Data Loading ---
     
+    /** Forwards a {@code GameStateChanged} signal from the plugin to
+     *  the matchmaking panel so the lobby-gate notice can flip
+     *  between "Please log into the game" and "Loading\u2026" without
+     *  waiting for the 10-tick {@link com.pvp.leaderboard.lobby.LobbyJoinGate#onLogin()}
+     *  delay. Safe to call before {@link MatchmakingLobbyPanel} has
+     *  wired its game-state supplier (no-ops gracefully). */
+    public void refreshLobbyLoginView()
+    {
+        if (matchmakingLobbyPanel != null)
+        {
+            matchmakingLobbyPanel.refreshLoginGateView();
+        }
+    }
+
     /**
      * Loads match history only if this is a new player search or data is stale (>1 hour old).
      * Called from game events - will skip refresh if data is fresh.

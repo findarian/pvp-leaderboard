@@ -97,6 +97,26 @@ public class PvPLeaderboardPlugin extends Plugin
 		return clientIdentityService.getClientUniqueId();
 	}
 
+	/** True the moment {@link GameState#LOGGED_IN} fires, i.e. eagerly —
+	 *  before the 10-tick name-resolve delay that gates {@code
+	 *  lobbyJoinGate.onLogin()}. Lobby UI uses this to distinguish
+	 *  "truly logged out (Please log into the game)" from "logged in
+	 *  but the player name + match counts haven't resolved yet
+	 *  (Loading\u2026)" so the brief startup window doesn't flash a
+	 *  misleading "log in" prompt to a user who already did. */
+	public boolean isGameLoggedIn()
+	{
+		if (client == null) return false;
+		try
+		{
+			return client.getGameState() == GameState.LOGGED_IN;
+		}
+		catch (Exception e)
+		{
+			return false;
+		}
+	}
+
 	// Accessor for DashboardPanel to get local player name for debug logs
 	public String getLocalPlayerName()
 	{
@@ -274,6 +294,14 @@ public class PvPLeaderboardPlugin extends Plugin
 				pendingSelfRankLookupTicks = 10;
 				pendingHeartbeatStart = true;
 				log.debug("[Plugin] LOGGED_IN - scheduling delayed init in 10 ticks");
+				// Eagerly refresh the lobby gate notice so the user
+				// sees "Loading…" immediately instead of the
+				// pre-login "Please log into the game" copy during
+				// the 10-tick name-resolve window. The gate listener
+				// itself only fires after lobbyJoinGate.onLogin()
+				// (called once the name resolves), so without this
+				// poke the "Loading…" phase would be invisible.
+				if (dashboardPanel != null) dashboardPanel.refreshLobbyLoginView();
 				// Open the socket immediately — UUID is available on
 				// startUp() via clientIdentityService and the server
 				// resolves the trusted MMR snapshot at $connect time
@@ -295,6 +323,12 @@ public class PvPLeaderboardPlugin extends Plugin
 			{
 				// Fully clear fight state on logout
 				fightMonitor.resetFightState();
+				// Symmetric refresh: GameState dropped to LOGIN_SCREEN,
+				// flip the lobby gate notice back to the pre-login
+				// copy without waiting for lobbyJoinGate.onLogout()
+				// to broadcast (it does fire, but this poke makes
+				// the transition feel snappy).
+				if (dashboardPanel != null) dashboardPanel.refreshLobbyLoginView();
 				// Stop heartbeats
 				whitelistService.onLogout();
 				pendingHeartbeatStart = false;
