@@ -3183,11 +3183,20 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
 
         if (presenceLabel != null)
         {
-            // HTML wrap target ~200px = sidepanel width (225px) - bar inset (4px)
-            // - safety margin. JLabel can't wrap plain text in BoxLayout.
-            presenceLabel.setText("<html><div style='width:200px'>"
-                + "Showing " + visible.size() + " out of " + roster.size() + " players online"
-                + "</div></html>");
+            // Explicit <br> wrap (no <div style='width:Npx'>) so the
+            // label adapts to the actual sidepanel width — RuneLite
+            // sidepanels can be resized by the user and a fixed 200px
+            // wrap target was causing the JLabel to render at 200px
+            // wide regardless and get clipped at the panel edge,
+            // visible as "...players onlin" with the trailing "e"
+            // shaved off. With a hard <br> the line break happens at
+            // a stable point and each half ("Showing X out of Y" /
+            // "players online") fits comfortably in even a narrow
+            // (~180px) sidepanel at 15pt bold.
+            presenceLabel.setText("<html>"
+                + "Showing " + visible.size() + " out of " + roster.size() + "<br>"
+                + "players online"
+                + "</html>");
         }
 
         rosterContainer.revalidate();

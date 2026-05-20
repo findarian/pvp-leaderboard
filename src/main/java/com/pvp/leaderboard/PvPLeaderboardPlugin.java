@@ -175,11 +175,14 @@ public class PvPLeaderboardPlugin extends Plugin
 			.build();
 		clientToolbar.addNavigation(navButton);
 
-		// Register overlay
-		if (rankOverlay != null)
+		// Register overlay. Snapshot the injected field to a local so
+		// Eclipse's null analysis can carry the null-check across both
+		// calls (field reads otherwise lose narrowing between statements).
+		final RankOverlay overlay = rankOverlay;
+		if (overlay != null)
 		{
-			overlayManager.add(rankOverlay);
-			eventBus.register(rankOverlay);
+			overlayManager.add(overlay);
+			eventBus.register(overlay);
 		}
 
 		// Init menu handler with RankOverlay

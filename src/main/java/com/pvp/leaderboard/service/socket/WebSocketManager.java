@@ -11,6 +11,7 @@ import okhttp3.WebSocket;
 import okhttp3.WebSocketListener;
 import okio.ByteString;
 
+import javax.annotation.Nullable;
 import javax.inject.Inject;
 import javax.inject.Singleton;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -511,7 +512,7 @@ public final class WebSocketManager
         }
 
         @Override
-        public void onFailure(WebSocket webSocket, Throwable t, Response response)
+        public void onFailure(WebSocket webSocket, Throwable t, @Nullable Response response)
         {
             int status = response == null ? -1 : response.code();
             boolean intentional;
