@@ -3579,12 +3579,22 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
          *  gap between the last visible name char and the rank text. */
         private JComponent buildHeaderRow()
         {
-            // peakRankIdx < 0 is the self-preview sentinel — render
-            // the name in plain white instead of a rank-coloured hue
-            // and skip the right-side rank chip entirely. Used by
-            // {@link MatchmakingLobbyPanel#renderSelfPreview} which
-            // doesn't currently have an authoritative self-rank
-            // source. Bounds-check also defends against any future
+            // peakRankIdx < 0 is the "unknown" sentinel. Two
+            // sources produce it:
+            //   1. Self-preview row — {@code selfPreview == true} —
+            //      no authoritative self-rank source yet, so skip
+            //      the right-side rank chip entirely and render the
+            //      name in plain white (rank-coloured hue would be
+            //      meaningless without a real rank).
+            //   2. Remote roster row whose server-side rating
+            //      hasn't been computed yet (first-ever roster push
+            //      after signup, partial backend deploy missing
+            //      rank_idx, etc) — {@code selfPreview == false} —
+            //      render a muted "Waiting" chip in the rank slot
+            //      so the row doesn't mis-render as RANK_LABELS[0]
+            //      ("Bronze 3") and the user understands the rating
+            //      simply hasn't arrived.
+            // Bounds-check also defends against any future
             // out-of-range index from a malformed wire payload.
             boolean rankKnown = p.peakRankIdx >= 0 && p.peakRankIdx < RANK_LABELS.length;
             String rankLabel = rankKnown ? RANK_LABELS[p.peakRankIdx] : "";
@@ -3606,12 +3616,30 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
 
             if (!rankKnown)
             {
-                // No rank chip on the right — just the name flush-left.
-                // OverlayRightRow expects two children; substitute an
-                // empty placeholder so the layout invariants hold.
-                JLabel placeholder = new JLabel("");
-                placeholder.setOpaque(false);
-                return new OverlayRightRow(name, placeholder);
+                if (selfPreview)
+                {
+                    // No rank chip on the right — just the name flush-left.
+                    // OverlayRightRow expects two children; substitute an
+                    // empty placeholder so the layout invariants hold.
+                    JLabel placeholder = new JLabel("");
+                    placeholder.setOpaque(false);
+                    return new OverlayRightRow(name, placeholder);
+                }
+                // Remote row with unknown rank — render "Waiting" in
+                // the same slot a real rank label would occupy. Muted
+                // grey (or blocked grey) so it's visually subordinate
+                // to real rank labels and never gets confused for a
+                // real rank tier. Tooltip explains the state.
+                Color waitingColor = blocked ? BLOCKED_FG : new Color(0xaa, 0xaa, 0xaa);
+                JLabel waiting = new JLabel("Waiting");
+                waiting.setFont(waiting.getFont().deriveFont(Font.BOLD, (float) fontBase));
+                waiting.setForeground(waitingColor);
+                waiting.setHorizontalAlignment(SwingConstants.RIGHT);
+                waiting.setOpaque(true);
+                waiting.setBackground(new Color(0x2b, 0x2b, 0x2b));
+                waiting.setBorder(BorderFactory.createEmptyBorder(0, 4, 0, 0));
+                waiting.setToolTipText("Rating not yet available");
+                return new OverlayRightRow(name, waiting);
             }
 
             JLabel rank = new JLabel(rankLabel);
@@ -3836,8 +3864,20 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
 
         private void buildHeaderRow()
         {
-            String rankLabel = RANK_LABELS[sender.peakRankIdx];
-            Color rankColor = RankUtils.getRankColor(rankLabel);
+            // peakRankIdx < 0 (or out of range) means the rating
+            // isn't yet available — typically a synthetic sender
+            // built from flat invite fields when the roster cache
+            // hadn't seen them yet. Render "Waiting" in the rank
+            // slot and white name text so the card doesn't crash
+            // on RANK_LABELS[-1] or mis-render as "Bronze 3".
+            boolean rankKnown = sender.peakRankIdx >= 0 && sender.peakRankIdx < RANK_LABELS.length;
+            String rankLabel = rankKnown ? RANK_LABELS[sender.peakRankIdx] : "Waiting";
+            Color rankColor = rankKnown
+                ? RankUtils.getRankColor(rankLabel)
+                : Color.WHITE;
+            Color rankTextColor = rankKnown
+                ? rankColor
+                : new Color(0xaa, 0xaa, 0xaa);
 
             // Base: name spans full row width, paints its full text and
             // clips under the rank/lookup overlay (no ellipsis).
@@ -3849,8 +3889,9 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
 
             JLabel rank = new JLabel(rankLabel);
             rank.setFont(rank.getFont().deriveFont(Font.BOLD, (float) ROW_FONT_PT));
-            rank.setForeground(rankColor);
+            rank.setForeground(rankTextColor);
             rank.setHorizontalAlignment(SwingConstants.RIGHT);
+            if (!rankKnown) rank.setToolTipText("Rating not yet available");
 
             // [Lookup] chip — opens Player Lookup so the receiver can vet
             // the sender before accept/decline. NOT the accept path.

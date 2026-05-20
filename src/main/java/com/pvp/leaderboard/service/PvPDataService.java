@@ -703,9 +703,15 @@ public class PvPDataService
                 return future;
             }
 
-            // 2. Shard Key = first 2 chars of lowercase name (e.g., "toyco" -> "to")
-            String shardKey = canonicalName.length() >= 2 
-                ? canonicalName.substring(0, 2).toLowerCase() 
+            // 2. Shard Key = first 3 chars of lowercase name (e.g., "toyco" -> "toy").
+            // Server publishes shards at both 3-char and 2-char widths; the
+            // plugin uses the 3-char variant for better distribution (~17576
+            // buckets vs ~676), reducing per-shard payload size and lookup
+            // contention. For names shorter than 3 chars we fall back to
+            // the full canonical name as the key (server publishes those
+            // edge-case shards under their literal name).
+            String shardKey = canonicalName.length() >= 3
+                ? canonicalName.substring(0, 3).toLowerCase()
                 : canonicalName.toLowerCase();
             String url = SHARD_BASE_URL + "/" + bucketPath + "/" + shardKey + ".json";
 
@@ -774,13 +780,16 @@ public class PvPDataService
             return future;
         }
         
-        if (accountSha == null || accountSha.length() < 2) {
+        if (accountSha == null || accountSha.length() < 3) {
             future.complete(null);
             return future;
         }
 
-        // 1. Calc Shard from SHA (first 2 chars)
-        String shardKey = accountSha.substring(0, 2);
+        // 1. Calc Shard from SHA (first 3 chars). Account SHAs are
+        // 64-char hex so the substring is always safe; the length
+        // guard above is defensive against a future caller passing
+        // a non-SHA identifier.
+        String shardKey = accountSha.substring(0, 3);
         String url = SHARD_BASE_URL + "/" + bucket + "/" + shardKey + ".json";
 
         // 2. Fetch/Get Cached Shard
