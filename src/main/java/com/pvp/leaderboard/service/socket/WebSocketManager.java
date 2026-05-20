@@ -299,7 +299,16 @@ public final class WebSocketManager
     {
         WebSocket snapshot;
         synchronized (this) { snapshot = activeSocket; }
-        if (snapshot == null) return false;
+        if (snapshot == null)
+        {
+            // The socket can be null transiently between disconnect
+            // and the next reconnect. Surface this at DEBUG so a
+            // dropped frame (e.g. lobby/join racing an open) is
+            // diagnosable from logs without spamming WARN noise
+            // every time the user types during a backoff.
+            log.debug("WebSocketManager: -> {} dropped (no active socket)", cmd);
+            return false;
+        }
         final String wire;
         try
         {
@@ -310,7 +319,28 @@ public final class WebSocketManager
             log.warn("WebSocketManager: refusing to send disallowed cmd={}", cmd);
             return false;
         }
+        // Outbound trace — gated on log.isDebugEnabled() so we don't
+        // pay the JSON-string concat cost in prod builds where DEBUG
+        // is off. data may be null on no-arg cmds (e.g. lobby/leave),
+        // tolerate that. Truncate the JSON preview so a hypothetical
+        // huge payload can't blow up the log.
+        if (log.isDebugEnabled())
+        {
+            log.debug("WebSocketManager: -> {} {}", cmd, previewJson(data));
+        }
         return snapshot.send(wire);
+    }
+
+    /** Truncates a JSON payload to a log-safe preview. Used by the
+     *  outbound + inbound debug traces — keeps the log readable when
+     *  the server pushes a 50-row {@code lobby/roster} while still
+     *  surfacing enough of the payload to read field names + first
+     *  few values. */
+    private static String previewJson(JsonObject data)
+    {
+        if (data == null) return "{}";
+        String s = data.toString();
+        return s.length() <= 800 ? s : s.substring(0, 800) + "...<+" + (s.length() - 800) + " chars>";
     }
 
     /** True while {@link #activeSocket} != null. */
@@ -473,6 +503,18 @@ public final class WebSocketManager
                     text == null ? 0 : text.length());
                 return;
             }
+            // Inbound trace — same pattern as the outbound trace in
+            // {@link WebSocketManager#send}. Gating on isDebugEnabled
+            // is the difference between "free" in prod and "kilobyte
+            // string allocation per message" in dev. presence/count
+            // fires on a fixed cadence so it shows up here at the
+            // same level as lobby/roster; if that gets noisy, the
+            // caller can filter by logger or down-shift specific
+            // commands to TRACE.
+            if (log.isDebugEnabled())
+            {
+                log.debug("WebSocketManager: <- {} {}", cmd.cmd, previewJson(cmd.data));
+            }
             eventBus.fire(cmd.cmd, cmd.data);
         }
 
@@ -495,19 +537,38 @@ public final class WebSocketManager
         public void onClosed(WebSocket webSocket, int code, String reason)
         {
             boolean shouldReconnect;
+            boolean isCurrent;
             synchronized (WebSocketManager.this)
             {
-                activeSocket = null;
+                // Ref-equality guard: this callback might be a delayed
+                // onClosed from a *previous* socket that we already
+                // tore down + replaced (e.g. the {@code name_change}
+                // reconnect path in {@link #connect}). If we blindly
+                // {@code activeSocket = null} we'll clobber the new,
+                // freshly-opened socket — which has no other write
+                // site, so the manager will believe the socket is
+                // closed for the rest of its lifetime even though
+                // OkHttp considers it open. {@link #send} then drops
+                // every outbound frame as "no active socket" and the
+                // panel's {@code lobby/join} never reaches the wire
+                // (root cause of the "we can't see each other"
+                // empty-roster bug surfaced in the QA logs).
+                isCurrent = (activeSocket == webSocket);
+                if (isCurrent) activeSocket = null;
                 // 1000 (normal) / 1001 (going-away) are clean closes —
                 // don't reconnect. Anything else is the server kicking
                 // us off (1008 dup-connect, 1006 abnormal) — reconnect
-                // with backoff.
-                shouldReconnect = !intentionalDisconnect
+                // with backoff. Reconnect ONLY when the closed socket
+                // was the current one; a stale callback from a defunct
+                // socket must not schedule a spurious reconnect over
+                // the live one.
+                shouldReconnect = isCurrent
+                    && !intentionalDisconnect
                     && code != CLOSE_NORMAL
                     && code != CLOSE_GOING_AWAY;
             }
-            log.debug("WebSocketManager: closed code={} reason={} reconnect={}",
-                code, reason, shouldReconnect);
+            log.debug("WebSocketManager: closed code={} reason={} reconnect={} stale={}",
+                code, reason, shouldReconnect, !isCurrent);
             if (shouldReconnect) scheduleReconnect();
         }
 
@@ -516,15 +577,29 @@ public final class WebSocketManager
         {
             int status = response == null ? -1 : response.code();
             boolean intentional;
+            boolean isCurrent;
             synchronized (WebSocketManager.this)
             {
-                activeSocket = null;
+                // Same ref-equality guard as onClosed — a failure
+                // notification can race a successful replacement
+                // socket (e.g. when the old socket's TCP RST arrives
+                // milliseconds after we swap in a name-change-reopened
+                // one).
+                isCurrent = (activeSocket == webSocket);
+                if (isCurrent) activeSocket = null;
                 intentional = intentionalDisconnect;
             }
-            log.debug("WebSocketManager: failure status={} cause={} intentional={}",
-                status, t == null ? "null" : t.getClass().getSimpleName(), intentional);
+            log.debug("WebSocketManager: failure status={} cause={} intentional={} stale={}",
+                status, t == null ? "null" : t.getClass().getSimpleName(), intentional, !isCurrent);
             if (response != null) response.close();
             if (intentional) return;
+            // Stale-callback guard — a failure from a defunct socket
+            // (e.g. the previous name=<none> socket whose TCP RST
+            // arrives after we already swapped in the name=Toyco
+            // replacement) must not trigger a reconnect over the
+            // live socket. Treat as a no-op; the current socket has
+            // its own onOpen/onClosed lifecycle.
+            if (!isCurrent) return;
             // HTTP 401 = server stealth-refuse on $connect. Drop into
             // the fixed 1-minute slow-retry so server-side state
             // changes (unban, WAF policy update, the player's first

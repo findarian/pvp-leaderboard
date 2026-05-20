@@ -180,6 +180,8 @@ public final class WebSocketLobbyService implements LobbyService
                 normBucket = "overall";
         }
         lastJoinArgs = new JoinArgs(region, styles, builds, minDisplayRankIdx, maxDisplayRankIdx, normBucket);
+        log.debug("WebSocketLobbyService: joinLobby region={} styles={} builds={} rankRange=[{},{}] bucket={}",
+            region, styles, builds, minDisplayRankIdx, maxDisplayRankIdx, normBucket);
         JsonObject d = new JsonObject();
         d.addProperty("region", region == null ? "" : region.toLowerCase());
         d.add("styles", toJsonArray(stylesToWire(styles)));
@@ -306,6 +308,7 @@ public final class WebSocketLobbyService implements LobbyService
 
     private void handleJoinedEcho(JsonObject data)
     {
+        log.debug("WebSocketLobbyService: lobby/joined echo received");
         LobbyEventListener l = listener;
         if (l == null) return;
         SwingUtilities.invokeLater(l::onJoinedEcho);
@@ -319,6 +322,7 @@ public final class WebSocketLobbyService implements LobbyService
         JsonElement membersEl = data.get("members");
         if (stale || membersEl == null || membersEl.isJsonNull())
         {
+            log.debug("WebSocketLobbyService: lobby/roster stale or null members — re-sending lobby/join");
             replayJoinOnReconnect();
             return;
         }
@@ -341,6 +345,26 @@ public final class WebSocketLobbyService implements LobbyService
         rosterByPlayerId.clear();
         rosterByPlayerId.putAll(nextCache);
         long version = rosterVersion.incrementAndGet();
+        // Diagnostic dump of the wire-level roster — what the server
+        // actually filtered + pushed to *this* viewer. The "I can see
+        // myself and another player but they can't see me" class of
+        // bug is always one of: (a) the other player isn't in MY
+        // roster.members at all (server filtered them out — block,
+        // rank-range, region mismatch, smurf-guard); (b) they're in
+        // mine but I'm not in theirs (asymmetric block); (c) we're
+        // both in but our slider rejects each other client-side.
+        // Logging the full members list here makes (a) and (b)
+        // trivially diagnosable.
+        if (log.isDebugEnabled())
+        {
+            log.debug("WebSocketLobbyService: lobby/roster received raw_count={} parsed_count={}",
+                members.size(), roster.size());
+            for (LobbyMember m : roster)
+            {
+                log.debug("WebSocketLobbyService:   roster row playerId={} name={} region={} styles={} builds={} isMod={}",
+                    m.playerId, m.name, m.region, m.styles, m.builds, m.isMod);
+            }
+        }
         LobbyEventListener l = listener;
         if (l != null)
         {
@@ -375,12 +399,15 @@ public final class WebSocketLobbyService implements LobbyService
     {
         if (roster.isEmpty())
         {
+            log.debug("WebSocketLobbyService: enrich skipped — empty roster (version={})", version);
             return;
         }
         JoinArgs args = lastJoinArgs;
         String bucket = (args == null || args.sortBucket == null || args.sortBucket.isEmpty())
             ? "overall"
             : args.sortBucket;
+        log.debug("WebSocketLobbyService: enrich kicking off bucket={} members={} version={}",
+            bucket, roster.size(), version);
         // Resolved rank index per player_id. Populated as each shard
         // future completes; the allOf() callback reads it once at the
         // end so there's no read/write race.
@@ -392,20 +419,44 @@ public final class WebSocketLobbyService implements LobbyService
             CompletableFuture<ShardRank> lookup = pvpDataService.getShardRankByName(m.name, bucket);
             if (lookup == null) continue;
             final String pid = m.playerId;
+            final String mname = m.name;
             futures.add(lookup.handle((sr, ex) ->
             {
-                if (ex != null || sr == null || sr.tier == null) return null;
+                if (ex != null)
+                {
+                    log.debug("WebSocketLobbyService:   shard lookup name={} bucket={} threw {}",
+                        mname, bucket, ex.getClass().getSimpleName());
+                    return null;
+                }
+                if (sr == null || sr.tier == null)
+                {
+                    log.debug("WebSocketLobbyService:   shard lookup name={} bucket={} -> null (no rank yet)",
+                        mname, bucket);
+                    return null;
+                }
                 int idx = RankUtils.rankIndexForTier(sr.tier);
+                log.debug("WebSocketLobbyService:   shard lookup name={} bucket={} -> tier={} rankIdx={}",
+                    mname, bucket, sr.tier, idx);
                 if (idx >= 0) resolved.put(pid, idx);
                 return null;
             }));
         }
-        if (futures.isEmpty()) return;
+        if (futures.isEmpty())
+        {
+            log.debug("WebSocketLobbyService: enrich skipped — no lookups queued (version={})", version);
+            return;
+        }
         CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).whenComplete((v, ex) ->
         {
             // Stale-pass guard: a newer roster push has arrived,
             // discard this pass to avoid clobbering a fresher list.
-            if (rosterVersion.get() != version) return;
+            if (rosterVersion.get() != version)
+            {
+                log.debug("WebSocketLobbyService: enrich version={} superseded — dropping", version);
+                return;
+            }
+            log.debug("WebSocketLobbyService: enrich version={} settled, resolved={}/{} members",
+                version, resolved.size(), roster.size());
             List<LobbyMember> enriched = new ArrayList<>(roster.size());
             Map<String, LobbyMember> nextCache = new HashMap<>(roster.size() * 2);
             for (LobbyMember m : roster)
@@ -431,6 +482,17 @@ public final class WebSocketLobbyService implements LobbyService
             rosterByPlayerId.putAll(nextCache);
             LobbyEventListener l = listener;
             if (l == null) return;
+            if (log.isDebugEnabled())
+            {
+                StringBuilder sb = new StringBuilder();
+                for (LobbyMember m : enriched)
+                {
+                    if (sb.length() > 0) sb.append(", ");
+                    sb.append(m.name).append("=").append(m.peakRankIdx);
+                }
+                log.debug("WebSocketLobbyService: enrich version={} firing enriched snapshot [{}]",
+                    version, sb);
+            }
             SwingUtilities.invokeLater(() -> l.onRosterSnapshot(enriched));
         });
     }
@@ -608,6 +670,11 @@ public final class WebSocketLobbyService implements LobbyService
     {
         String code = optString(data, "code");
         String message = optString(data, "message");
+        // Surfaced at WARN because error/lobby pushes are exceptional
+        // by definition — the user is going to ask why their fight
+        // button didn't work, and the answer is almost always in this
+        // single log line (RANK_OUT_OF_RANGE, BLOCKED, SMURF_GUARD…).
+        log.warn("WebSocketLobbyService: error/lobby code={} message={}", code, message);
         LobbyEventListener l = listener;
         if (l == null) return;
         SwingUtilities.invokeLater(() -> l.onError(code, message));
