@@ -2,6 +2,7 @@
 
 ##TLDR
 The plugin submits who you fought and if you won or lost when someone dies, then your rating is updated on the correct leaderboard. There are NH/Veng/Multi/DMM leaderboard currently.
+https://pvp-leaderboard.com/
 
 ## Rating / Anti-Smurfing
 Your rating is bound to you, if you share accounts or use alts, it doesn't matter. Your rating is yours and is the same across all accounts.
