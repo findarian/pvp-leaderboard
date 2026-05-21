@@ -56,6 +56,8 @@ public final class LobbyErrorMessages
             "That invite expired before you could accept it.");
         m.put("FIGHT_SESSION_EXPIRED",
             "The 30-second confirm window expired. Send a new invite to retry.");
+        m.put("SELF_INVITE",
+            "You can't fight your own account.");
 
         // ---- Protocol / transport ----
         m.put("INVALID_MESSAGE",

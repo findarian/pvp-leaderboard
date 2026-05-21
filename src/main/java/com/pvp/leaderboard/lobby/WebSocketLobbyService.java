@@ -711,20 +711,25 @@ public final class WebSocketLobbyService implements LobbyService
         SwingUtilities.invokeLater(() -> l.onIncomingInvite(invite));
     }
 
-    /** {@code lobby/invite_cancelled} is dual-purpose: the <b>cancel
-     *  branch</b> carries {@code from_player_id} (sender retracted) and
-     *  the <b>decline branch</b> carries {@code declined_by_player_id}
-     *  (receiver said no). Both close the same invite from the panel's
-     *  perspective, so we route on {@code invite_id} alone — the
-     *  branching identifier would only matter if a future UI wants to
-     *  distinguish "they cancelled" from "they declined". */
+    /** Routes {@code lobby/invite_cancelled} to either
+     *  {@link LobbyEventListener#onIncomingInviteDeclined} (when the
+     *  receiver declined) or {@link LobbyEventListener#onIncomingInviteCancelled}
+     *  (sender cancel, block-cascade, leave-cascade, TTL expiry). */
     private void handleInviteCancelled(JsonObject data)
     {
         String inviteId = optString(data, "invite_id");
         if (inviteId.isEmpty()) return;
         LobbyEventListener l = listener;
         if (l == null) return;
-        SwingUtilities.invokeLater(() -> l.onIncomingInviteCancelled(inviteId));
+        if ("declined".equals(optString(data, "reason")))
+        {
+            String declinedByName = optString(data, "declined_by_name");
+            SwingUtilities.invokeLater(() -> l.onIncomingInviteDeclined(inviteId, declinedByName));
+        }
+        else
+        {
+            SwingUtilities.invokeLater(() -> l.onIncomingInviteCancelled(inviteId));
+        }
     }
 
     private void handleFightProposed(JsonObject data)
@@ -835,44 +840,22 @@ public final class WebSocketLobbyService implements LobbyService
     // Parsing helpers
     // ---------------------------------------------------------------
 
-    /** Reconstructs a {@link LobbyMember} for the opponent of a
-     *  fight_proposed / match_found push. The wire carries
-     *  {@code player_a_player_id} and {@code player_b_player_id}; the
-     *  local user is one of them, the opponent is the other. Falls
-     *  back to a synthetic minimal member if the roster cache has no
-     *  row for the opponent (rare reconnect-race case). */
+    /** Returns the opponent {@link LobbyMember} for a
+     *  {@code fight_proposed} / {@code match_found} push.
+     *  When one of player_a / player_b is in the roster cache that
+     *  row is the opponent; otherwise builds a minimal member from
+     *  player_a's id + name on the wire. */
     private LobbyMember resolveOpponent(JsonObject data)
     {
         String a = optString(data, "player_a_player_id");
         String b = optString(data, "player_b_player_id");
         if (a.isEmpty() || b.isEmpty()) return null;
-        // Self is never in the roster cache (server filters the
-        // viewer's own row out of every roster push), so the opponent
-        // is whichever side IS in the cache.
         LobbyMember aRow = rosterByPlayerId.get(a);
         LobbyMember bRow = rosterByPlayerId.get(b);
         if (aRow != null && bRow == null) return aRow;
         if (bRow != null && aRow == null) return bRow;
-        if (aRow == null && bRow == null)
-        {
-            // Both player ids unknown — synthesise a minimal record
-            // for player_a so the panel can still render the row.
-            // Reachable only if fight_proposed arrives before the
-            // lobby/roster that introduced the opponent.
-            log.debug("resolveOpponent: both player ids absent from roster cache (a={}, b={}) — synthesising", a, b);
-            return synthesiseMinimalMember(a);
-        }
-        // Both present (shouldn't happen). Pick player_a as a stable choice.
-        return aRow;
-    }
-
-    /** Synthesises a minimal {@link LobbyMember} when a flat-payload
-     *  push references a player id not in the roster cache. The
-     *  canonical id is reused as the display name (no proper-cased
-     *  form available) so the panel can still render the row. */
-    private LobbyMember synthesiseMinimalMember(String playerId)
-    {
-        return new LobbyMember(playerId, playerId,
+        if (aRow != null) return aRow;
+        return new LobbyMember(a, optString(data, "player_a_name"),
             EnumSet.noneOf(Style.class), EnumSet.noneOf(BuildType.class),
             -1, -1, "", false);
     }

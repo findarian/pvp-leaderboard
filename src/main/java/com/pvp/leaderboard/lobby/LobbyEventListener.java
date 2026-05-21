@@ -41,9 +41,16 @@ public interface LobbyEventListener
      *  and a TTL countdown derived from {@link IncomingInvite#getExpiresAtEpochMs}. */
     default void onIncomingInvite(IncomingInvite invite) {}
 
-    /** A previously-pushed {@link IncomingInvite} was cancelled by the
-     *  sender. Panel removes the matching card. */
+    /** An invite was withdrawn server-side (sender cancelled,
+     *  block-cascade, leave-cascade, TTL elapsed). Panel removes the
+     *  matching card or outgoing chip. */
     default void onIncomingInviteCancelled(String inviteId) {}
+
+    /** The receiver of an invite declined it. Sender-side only.
+     *  Panel removes the outgoing chip, exits the fight-setup wizard
+     *  if the user was mid-flow against this opponent, and shows an
+     *  "Invite declined by {@code declinedByName}" banner. */
+    default void onIncomingInviteDeclined(String inviteId, String declinedByName) {}
 
     /** An invite — either one the local user sent and the opponent
      *  accepted, OR one the local user just accepted — has transitioned to

@@ -386,8 +386,6 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
             this.location = session.location;
             this.confirmExpiresAt = session.confirmExpiresAtEpochMs;
         }
-
-        boolean bothConfirmed() { return iConfirmed && peerConfirmed; }
     }
 
     /** Backing {@link LobbyService} — {@code WebSocketLobbyService} in
@@ -2215,7 +2213,18 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         }
         s.iConfirmed = true;
         service.confirmFight();
-        if (currentFightSession != null && !s.bothConfirmed())
+        // Always swap to the Waiting view after the local confirm fires.
+        // Pre-fix, this was guarded by !bothConfirmed() under the
+        // assumption that match_found would land before the user notices
+        // — but a peer who confirmed FIRST already set peerConfirmed=true,
+        // so the second-to-confirm hits bothConfirmed=true at click time
+        // and the guard skipped the swap. Result: stuck-on-Confirm-Fight
+        // with a disabled "Confirming\u2026" button until the local timer
+        // (now unconditional) kicks them out 30s later. Swapping every
+        // time keeps the visual transition consistent for both confirm
+        // orderings; if match_found lands milliseconds later,
+        // {@link #onMatchFound} immediately swaps Waiting \u2192 MeetAt.
+        if (currentFightSession != null)
         {
             showFightSetup(buildWaitingView());
         }
@@ -2254,13 +2263,24 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         return wrapInScroll(card);
     }
 
-    /** Waiting view — user has confirmed; shown until the opponent does too
-     *  or the 30s window expires. */
+    /** Waiting view — user has confirmed; shown until the opponent does
+     *  too (header "Waiting on other player to confirm") or both have
+     *  confirmed (header "Finalizing match details\u2026") or the 30 s
+     *  window expires. The two headers describe the same wait but
+     *  attribute it correctly: in the first case we're waiting on the
+     *  peer's wire confirm, in the second we're waiting on the server's
+     *  {@code lobby/match_found} push. Without the second header the
+     *  second-to-confirm player saw "Waiting on other player to
+     *  confirm" even though the peer had already confirmed (the same
+     *  scenario the QA test surfaced when match_found never landed). */
     private JComponent buildWaitingView()
     {
         LocalFightState s = currentFightSession;
         JPanel card = newGateLikeCard();
-        card.add(makeGateHeader("Waiting on other player to confirm"));
+        String header = (s != null && s.peerConfirmed)
+            ? "Finalizing match details\u2026"
+            : "Waiting on other player to confirm";
+        card.add(makeGateHeader(header));
         card.add(leftAlignedStrut(8));
         addOpponentLines(card, s);
         card.add(leftAlignedStrut(14));
@@ -2381,7 +2401,23 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
     /** 1Hz tick: expires INVITED outgoing invites whose 10-min TTL has run out
      *  (refreshes affected rows), updates the FIGHT card's 30s countdown
      *  label, and force-exits the FIGHT card if the confirm window elapsed
-     *  without both confirmations. */
+     *  without a {@code lobby/match_found} push landing.
+     *
+     *  <p>The exit at {@code confirmExpiresAt} is unconditional: it
+     *  used to guard on {@code !bothConfirmed()} (rationale: "the
+     *  server will push match_found any moment now"), but the QA
+     *  scenario where the second-to-confirm player is stuck on
+     *  "Confirming\u2026" forever (logs at 19:55:35 toyco confirm \u2192
+     *  no match_found ever arrived \u2192 30s elapsed \u2192 UI did NOT
+     *  return to lobby because bothConfirmed=true) proves that
+     *  assumption is unsafe \u2014 a backend issue (e.g.
+     *  {@code confirmed_by} overwrite that loses one of the two
+     *  confirms) silently strands the panel. When {@code match_found}
+     *  DOES land in time, {@link #handleMatchFound} clears
+     *  {@code currentFightSession} so this branch is moot \u2014 the
+     *  outer {@code if (s != null)} guard skips. Removing the
+     *  {@code bothConfirmed} predicate therefore only changes
+     *  behaviour in the failure mode we want to fix. */
     private void onFightTick()
     {
         long now = System.currentTimeMillis();
@@ -2415,8 +2451,14 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         LocalFightState s = currentFightSession;
         if (s != null)
         {
-            if (now >= s.confirmExpiresAt && !s.bothConfirmed())
+            if (now >= s.confirmExpiresAt)
             {
+                // Unconditional safety-net exit — see method doc. If
+                // match_found landed in time, handleMatchFound
+                // already nulled currentFightSession and we never
+                // reach here.
+                LOG.debug("MatchmakingLobbyPanel.onFightTick: confirm window elapsed sid={} iConfirmed={} peerConfirmed={} — exiting fight setup",
+                    s.session.fightSessionId, s.iConfirmed, s.peerConfirmed);
                 exitFightSetup();
             }
             else if (fightCountdownLabel != null)
@@ -2509,62 +2551,65 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
     @Override
     public void onIncomingInviteCancelled(String inviteId)
     {
-        // Server pushes this on four cascades: (a) sender cancelled,
-        // (b) receiver declined (push to sender), (c) block-cascade,
-        // (d) leave-cascade. The inviteId is the only stable correlation
-        // key — sender / receiver perspectives both resolve here.
         if (inviteId == null || inviteId.isEmpty()) return;
+        if (removeIncomingInviteCard(inviteId)) return;
+        removeOutgoingInviteById(inviteId);
+    }
 
-        // ---- Receiver perspective: cancel an incoming card we showed ----
-        IncomingInvitePanel card = incomingCardsById.remove(inviteId);
-        if (card != null)
+    @Override
+    public void onIncomingInviteDeclined(String inviteId, String declinedByName)
+    {
+        if (inviteId == null || inviteId.isEmpty()) return;
+        String opponentPlayerId = removeOutgoingInviteById(inviteId);
+        if (opponentPlayerId == null) return;
+        if (currentFightSession != null
+            && currentFightSession.opponent != null
+            && opponentPlayerId.equals(currentFightSession.opponent.playerId))
         {
-            // Rebuild incomingInviteNames from the remaining cards so
-            // the cancelled sender's row flips back to [Fight] on the
-            // next renderRoster(). O(n) on a typically-small list
-            // (< ~10 invites visible at once); avoids the bookkeeping
-            // bug of trying to track names + ids in parallel.
-            incomingInviteNames.clear();
-            for (IncomingInvitePanel remaining : incomingCardsById.values())
-            {
-                LobbyMember s = senderOfCard(remaining);
-                if (s != null) incomingInviteNames.add(s.name);
-            }
-            removeInvite(card);
-            renderRoster();
-            return;
+            exitFightSetup();
         }
+        showErrorBanner("Invite declined by " + declinedByName + ".");
+    }
 
-        // ---- Sender perspective: opponent declined / cascaded our outgoing ----
-        // OutgoingInvites are keyed by opponent player_id in the
-        // panel's map; look up by inviteId via a scan (small map, < ~10
-        // entries).
-        String opponentPlayerId = null;
+    /** Removes an incoming invite card by id and re-renders the
+     *  roster. Returns {@code true} if a card was found and removed. */
+    private boolean removeIncomingInviteCard(String inviteId)
+    {
+        IncomingInvitePanel card = incomingCardsById.remove(inviteId);
+        if (card == null) return false;
+        incomingInviteNames.clear();
+        for (IncomingInvitePanel remaining : incomingCardsById.values())
+        {
+            LobbyMember s = senderOfCard(remaining);
+            if (s != null) incomingInviteNames.add(s.name);
+        }
+        removeInvite(card);
+        renderRoster();
+        return true;
+    }
+
+    /** Drops the local outgoing-invite record matching {@code inviteId}
+     *  and re-renders. Returns the opponent's player_id when a record
+     *  was removed, {@code null} otherwise. Does not echo a cancel
+     *  back to the server. */
+    private String removeOutgoingInviteById(String inviteId)
+    {
         for (Map.Entry<String, OutgoingInvite> e : outgoingInvitesByOpponent.entrySet())
         {
             OutgoingInvite oi = e.getValue();
             if (oi != null && inviteId.equals(oi.inviteId))
             {
-                opponentPlayerId = e.getKey();
-                break;
+                String opponentPlayerId = e.getKey();
+                outgoingInvitesByOpponent.remove(opponentPlayerId);
+                renderRoster();
+                return opponentPlayerId;
             }
         }
-        if (opponentPlayerId != null)
-        {
-            // Inline rather than calling cancelOutgoingInvite() because
-            // that helper echoes service.cancelInvite() back to the
-            // server — but in the cascade path the cancel ORIGINATED
-            // server-side, so echoing it back would risk a benign-but-
-            // noisy unknown-invite_id log on the server. Drop the local
-            // record + re-render the roster directly.
-            outgoingInvitesByOpponent.remove(opponentPlayerId);
-            renderRoster();
-        }
+        return null;
     }
 
-    /** Reverse-lookup of an {@link IncomingInvitePanel}'s sender for
-     *  {@link #onIncomingInviteCancelled}'s name-set rebuild path.
-     *  Returns {@code null} only when the card itself is null. */
+    /** Returns the sender of an incoming invite card, or
+     *  {@code null} when the card itself is {@code null}. */
     private static LobbyMember senderOfCard(IncomingInvitePanel card)
     {
         return card != null ? card.getSender() : null;
@@ -2633,12 +2678,22 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         if (s.session.fightSessionId != null
             && !s.session.fightSessionId.equals(fightSessionId)) return;
         s.peerConfirmed = true;
-        // If we already confirmed too, server will follow up with
-        // onMatchFound — leave the view in Waiting until that lands so
-        // the MeetAt swap stays a single transition.
+        // Two paths:
+        //   (a) user hasn't confirmed yet  -> rebuild Confirm Fight view
+        //       so the new "Confirmed by other player" subheader paints
+        //       above the Confirm Fight button.
+        //   (b) user already confirmed     -> we're on the Waiting view;
+        //       rebuild it so the header flips from "Waiting on other
+        //       player to confirm" to "Finalizing match details\u2026"
+        //       (peer just confirmed; we're now waiting on the server's
+        //       match_found, not on the peer's wire).
         if (!s.iConfirmed)
         {
             showFightSetup(buildConfirmFightView());
+        }
+        else
+        {
+            showFightSetup(buildWaitingView());
         }
     }
 
@@ -4537,6 +4592,24 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         if (invitesContainer == null || invite == null || invite.sender == null) return;
         final LobbyMember sender = invite.sender;
         final String inviteId = invite.inviteId;
+        // Idempotent guard: if the exact same invite_id is already on
+        // the strip, drop the duplicate add. Pre-fix the dedupe loop
+        // {@code continue}'d past matching ids but the post-loop
+        // {@code invitesContainer.add(card)} still ran, producing the
+        // "two invite cards from one sender" symptom in the
+        // 2026-05-21 QA log (gamerwoadie's wire showed only one
+        // {@code lobby/invite_received}, yet the user reported two
+        // visible cards — only path is a double-{@code addIncomingInvite}
+        // for the same {@code invite_id}, e.g. a replayed bus event
+        // or a future call site that re-routes through this method).
+        // Returning early matches the documented "idempotent against
+        // duplicate invite_id" semantic.
+        if (inviteId != null && incomingCardsById.containsKey(inviteId))
+        {
+            LOG.debug("MatchmakingLobbyPanel.addIncomingInvite: skipping duplicate inviteId={} sender={}",
+                inviteId, sender.name);
+            return;
+        }
         // Dedupe by sender's player_id: only one invite card per
         // sender at a time, mirroring the "one outgoing invite per
         // sender" semantic the server enforces. If the sender has an
@@ -4551,10 +4624,6 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         while (it.hasNext())
         {
             Map.Entry<String, IncomingInvitePanel> e = it.next();
-            // Don't remove the entry we're about to add (defensive
-            // against the same invite_id arriving twice — server
-            // bug, but the dedupe should be idempotent).
-            if (inviteId != null && inviteId.equals(e.getKey())) continue;
             LobbyMember existingSender = senderOfCard(e.getValue());
             if (existingSender != null
                 && sender.playerId != null
