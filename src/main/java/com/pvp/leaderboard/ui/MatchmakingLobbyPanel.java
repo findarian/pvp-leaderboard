@@ -1402,6 +1402,27 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
      *  cards back to the gate. */
     private void resetGateOptions()
     {
+        // Tell the server we're leaving the lobby BEFORE we clear
+        // local state. Without this, the OSRS-LobbyMembers row sits
+        // for its 30-min sliding TTL and peers continue to see us —
+        // exactly the "I clicked Reset Options but my opponent still
+        // sees me in the lobby for ~60 s" QA report. leaveLobby() (no
+        // arg, equivalent to leaveLobby(false)) also clears
+        // lastJoinArgs so a future reconnect doesn't silently
+        // re-join us, which is exactly the semantic the Reset Options
+        // affordance promises. Sent unconditionally — if we weren't
+        // joined, the server treats it as a no-op rather than
+        // re-broadcasting a redundant roster.
+        try { service.leaveLobby(); } catch (Exception ignored) { /* best-effort */ }
+        // Also drop any pending incoming-invite cards locally so a
+        // user who returns to the lobby through a fresh Go-to-lobby
+        // click doesn't see stale invite cards from a previous
+        // session. Server-side, leaveLobby() cancels outstanding
+        // invites against us; this just mirrors that intent in the
+        // panel.
+        if (invitesContainer != null) invitesContainer.removeAll();
+        incomingCardsById.clear();
+        incomingInviteNames.clear();
         // Restore the same first-launch defaults: NH style + every
         // build. Matches the {@link #selectedStyles} / {@link
         // #selectedBuildTypes} field initialisers — keep these two
@@ -4414,6 +4435,34 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         if (invitesContainer == null || invite == null || invite.sender == null) return;
         final LobbyMember sender = invite.sender;
         final String inviteId = invite.inviteId;
+        // Dedupe by sender's player_id: only one invite card per
+        // sender at a time, mirroring the "one outgoing invite per
+        // sender" semantic the server enforces. If the sender has an
+        // older card still on the stack (e.g. they cancelled +
+        // re-sent before the cancel push landed on our wire, or a
+        // partial-deploy backend pushed two invite_received frames
+        // for what should have been a single invite), replace it
+        // with this newer one — the server treats the newer
+        // invite_id as authoritative.
+        java.util.Iterator<Map.Entry<String, IncomingInvitePanel>> it
+            = incomingCardsById.entrySet().iterator();
+        while (it.hasNext())
+        {
+            Map.Entry<String, IncomingInvitePanel> e = it.next();
+            // Don't remove the entry we're about to add (defensive
+            // against the same invite_id arriving twice — server
+            // bug, but the dedupe should be idempotent).
+            if (inviteId != null && inviteId.equals(e.getKey())) continue;
+            LobbyMember existingSender = senderOfCard(e.getValue());
+            if (existingSender != null
+                && sender.playerId != null
+                && sender.playerId.equals(existingSender.playerId))
+            {
+                removeInvite(e.getValue());
+                incomingInviteNames.remove(existingSender.name);
+                it.remove();
+            }
+        }
         incomingInviteNames.add(sender.name);
         IncomingInvitePanel[] holder = new IncomingInvitePanel[1];
         Runnable accept = () ->
