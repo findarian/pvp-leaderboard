@@ -523,17 +523,40 @@ public final class WebSocketLobbyService implements LobbyService
                 {
                     log.debug("WebSocketLobbyService:   shard lookup name={} bucket={} threw {}",
                         mname, bucket, ex.getClass().getSimpleName());
-                    return null;
+                    // Fall through to the cached-profile fallback below
+                    // — a transient CDN error shouldn't show "Waiting"
+                    // if we already have a Player Lookup result cached.
                 }
-                if (sr == null || sr.tier == null)
+                String tier = (sr != null) ? sr.tier : null;
+                String source = "shard";
+                if (tier == null)
                 {
-                    log.debug("WebSocketLobbyService:   shard lookup name={} bucket={} -> null (no rank yet)",
+                    // Shard didn't have this player in this bucket
+                    // (generator hasn't picked them up, transient CDN
+                    // miss, or they only have ranks in other buckets).
+                    // Surface the rank from any /user response the
+                    // panel or dashboard previously cached via
+                    // PvPDataService.getUserProfile — the user has
+                    // explicitly looked this player up at some point
+                    // this session, so showing "Waiting" while we
+                    // hold the data ourselves is the UX bug we're
+                    // closing.
+                    ShardRank cached = pvpDataService.getRankFromCachedProfile(mname, bucket);
+                    if (cached != null && cached.tier != null)
+                    {
+                        tier = cached.tier;
+                        source = "profile_cache";
+                    }
+                }
+                if (tier == null)
+                {
+                    log.debug("WebSocketLobbyService:   shard lookup name={} bucket={} -> null (no rank yet, no cached profile)",
                         mname, bucket);
                     return null;
                 }
-                int idx = RankUtils.rankIndexForTier(sr.tier);
-                log.debug("WebSocketLobbyService:   shard lookup name={} bucket={} -> tier={} rankIdx={}",
-                    mname, bucket, sr.tier, idx);
+                int idx = RankUtils.rankIndexForTier(tier);
+                log.debug("WebSocketLobbyService:   shard lookup name={} bucket={} -> tier={} rankIdx={} source={}",
+                    mname, bucket, tier, idx, source);
                 if (idx >= 0) resolved.put(pid, idx);
                 return null;
             }));

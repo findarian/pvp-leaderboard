@@ -660,6 +660,57 @@ public class PvPDataService
 	}
 
 	/**
+	 * Synchronous secondary cache for the lobby's rank enrichment. When
+	 * {@link #getShardRankByName(String, String)} returns {@code null}
+	 * (player not present in the CDN shard for this bucket, e.g. the
+	 * shard generator hasn't picked them up yet, or the bucket is a
+	 * style they haven't played enough matches in), the lobby panel
+	 * falls back to this method. Returns a {@link ShardRank} synthesised
+	 * from the {@code /user} response previously cached by
+	 * {@link #getUserProfile(String, String)} — i.e. anything the user
+	 * has explicitly opened a Player Lookup on this session.
+	 *
+	 * <p>Rank position is set to 0 because the {@code /user} endpoint
+	 * doesn't return a global leaderboard position; lobby enrichment
+	 * keys on tier name alone via
+	 * {@link com.pvp.leaderboard.util.RankUtils#rankIndexForTier},
+	 * so a 0 position is harmless. Returns {@code null} when there's
+	 * no cached profile or the profile has no rank for the requested
+	 * bucket.
+	 */
+	public ShardRank getRankFromCachedProfile(String playerName, String bucket)
+	{
+		if (playerName == null || playerName.isEmpty()) return null;
+		String cacheKey = "user:" + playerName;
+		UserStatsCache cached = userStatsCache.get(cacheKey);
+		if (cached == null) return null;
+		JsonObject profile = cached.getStats();
+		if (profile == null) return null;
+		String resolvedTier = null;
+		if (bucket != null && !bucket.isEmpty()
+			&& profile.has("buckets")
+			&& profile.get("buckets").isJsonObject())
+		{
+			JsonObject buckets = profile.getAsJsonObject("buckets");
+			if (buckets.has(bucket) && buckets.get(bucket).isJsonObject())
+			{
+				resolvedTier = extractTierFromUserResponse(
+					buckets.getAsJsonObject(bucket), playerName, bucket);
+			}
+		}
+		if (resolvedTier == null)
+		{
+			// Fall back to top-level rank/division fields — matches
+			// extractTierFromUserResponse's "overall" semantics so a
+			// cache populated before bucket sharding existed still
+			// surfaces SOMETHING rather than nothing.
+			resolvedTier = extractTierFromUserResponse(profile, playerName, "overall");
+		}
+		if (resolvedTier == null) return null;
+		return new ShardRank(resolvedTier, 0);
+	}
+
+	/**
      * Primary Entry Point: Get Rank by Name using the SHA256 Shard Logic
      * Uses in-flight deduplication to prevent multiple concurrent lookups for the same (player, bucket).
      */

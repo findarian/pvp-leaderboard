@@ -14,6 +14,8 @@ import com.pvp.leaderboard.lobby.MatchInfo;
 import com.pvp.leaderboard.lobby.OutgoingInvite;
 import com.pvp.leaderboard.lobby.Style;
 import com.pvp.leaderboard.util.RankUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import javax.swing.*;
 import javax.swing.border.Border;
@@ -61,6 +63,15 @@ import java.util.function.Supplier;
  */
 public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
 {
+    /** SLF4J logger. Declared explicitly (rather than via Lombok's
+     *  {@code @Slf4j}) and named {@code LOG} (rather than {@code log})
+     *  for two reasons: (1) the IDE linter doesn't process Lombok
+     *  annotations in this project setup, and (2) {@link
+     *  java.awt.Container} has an inherited {@code protected static
+     *  final Logger log} field that would shadow Lombok's generated
+     *  one anyway. The uppercase name sidesteps both issues. */
+    private static final Logger LOG = LoggerFactory.getLogger(MatchmakingLobbyPanel.class);
+
     /** Stable test hook — {@link com.pvp.leaderboard.DashboardPanelTest} finds the
      *  scrolling roster container by this name. Don't rename without updating tests. */
     public static final String ROSTER_NAME = "matchmaking-roster";
@@ -2154,10 +2165,54 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
      *  point the listener swaps the view to MeetAt — the
      *  {@code if (currentFightSession != null)} guard below
      *  avoids double-rendering the Waiting view in that case. */
-    private void onUserConfirmedFight()
+    /** Confirm-Fight click handler.
+     *
+     *  <p>Takes an optional {@link JButton} so the in-card button can be
+     *  instantly disabled + relabeled as visible evidence the click
+     *  registered. Two-mode UX:
+     *  <ul>
+     *    <li>Normal path: button flips to "Confirming\u2026", disabled;
+     *        the view immediately swaps to the Waiting card so the
+     *        relabel only flashes for a frame. The relabel still
+     *        matters because if the swap is delayed (Swing repaint
+     *        scheduling under load), the user sees the click took.</li>
+     *    <li>Stale-session path ({@code currentFightSession == null}):
+     *        the button flips to "(expired)", disabled, and the view
+     *        DOES NOT swap — the user is left on the Confirm Fight
+     *        card with the dead button so they can read the label and
+     *        click Find-a-new-match. Pre-debounce, this code path was
+     *        a silent no-op (matches the "I clicked Confirm and
+     *        nothing happened" QA report when a race clears the
+     *        session between view-build and click).</li>
+     *  </ul>
+     *
+     *  <p>Also emits a {@code DEBUG} log on every click so the receiver
+     *  side's debug log proves whether their click ever fired —
+     *  critical for diagnosing "did they click or not" in
+     *  asymmetric-visibility reports where only one side's log is
+     *  available. */
+    private void onUserConfirmedFight(JButton confirmBtn)
     {
         LocalFightState s = currentFightSession;
-        if (s == null) return;
+        if (s == null)
+        {
+            LOG.warn("MatchmakingLobbyPanel: Confirm Fight clicked but currentFightSession=null —"
+                + " session was cleared between view-build and click (most likely cause: late"
+                + " match_found / session_expired). Click is a no-op; user must Find-a-new-match.");
+            if (confirmBtn != null)
+            {
+                confirmBtn.setEnabled(false);
+                confirmBtn.setText("(expired)");
+            }
+            return;
+        }
+        LOG.debug("MatchmakingLobbyPanel: Confirm Fight clicked sid={} iConfirmed={} peerConfirmed={}",
+            s.session.fightSessionId, s.iConfirmed, s.peerConfirmed);
+        if (confirmBtn != null)
+        {
+            confirmBtn.setEnabled(false);
+            confirmBtn.setText("Confirming\u2026");
+        }
         s.iConfirmed = true;
         service.confirmFight();
         if (currentFightSession != null && !s.bothConfirmed())
@@ -2187,7 +2242,7 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         card.add(leftAlignedStrut(14));
 
         JButton confirm = makeGateActionButton("Confirm Fight", true);
-        confirm.addActionListener(e -> onUserConfirmedFight());
+        confirm.addActionListener(e -> onUserConfirmedFight(confirm));
         card.add(confirm);
         card.add(leftAlignedStrut(8));
 
@@ -2527,7 +2582,23 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
     @Override
     public void onFightProposed(FightSession session)
     {
-        if (session == null || session.opponent == null) return;
+        if (session == null || session.opponent == null)
+        {
+            LOG.warn("MatchmakingLobbyPanel.onFightProposed: dropped — session or opponent null"
+                + " (session={}, opponent={})",
+                session, session == null ? "n/a" : session.opponent);
+            return;
+        }
+        // Diagnostic: prove from the user's debug log that their UI
+        // transitioned to the Confirm Fight card. Critical for triaging
+        // "the other player couldn't click Confirm" reports — if this
+        // line is missing from the receiver's log, the panel never got
+        // the swap, meaning the issue is upstream (no fight_proposed
+        // arrived, or service-level filtering dropped it). If the line
+        // IS present but no subsequent "Confirm Fight clicked" line
+        // shows up, the user never clicked / the click didn't fire.
+        LOG.debug("MatchmakingLobbyPanel.onFightProposed: swapping to Confirm Fight view sid={} opponent={} style={} build={} location={}",
+            session.fightSessionId, session.opponent.name, session.style, session.build, session.location);
         // Drop any local outgoing-invite tracking for this opponent — the
         // invite has been promoted into a real fight session and the
         // [Invited M:SS] chip should disappear from the lobby roster.
@@ -4155,7 +4226,6 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
             accept.setForeground(Color.WHITE);
             accept.setOpaque(true);
             accept.setBorderPainted(false);
-            accept.addActionListener(e -> { stopCountdown(); onAccept.run(); });
 
             JButton decline = new JButton("Decline Fight");
             decline.setFont(decline.getFont().deriveFont(Font.BOLD, (float) (ROW_FONT_PT - 1)));
@@ -4165,7 +4235,39 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
             decline.setForeground(Color.WHITE);
             decline.setOpaque(true);
             decline.setBorderPainted(false);
-            decline.addActionListener(e -> { stopCountdown(); onDecline.run(); });
+
+            // Debounce both buttons + relabel the clicked one so the user
+            // sees instant evidence the press registered. Pre-debounce,
+            // a double-click on Accept fired two acceptInvite() calls
+            // (server idempotent but UI didn't repaint between clicks),
+            // and the ~200ms Swing invalidate/repaint gap after the
+            // card-removal action produced the same "I clicked but
+            // nothing happened" black-box symptom we see on Confirm
+            // Fight. Log the click too so the receiver-side debug log
+            // proves the click fired in asymmetric-visibility reports
+            // where only one side's log is available.
+            accept.addActionListener(e ->
+            {
+                if (!accept.isEnabled()) return;
+                LOG.debug("MatchmakingLobbyPanel.IncomingInvitePanel: Accept Fight clicked sender={}",
+                    sender == null ? "?" : sender.name);
+                accept.setEnabled(false);
+                accept.setText("Accepting\u2026");
+                decline.setEnabled(false);
+                stopCountdown();
+                onAccept.run();
+            });
+            decline.addActionListener(e ->
+            {
+                if (!decline.isEnabled()) return;
+                LOG.debug("MatchmakingLobbyPanel.IncomingInvitePanel: Decline Fight clicked sender={}",
+                    sender == null ? "?" : sender.name);
+                decline.setEnabled(false);
+                decline.setText("Declining\u2026");
+                accept.setEnabled(false);
+                stopCountdown();
+                onDecline.run();
+            });
 
             actions.add(accept);
             actions.add(decline);
