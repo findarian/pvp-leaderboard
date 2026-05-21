@@ -311,16 +311,32 @@ public class PvPLeaderboardPlugin extends Plugin
 				// (no need to wait for the player to be fully loaded
 				// in-game like the heartbeat path does).
 				//
-				// The local-player name might not have populated yet
-				// (LOGGED_IN can fire a few ticks before
-				// client.getLocalPlayer() resolves). We pass whatever
-				// we have right now (often null at this point); the
-				// pendingSelfRankLookupTicks branch below re-issues
-				// connect(uuid, name) once the name is known, and the
-				// new (uuid, name) check in WebSocketManager triggers
-				// a reconnect with the correct name.
+				// Only fire connect() here if the local-player name
+				// is ALREADY resolved. LOGGED_IN can fire a few ticks
+				// before client.getLocalPlayer() populates, in which
+				// case getLocalPlayerName() returns null. If we
+				// connect with null now, WebSocketManager opens the
+				// socket without a {@code &name=} query parameter and
+				// the server's $connect handler falls back to
+				// sorted(player_names)[0] (typically the wrong alt) —
+				// then the 10-tick Init-complete branch below fires a
+				// SECOND connect() with the real name, which the
+				// (uuid, name) no-op guard rejects and triggers a
+				// name_change close + reopen. That's the
+				// double-reconnect tax surfaced in the 21:01:51-57 QA
+				// log. Deferring to Init-complete when the name isn't
+				// ready collapses the two-reconnect cycle into one.
+				//
+				// startUp() already fires connect() if the player was
+				// logged in before the plugin toggled on, so the
+				// "plugin reload mid-session" path still gets the
+				// socket up without waiting for a LOGGED_IN event.
 				String uuid = getClientUniqueId();
-				if (uuid != null) webSocketManager.connect(uuid, getLocalPlayerName());
+				String selfName = getLocalPlayerName();
+				if (uuid != null && selfName != null && !selfName.trim().isEmpty())
+				{
+					webSocketManager.connect(uuid, selfName);
+				}
 			}
 			else if (gameStateChanged.getGameState() == GameState.LOGIN_SCREEN)
 			{
