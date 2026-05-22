@@ -233,7 +233,7 @@ public class PvPLeaderboardPlugin extends Plugin
 		// Send `lobby/leave` BEFORE closing the socket so the server can
 		// remove our OSRS-LobbyMembers row + broadcast a fresh roster
 		// to peers. AWS API Gateway $disconnect doesn't currently
-		// cascade to leave_lobby (TODO p2-handler-lobby), so without
+		// cascade to leave_lobby, so without
 		// this explicit leave the row sticks for the 30-min sliding
 		// TTL and other plugins keep seeing us as a "live" target.
 		// Best-effort: the service no-ops if no join was ever made,

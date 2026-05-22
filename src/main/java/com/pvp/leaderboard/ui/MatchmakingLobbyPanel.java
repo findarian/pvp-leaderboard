@@ -244,7 +244,7 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
     /** Canonical {@code player_id}s the local user has tried to invite
      *  and the server reported back as {@code PEER_NOT_IN_LOBBY}. The
      *  backend's {@code OSRS-LobbyMembers} row outlives a peer's
-     *  WebSocket connection — TODO p2-handler-lobby on the backend
+     *  WebSocket connection 
      *  side keeps the row up to its 30-min sliding TTL even after
      *  {@code $disconnect} fires. So a row can appear in our roster
      *  while the underlying connection is dead, and the server's
@@ -529,11 +529,6 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
     private JPanel reconnectBanner;
     private JLabel reconnectBannerLabel;
     private Timer reconnectBannerTicker;
-
-    public MatchmakingLobbyPanel(LobbyService service)
-    {
-        this(service, new NoOpLobbyJoinGate(), LobbyPreferences.inMemory());
-    }
 
     public MatchmakingLobbyPanel(LobbyService service, LobbyJoinGate joinGate)
     {
@@ -2334,7 +2329,7 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
 
         // Per spec: this screen also has a Find-a-new-match exit; auto-return
         // on real fight submission is a future hook tied to the in-game match
-        // submission pipeline (TODO meet-at-auto-return).
+        // submission pipeline ().
         card.add(makeGateCancelButton("Find a new match", this::exitFightSetup));
         return wrapInScroll(card);
     }
@@ -3614,21 +3609,6 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         /** Tracks the cursor across child boundaries so child→child crossings
          *  don't false-trigger an unhover on the leaf JLabel. */
         private boolean hovered;
-
-        /** Legacy 7-arg constructor used by the lobby roster — defaults
-         *  {@code selfPreview} to {@code false}. New call sites should
-         *  use the 8-arg variant. */
-        PlayerRow(LobbyMember p, int fontBase,
-                  Predicate<LobbyMember> isInvited,
-                  Function<LobbyMember, OutgoingInvite> getOutgoing,
-                  Consumer<String> onOpenProfile,
-                  FightStartCallback onFight,
-                  InviteCancelCallback onCancelInvite,
-                  Predicate<LobbyMember> isBlocked)
-        {
-            this(p, fontBase, isInvited, getOutgoing, onOpenProfile, onFight,
-                onCancelInvite, isBlocked, m -> true, false);
-        }
 
         PlayerRow(LobbyMember p, int fontBase,
                   Predicate<LobbyMember> isInvited,
