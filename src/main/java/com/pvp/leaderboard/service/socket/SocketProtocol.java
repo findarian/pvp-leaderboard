@@ -16,7 +16,7 @@ import java.util.Set;
  * {@link #ALLOWED_OUTGOING} is the plugin-side counterpart of the
  * Python {@code ALLOWED_COMMANDS} env-var-driven allowlist. Any client
  * code that wants to send a cmd MUST route through
- * {@link #encode(String, JsonObject)} so the allowlist guard fires
+ * {@link #encode(Gson, String, JsonObject)} so the allowlist guard fires
  * before bytes leave the process. The server has the same allowlist
  * server-side (defense in depth) but failing fast on the client makes
  * the bug obvious to plugin contributors instead of hidden behind a
@@ -37,7 +37,7 @@ public final class SocketProtocol
 {
     /**
      * The 9 lobby cmds the plugin is allowed to send. Anything outside
-     * this set throws from {@link #encode(String, JsonObject)}.
+     * this set throws from {@link #encode(Gson, String, JsonObject)}.
      *
      * <p>Tournament cmds ({@code tournament/list},
      * {@code tournament/register}, etc.) land at Phase 4 and will be
@@ -65,16 +65,11 @@ public final class SocketProtocol
         ALLOWED_OUTGOING = Collections.unmodifiableSet(s);
     }
 
-    /** Single shared Gson; the wire format is plain {@code String}-keyed
-     *  JSON objects with no custom serialisers needed. Stateless +
-     *  thread-safe per Gson's documented contract. */
-    private static final Gson GSON = new Gson();
-
     /**
      * Encodes a cmd + payload pair into the wire envelope string.
-     * Throws if {@code cmd} is not in {@link #ALLOWED_OUTGOING} — that's
-     * the plugin-side defense-in-depth allowlist guard.
+     * Throws if {@code cmd} is not in {@link #ALLOWED_OUTGOING}.
      *
+     * @param gson the injected client {@link Gson}
      * @param cmd  the cmd name (e.g. {@code "lobby/invite"})
      * @param data the payload object; {@code null} renders as
      *             {@code "data": {}} per the protocol's "never null"
@@ -82,36 +77,29 @@ public final class SocketProtocol
      * @return JSON text ready for {@code WebSocket.send(String)}
      * @throws IllegalArgumentException if {@code cmd} is not allowlisted
      */
-    public static String encode(String cmd, JsonObject data)
+    public static String encode(Gson gson, String cmd, JsonObject data)
     {
         if (!ALLOWED_OUTGOING.contains(cmd))
         {
             throw new IllegalArgumentException(
                 "cmd not in ALLOWED_OUTGOING: " + cmd);
         }
-        return GSON.toJson(new SocketCommand(cmd, data));
+        return gson.toJson(new SocketCommand(cmd, data));
     }
 
     /**
      * Decodes a server-pushed wire frame into a {@link SocketCommand}.
      * Returns {@code null} for any malformed input (empty string,
      * non-JSON, JSON that isn't an object, missing/empty {@code cmd},
-     * missing/non-object {@code data}). Callers should treat
-     * {@code null} as "drop this frame silently" — mirrors backend's
-     * {@code error/invalid_message} tolerance: junk in the pipe is not
-     * a fatal client bug.
+     * missing/non-object {@code data}). Callers treat {@code null} as
+     * "drop this frame silently".
      */
-    public static SocketCommand decode(String wire)
+    public static SocketCommand decode(Gson gson, String wire)
     {
         if (wire == null || wire.isEmpty()) return null;
         try
         {
-            // gson.fromJson(..., JsonObject.class) is the pattern used
-            // throughout this codebase (see PvPDataService); it tolerates
-            // the Gson 2.x split between the deprecated JsonParser API
-            // and the static parseString() one without forcing a
-            // particular Gson version on the RuneLite client jar.
-            JsonObject root = GSON.fromJson(wire, JsonObject.class);
+            JsonObject root = gson.fromJson(wire, JsonObject.class);
             if (root == null) return null;
             if (!root.has("cmd") || !root.get("cmd").isJsonPrimitive()) return null;
             // isJsonPrimitive() is true for numbers + booleans too; the

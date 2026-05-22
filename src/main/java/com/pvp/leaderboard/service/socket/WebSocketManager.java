@@ -1,5 +1,6 @@
 package com.pvp.leaderboard.service.socket;
 
+import com.google.gson.Gson;
 import com.google.gson.JsonObject;
 import com.pvp.leaderboard.PvPLeaderboardConstants;
 import lombok.extern.slf4j.Slf4j;
@@ -107,6 +108,7 @@ public final class WebSocketManager
     private final OkHttpClient sharedHttpClient;
     private final SocketEventBus eventBus;
     private final ScheduledExecutorService scheduler;
+    private final Gson gson;
 
     /** Lazily-built pinging client; reuses the shared client's connection
      *  pool / dispatcher via {@code newBuilder()} so we don't double up
@@ -164,11 +166,13 @@ public final class WebSocketManager
     @Inject
     public WebSocketManager(OkHttpClient sharedHttpClient,
                             SocketEventBus eventBus,
-                            ScheduledExecutorService scheduler)
+                            ScheduledExecutorService scheduler,
+                            Gson gson)
     {
         this.sharedHttpClient = sharedHttpClient;
         this.eventBus = eventBus;
         this.scheduler = scheduler;
+        this.gson = gson;
     }
 
     /**
@@ -312,7 +316,7 @@ public final class WebSocketManager
         final String wire;
         try
         {
-            wire = SocketProtocol.encode(cmd, data);
+            wire = SocketProtocol.encode(gson, cmd, data);
         }
         catch (IllegalArgumentException e)
         {
@@ -496,7 +500,7 @@ public final class WebSocketManager
         @Override
         public void onMessage(WebSocket webSocket, String text)
         {
-            SocketCommand cmd = SocketProtocol.decode(text);
+            SocketCommand cmd = SocketProtocol.decode(gson, text);
             if (cmd == null)
             {
                 log.debug("WebSocketManager: dropping unparseable frame ({} bytes)",
