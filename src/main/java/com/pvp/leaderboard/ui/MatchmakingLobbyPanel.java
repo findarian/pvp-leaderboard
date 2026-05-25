@@ -131,25 +131,26 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
     /** Default region used when the user hasn't explicitly picked one yet. */
     private static final String DEFAULT_REGION = "NA-E";
 
-    /** Seeded with NH so first-time users land on a sensible default
-     *  (NH is the most-played bucket on the leaderboard) — they can
-     *  deselect it and pick others, but the gate doesn't open with a
-     *  blank style row. {@link #resetGateOptions()} restores this
-     *  same default. Go-to-lobby still requires ≥1 style + ≥1 build
-     *  so a user who manually deselects everything stays gated. */
-    private final Set<Style> selectedStyles = EnumSet.of(Style.NH);
+    /** Starts empty so first-time users see every style toggle in the
+     *  "not picked" state — by spec the gate must open with no
+     *  picks and require the user to explicitly opt-in to each
+     *  style. {@link #resetGateOptions()} returns to this same
+     *  empty state. Go-to-lobby is gated on ≥1 style + ≥1 build
+     *  (see {@link #updateGoToLobbyEnabled()}), so the empty
+     *  state intentionally keeps the CTA disabled. */
+    private final Set<Style> selectedStyles = EnumSet.noneOf(Style.class);
     /** The user's own region — picked once at the gate. Surfaced as the
      *  region chip on incoming-invite cards' Meet At view (so the receiver
      *  knows where the sender's coming from); never used to filter the
      *  roster. Players see everyone in the lobby regardless of region. */
     private String selfRegion = DEFAULT_REGION;
-    /** Account builds — seeded with all three (Main + Zerker + Pure)
-     *  so first-time users are by default open to every opponent
-     *  build (most-permissive). They can narrow it down before
-     *  joining or via Reset Options. {@link #resetGateOptions()}
-     *  restores this default. Go-to-lobby still requires ≥1 build so
-     *  a manual deselect-all path stays gated. */
-    private final Set<BuildType> selectedBuildTypes = EnumSet.allOf(BuildType.class);
+    /** Account builds — starts empty by spec so first-time users see
+     *  every build toggle in the "not picked" state and must
+     *  explicitly opt into each build they accept matches against.
+     *  {@link #resetGateOptions()} returns to this empty state.
+     *  Go-to-lobby is gated on ≥1 build so the empty state
+     *  intentionally keeps the CTA disabled. */
+    private final Set<BuildType> selectedBuildTypes = EnumSet.noneOf(BuildType.class);
     private int rankMinIdx = 0;
     private int rankMaxIdx = RANK_LABELS.length - 1;
 
@@ -450,6 +451,25 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
      *  don't wire it still render the same as before. */
     private java.util.function.BooleanSupplier isGameLoggedInSupplier;
 
+    /** In-game popup notifier — fires on every {@link #onIncomingInvite}
+     *  arrival so users notice an invite without needing to be looking
+     *  at the sidepanel. Null in unit tests and during the brief
+     *  startup window before the plugin wires the overlay; the
+     *  notification simply doesn't fire in those cases (the panel's
+     *  in-card render is still authoritative). */
+    private LobbyInviteNotifier inviteNotifier;
+
+    /** In-game popup hook for the "fight locked in" wire moment (the
+     *  inviter-side or invitee-side equivalent of receiving an invite
+     *  popup, but at the next step in the flow — invite accepted, both
+     *  parties about to confirm). Wired by the plugin from
+     *  {@link com.pvp.leaderboard.overlay.MatchFoundNotificationOverlay}.
+     *  Null in unit tests / during the brief startup window before the
+     *  plugin wires the overlay; the notification simply doesn't fire
+     *  in those cases (the panel's in-card transition to the
+     *  Confirm-Fight view is still authoritative). */
+    private MatchFoundNotifier matchFoundNotifier;
+
     /** Container + row references for the self-profile preview shown
      *  above the rank slider. {@link #selfPreviewContainer} hosts the
      *  caption + the self {@link PlayerRow}; {@link #selfPreviewRow}
@@ -740,6 +760,19 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
             tog.setAlignmentX(LEFT_ALIGNMENT);
             tog.setMaximumSize(new Dimension(Integer.MAX_VALUE, 36));
             tog.setFocusPainted(false);
+            // Leading checkmark on the picked state — symmetric pair
+            // (visible-check / invisible-stand-in) keeps the label's
+            // horizontal origin stable across toggles. Aligned LEFT
+            // so the check sits at the row's left edge alongside
+            // the label, matching the spec ("checkmark to the left
+            // if someone has it picked"). The 2px green outline
+            // from {@link #applyToggleVisualState} still paints over
+            // the perimeter — the icon is the leading affordance,
+            // the outline is the perimeter affordance.
+            tog.setIcon(BLANK_TOGGLE_ICON);
+            tog.setSelectedIcon(CHECKMARK_TOGGLE_ICON);
+            tog.setHorizontalAlignment(SwingConstants.LEFT);
+            tog.setIconTextGap(8);
             // Green-on-selected / red-on-unselected paint, applied on
             // construction + via an item listener so every programmatic
             // setSelected (resetGateOptions, applyStyleToggleLockState
@@ -749,21 +782,14 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
             tog.addItemListener(e -> applyToggleVisualState(tog));
             tog.addActionListener(e ->
             {
-                if (tog.isSelected())
-                {
-                    selectedStyles.add(s);
-                }
-                else if (selectedStyles.size() == 1 && selectedStyles.contains(s))
-                {
-                    // Last remaining style — re-select it; we always need ≥1
-                    // once the user has picked any (Go-to-lobby gate ensures
-                    // we never enter the lobby with zero styles).
-                    tog.setSelected(true);
-                }
-                else
-                {
-                    selectedStyles.remove(s);
-                }
+                // Free toggle — the user is allowed to deselect every
+                // style (and every build) and land back at the empty
+                // first-launch state. {@link #updateGoToLobbyEnabled()}
+                // disables the CTA whenever the set is empty, so an
+                // all-off pick simply keeps the gate gated rather than
+                // being silently refused at the widget level.
+                if (tog.isSelected()) selectedStyles.add(s);
+                else selectedStyles.remove(s);
                 prefs.setStyles(selectedStyles);
                 refreshCurrentStyleLabel();
                 updateGoToLobbyEnabled();
@@ -844,25 +870,23 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
             tog.setAlignmentX(LEFT_ALIGNMENT);
             tog.setMaximumSize(new Dimension(Integer.MAX_VALUE, 36));
             tog.setFocusPainted(false);
+            // Same leading-checkmark treatment as the style row above —
+            // see those comments for the rationale.
+            tog.setIcon(BLANK_TOGGLE_ICON);
+            tog.setSelectedIcon(CHECKMARK_TOGGLE_ICON);
+            tog.setHorizontalAlignment(SwingConstants.LEFT);
+            tog.setIconTextGap(8);
             applyToggleVisualState(tog);
             tog.addItemListener(e -> applyToggleVisualState(tog));
             tog.addActionListener(e ->
             {
-                if (tog.isSelected())
-                {
-                    selectedBuildTypes.add(a);
-                }
-                else if (selectedBuildTypes.size() == 1 && selectedBuildTypes.contains(a))
-                {
-                    // Last remaining build — re-select it; once any has been
-                    // picked we always need ≥1 (Go-to-lobby gate prevents
-                    // entering the lobby with zero builds).
-                    tog.setSelected(true);
-                }
-                else
-                {
-                    selectedBuildTypes.remove(a);
-                }
+                // Free toggle — symmetric with the style row above:
+                // the user is allowed to deselect every build. The
+                // Go-to-lobby CTA stays disabled while the set is
+                // empty (see {@link #updateGoToLobbyEnabled()}), so
+                // we don't need to fight the user at the widget level.
+                if (tog.isSelected()) selectedBuildTypes.add(a);
+                else selectedBuildTypes.remove(a);
                 prefs.setBuilds(selectedBuildTypes);
                 refreshCurrentStyleLabel();
                 updateGoToLobbyEnabled();
@@ -1001,16 +1025,26 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
 
         if (!gateReady)
         {
-            // Tear down any in-flight fight session so a relogin doesn't
-            // resume into a stale CARD_FIGHT — the server already
-            // expires the session on disconnect, this just keeps the
-            // local state honest.
-            if (currentFightSession != null) exitFightSetup();
             // Reset the auto-join sticky so the next login re-issues
             // service.joinLobby(...). The server already drops the
             // OSRS-LobbyMembers row on $disconnect (60s grace, then
             // TTL), so a fresh join is the right thing on re-login.
             autoJoinIssuedThisSession = false;
+            // Active fight session pinning: the user is mid-confirm
+            // (CARD_FIGHT) or already in MeetAt. World hops can briefly
+            // pass through LOGIN_SCREEN, and an intentional logout
+            // mid-confirm shouldn't yank the dialog out from under
+            // the user. Keep CARD_FIGHT visible — the local 30s
+            // confirm-window ticker still drives exitFightSetup() if
+            // the window elapses (onFightTick), and "Find a new match"
+            // is the user's manual escape hatch. MeetAt has no auto-
+            // expiry; the user clicks Find-a-new-match when ready.
+            // Backend rules: a logged-out user's fight session is
+            // expired server-side on $disconnect, so a re-login won't
+            // resume a real session — but the panel staying on
+            // CARD_FIGHT gives the user visual continuity so they can
+            // hop to the meeting world without losing their place.
+            if (currentFightSession != null) return;
             rootCards.show(rootCardHost, CARD_GATE);
             return;
         }
@@ -1323,6 +1357,73 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
      *  the way a saturated red would. */
     private static final Color UNSELECTED_TOGGLE_FG = new Color(0xef, 0x53, 0x50);
 
+    /** Side length of the leading checkmark icon on a picked
+     *  style/build toggle. Sized to roughly the cap-height of the
+     *  15pt-bold label so the check reads as part of the same row
+     *  rather than a separate glyph. */
+    private static final int CHECK_ICON_SIZE = 14;
+
+    /** Drawn to the left of the label when a style/build toggle is
+     *  {@code isSelected()}. Paired with {@link #BLANK_TOGGLE_ICON}
+     *  on the deselected state (same dims, no glyph) so flipping
+     *  the toggle doesn't shift the label horizontally. */
+    private static final Icon CHECKMARK_TOGGLE_ICON = makeCheckmarkIcon(SELECTED_TOGGLE_FG, CHECK_ICON_SIZE);
+
+    /** Transparent stand-in matching {@link #CHECKMARK_TOGGLE_ICON}'s
+     *  dimensions so the text origin stays put when the toggle
+     *  flips from selected to unselected. */
+    private static final Icon BLANK_TOGGLE_ICON = makeBlankIcon(CHECK_ICON_SIZE);
+
+    /** Anti-aliased vector checkmark — three points: bottom-left,
+     *  mid-bottom, top-right. Drawn with a moderately thick stroke
+     *  (≈2px) so it reads cleanly at the 14×14 size without
+     *  appearing spindly against the toggle's bold label. The
+     *  colour is parameterised so callers can match the picked-
+     *  state tint (currently {@link #SELECTED_TOGGLE_FG}). */
+    private static Icon makeCheckmarkIcon(Color color, int size)
+    {
+        return new Icon()
+        {
+            @Override public int getIconWidth() { return size; }
+            @Override public int getIconHeight() { return size; }
+            @Override public void paintIcon(Component c, Graphics g, int x, int y)
+            {
+                Graphics2D g2 = (Graphics2D) g.create();
+                try
+                {
+                    g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+                    g2.setColor(color);
+                    g2.setStroke(new BasicStroke(2.2f, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND));
+                    int x1 = x + 2;
+                    int y1 = y + size / 2;
+                    int x2 = x + (size * 5) / 12;
+                    int y2 = y + size - 3;
+                    int x3 = x + size - 2;
+                    int y3 = y + 2;
+                    g2.drawLine(x1, y1, x2, y2);
+                    g2.drawLine(x2, y2, x3, y3);
+                }
+                finally
+                {
+                    g2.dispose();
+                }
+            }
+        };
+    }
+
+    /** Paints nothing but reserves the same footprint as
+     *  {@link #makeCheckmarkIcon} so the toggle's text origin
+     *  doesn't shift between selected/unselected. */
+    private static Icon makeBlankIcon(int size)
+    {
+        return new Icon()
+        {
+            @Override public int getIconWidth() { return size; }
+            @Override public int getIconHeight() { return size; }
+            @Override public void paintIcon(Component c, Graphics g, int x, int y) { /* intentional no-op */ }
+        };
+    }
+
     /** Minimal HTML escaping — only the four chars Swing's HTML view
      *  actually reinterprets. Inputs here are bounded enum labels +
      *  small integers so we don't need a full sanitiser. */
@@ -1352,14 +1453,23 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
     {
         selfRegion = prefs.getRegion(DEFAULT_REGION);
 
-        Set<Style> persistedStyles = prefs.getStyles(EnumSet.of(Style.NH));
+        // Both defaults are empty so a first-launch user (no
+        // persisted picks yet) sees every toggle in the "not
+        // picked" state — same intent as the field initialisers
+        // above. The non-empty guard still applies: if the user
+        // previously persisted a non-empty set, we restore it
+        // verbatim; an empty persisted set (e.g. after Reset
+        // Options + prefs.clear()) leaves the field initialiser
+        // empty state intact, which is also the correct first-
+        // launch behaviour.
+        Set<Style> persistedStyles = prefs.getStyles(EnumSet.noneOf(Style.class));
         if (!persistedStyles.isEmpty())
         {
             selectedStyles.clear();
             selectedStyles.addAll(persistedStyles);
         }
 
-        Set<BuildType> persistedBuilds = prefs.getBuilds(EnumSet.allOf(BuildType.class));
+        Set<BuildType> persistedBuilds = prefs.getBuilds(EnumSet.noneOf(BuildType.class));
         if (!persistedBuilds.isEmpty())
         {
             selectedBuildTypes.clear();
@@ -1427,16 +1537,15 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         if (invitesContainer != null) invitesContainer.removeAll();
         incomingCardsById.clear();
         incomingInviteNames.clear();
-        // Restore the same first-launch defaults: NH style + every
-        // build. Matches the {@link #selectedStyles} / {@link
-        // #selectedBuildTypes} field initialisers — keep these two
-        // sites in lock-step. User can deselect immediately after a
-        // reset, but they always start from a non-empty, lobby-ready
-        // state so Go-to-lobby is enabled by default.
+        // Match the first-launch defaults (see the field
+        // initialisers for {@link #selectedStyles} / {@link
+        // #selectedBuildTypes}): both sets empty so the user has
+        // to re-opt-in to every style + build they want matches
+        // for. Go-to-lobby stays disabled until they pick ≥1 of
+        // each — see {@link #updateGoToLobbyEnabled()}. Keep these
+        // two sites (field init + reset) in lock-step.
         selectedStyles.clear();
-        selectedStyles.add(Style.NH);
         selectedBuildTypes.clear();
-        for (BuildType bt : BuildType.values()) selectedBuildTypes.add(bt);
         selfRegion = DEFAULT_REGION;
         rankMinIdx = 0;
         rankMaxIdx = RANK_LABELS.length - 1;
@@ -1644,6 +1753,82 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
     {
         this.isGameLoggedInSupplier = supplier;
         applyLoginGateState();
+    }
+
+    /** Wires the in-game popup notifier used by {@link #onIncomingInvite}
+     *  to flash an OSRS-style notification when another player invites
+     *  the user to fight. The accept callback fires
+     *  {@code notifier.showInvite(name, subtext)}; the no-op default
+     *  keeps the panel functional in unit tests and the
+     *  no-overlay-wired startup window. */
+    public void setLobbyInviteNotifier(LobbyInviteNotifier notifier)
+    {
+        this.inviteNotifier = notifier;
+    }
+
+    /** Lightweight strategy hook so the panel doesn't import an
+     *  {@code Overlay} subclass directly — keeps unit tests free of
+     *  RuneLite client dependencies. The production implementation is
+     *  {@link com.pvp.leaderboard.overlay.LobbyInviteNotificationOverlay}
+     *  via a lambda wired from the plugin. */
+    @FunctionalInterface
+    public interface LobbyInviteNotifier
+    {
+        /** Pop an in-game notification for an incoming fight invite.
+         *  {@code inviteId} is the server-side {@code invite_id} and
+         *  is the dedupe key — implementations should drop a call
+         *  whose id matches the most recently shown invite so a
+         *  server replay (reconnect, bus double-fire, etc.) doesn't
+         *  re-pop the same popup.
+         *
+         *  <p>{@code senderNameColor} is the colour the sender's name
+         *  should render in — by spec the panel passes
+         *  {@link RankUtils#getRankColor(String)} keyed on the
+         *  sender's resolved rank, or {@link java.awt.Color#WHITE}
+         *  when the shard hasn't resolved the rank yet ("Waiting"
+         *  state). This mirrors how the same name is coloured on
+         *  their lobby row so the popup feels of-a-piece with the
+         *  rest of the matchmaking UI. */
+        void showInvite(String inviteId, String senderName, String subtext, Color senderNameColor);
+    }
+
+    /** Wires the in-game popup notifier used by {@link #onFightProposed}
+     *  to flash an OSRS-style "Match found!" notification the instant
+     *  a matchmaking fight locks in (server-side {@code lobby/fight_proposed}).
+     *  The no-op default keeps the panel functional in unit tests and
+     *  the no-overlay-wired startup window. */
+    public void setMatchFoundNotifier(MatchFoundNotifier notifier)
+    {
+        this.matchFoundNotifier = notifier;
+    }
+
+    /** Strategy hook for the match-found popup. Mirror of
+     *  {@link LobbyInviteNotifier} for the next step in the lobby
+     *  flow. The production implementation is
+     *  {@link com.pvp.leaderboard.overlay.MatchFoundNotificationOverlay}
+     *  via a lambda wired from the plugin.
+     *
+     *  <p>{@code isInviter} carries the perspective: {@code true} when
+     *  the local user originated the invite ({@link #outgoingInvitesByOpponent}
+     *  contained this opponent at the moment {@code lobby/fight_proposed}
+     *  arrived), {@code false} when the local user clicked Accept on
+     *  an incoming card. The overlay flips its caption tail
+     *  accordingly ({@code "<opp> accepted your invite"} vs just
+     *  {@code "<opp>"}).
+     *
+     *  <p>{@code opponentNameColor} follows the same rank-tint rule
+     *  as {@link LobbyInviteNotifier#showInvite}'s
+     *  {@code senderNameColor} so the popup feels of-a-piece with the
+     *  rest of the matchmaking UI.
+     */
+    @FunctionalInterface
+    public interface MatchFoundNotifier
+    {
+        void showMatch(String fightSessionId,
+                       String opponentName,
+                       String subtext,
+                       Color opponentNameColor,
+                       boolean isInviter);
     }
 
     /** Public re-entry point for {@link #applyLoginGateState()} so the
@@ -2541,6 +2726,67 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
             && (invite.sender.currentRankIdx < rankMinIdx
                 || invite.sender.currentRankIdx > rankMaxIdx)) return;
         addIncomingInvite(invite);
+        // In-game popup so users not actively looking at the sidepanel
+        // still notice the invite. Config-gated inside the overlay
+        // itself so a user who finds the popup noisy can disable it
+        // without unregistering anything. No-op when no notifier wired
+        // (unit tests, pre-overlay startup window).
+        LobbyInviteNotifier notifier = this.inviteNotifier;
+        if (notifier != null && invite.sender != null)
+        {
+            String senderName = displayNameOf(invite.sender);
+            String sub = buildInviteNotificationSubtext(invite);
+            // Mirror the lobby row's name-tint logic exactly (see the
+            // PlayerRow render in #addLobbyRow) so the popup's sender
+            // name is the same colour as the same name displayed in
+            // the sidepanel: rank-tier hue when the shard has
+            // resolved, plain white while "Waiting".
+            Color senderColor = senderNameColorForPopup(invite.sender);
+            notifier.showInvite(invite.inviteId, senderName, sub, senderColor);
+        }
+    }
+
+    /** Builds the second-line summary for the lobby invite popup —
+     *  "{style} ({build}) at {location}" with sensible omissions when
+     *  fields are absent (e.g. Veng has no sub-location). Public-package
+     *  for testability so the notifier wiring can be verified without
+     *  spinning up the overlay. */
+    static String buildInviteNotificationSubtext(IncomingInvite invite)
+    {
+        if (invite == null) return "";
+        StringBuilder sb = new StringBuilder();
+        if (invite.style != null) sb.append(invite.style.label);
+        if (invite.build != null)
+        {
+            if (sb.length() > 0) sb.append(' ');
+            sb.append('(').append(invite.build.label).append(')');
+        }
+        if (invite.location != null && !invite.location.isEmpty())
+        {
+            if (sb.length() > 0) sb.append(" at ");
+            sb.append(invite.location);
+        }
+        return sb.toString();
+    }
+
+    /** Resolves the sender's name colour for the in-game popup using
+     *  the same rule the lobby row applies (see {@code addLobbyRow}'s
+     *  {@code rankColor} branch): if {@code peakRankIdx} is a known
+     *  index, tint by {@link RankUtils#getRankColor(String)} keyed on
+     *  the rank label; otherwise default to {@link Color#WHITE} so a
+     *  freshly-joined player whose shard hasn't published yet still
+     *  reads cleanly. Package-private + static for testability.
+     *
+     *  <p>Note: {@code blocked} doesn't apply here — by the time an
+     *  invite from a blocked sender reaches us, server-side filtering
+     *  has already dropped it. The lobby row's grey-blocked path is
+     *  intentionally NOT mirrored. */
+    static Color senderNameColorForPopup(LobbyMember sender)
+    {
+        if (sender == null) return Color.WHITE;
+        boolean rankKnown = sender.peakRankIdx >= 0 && sender.peakRankIdx < RANK_LABELS.length;
+        if (!rankKnown) return Color.WHITE;
+        return RankUtils.getRankColor(RANK_LABELS[sender.peakRankIdx]);
     }
 
     @Override
@@ -2639,6 +2885,14 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         // shows up, the user never clicked / the click didn't fire.
         LOG.debug("MatchmakingLobbyPanel.onFightProposed: swapping to Confirm Fight view sid={} opponent={} style={} build={} location={}",
             session.fightSessionId, session.opponent.name, session.style, session.build, session.location);
+        // Capture inviter perspective BEFORE we drop the outgoing
+        // invite below — otherwise the "did we initiate this fight"
+        // question is unanswerable two lines later. Used purely for
+        // the popup body's caption variant ("<opp> accepted your
+        // invite" vs just "<opp>"); the rest of the swap-to-confirm
+        // flow doesn't care which side originated.
+        boolean iWasInviter = session.opponent.playerId != null
+            && outgoingInvitesByOpponent.containsKey(session.opponent.playerId);
         // Drop any local outgoing-invite tracking for this opponent — the
         // invite has been promoted into a real fight session and the
         // [Invited M:SS] chip should disappear from the lobby roster.
@@ -2663,6 +2917,43 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         // showFightSetup() already snaps the JScrollPane viewport to (0,0)
         // post-layout, so no extra scroll-to-top is needed here.
         showFightSetup(buildConfirmFightView());
+
+        // In-game popup so users not actively looking at the sidepanel
+        // still notice the match locking in. Config-gated inside the
+        // overlay itself so a user who finds it noisy can disable it
+        // without unregistering anything. No-op when no notifier wired.
+        MatchFoundNotifier mfn = this.matchFoundNotifier;
+        if (mfn != null)
+        {
+            String opponentDisplay = displayNameOf(session.opponent);
+            String sub = buildMatchFoundNotificationSubtext(session);
+            Color opponentColor = senderNameColorForPopup(session.opponent);
+            mfn.showMatch(session.fightSessionId, opponentDisplay, sub, opponentColor, iWasInviter);
+        }
+    }
+
+    /** Builds the second-line summary for the match-found popup —
+     *  "{style} ({build}) at {location}" with sensible omissions when
+     *  fields are absent (e.g. Veng has no sub-location). Mirrors
+     *  {@link #buildInviteNotificationSubtext} but for the
+     *  {@link FightSession} carrier instead of {@link IncomingInvite}.
+     *  Package-private + static for testability. */
+    static String buildMatchFoundNotificationSubtext(FightSession session)
+    {
+        if (session == null) return "";
+        StringBuilder sb = new StringBuilder();
+        if (session.style != null) sb.append(session.style.label);
+        if (session.build != null)
+        {
+            if (sb.length() > 0) sb.append(' ');
+            sb.append('(').append(session.build.label).append(')');
+        }
+        if (session.location != null && !session.location.isEmpty())
+        {
+            if (sb.length() > 0) sb.append(" at ");
+            sb.append(session.location);
+        }
+        return sb.toString();
     }
 
     @Override

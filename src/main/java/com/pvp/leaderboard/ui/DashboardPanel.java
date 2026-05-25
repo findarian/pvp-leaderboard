@@ -772,6 +772,29 @@ public class DashboardPanel extends PluginPanel
         }
     }
 
+    /** Forwards the in-game popup notifier from the plugin lifecycle
+     *  layer to the matchmaking panel. Wired once on plugin start;
+     *  the overlay it bridges is config-gated internally so a null
+     *  notifier is acceptable (e.g. during unit tests). */
+    public void setLobbyInviteNotifier(MatchmakingLobbyPanel.LobbyInviteNotifier notifier)
+    {
+        if (matchmakingLobbyPanel != null)
+        {
+            matchmakingLobbyPanel.setLobbyInviteNotifier(notifier);
+        }
+    }
+
+    /** Forwards the match-found popup notifier from the plugin lifecycle
+     *  layer to the matchmaking panel. Same lifecycle + nullability
+     *  contract as {@link #setLobbyInviteNotifier}. */
+    public void setMatchFoundNotifier(MatchmakingLobbyPanel.MatchFoundNotifier notifier)
+    {
+        if (matchmakingLobbyPanel != null)
+        {
+            matchmakingLobbyPanel.setMatchFoundNotifier(notifier);
+        }
+    }
+
     /**
      * Loads match history only if this is a new player search or data is stale (>1 hour old).
      * Called from game events - will skip refresh if data is fresh.
@@ -833,6 +856,14 @@ public class DashboardPanel extends PluginPanel
         {
             SwingUtilities.invokeLater(open);
         }
+        // Trigger a lobby rank-refresh for this player. The lookup path
+        // fetches /user which the lobby service can fall back to when
+        // a shard miss left a roster row stuck on "Waiting". Without
+        // this nudge a user has to wait up to 60 s (the periodic
+        // retry) for the chip to update — even though we now hold the
+        // freshest rank data locally. NoOpLobbyService + DevLobbyFixture
+        // get the default-no-op via the LobbyService interface.
+        lobbyService.refreshRankForPlayer(playerId);
     }
 
     /**
@@ -1090,7 +1121,15 @@ public class DashboardPanel extends PluginPanel
     {
         try {
             String canonBucket = bucket == null ? "overall" : bucket.toLowerCase();
-            ShardRank sr = pvpDataService.getShardRankByName(playerName, canonBucket)
+            // bypassCache=true: this method runs on a SwingWorker
+            // background thread spawned from openPlayerLookup —
+            // i.e. a user gesture. The 2026-05-24 backend handoff
+            // moved shard writes to a DynamoDB-stream-driven path
+            // with ≈30 s propagation, so an explicit "look this
+            // player up" should pick up post-match rank changes
+            // instead of serving the cached payload (which could
+            // be up to 60 min stale).
+            ShardRank sr = pvpDataService.getShardRankByName(playerName, canonBucket, true)
                 .get(5, java.util.concurrent.TimeUnit.SECONDS);
             return sr != null && sr.rank > 0 ? sr.rank : -1;
         } catch (Exception ex) {

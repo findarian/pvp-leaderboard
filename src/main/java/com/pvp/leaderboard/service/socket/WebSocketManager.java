@@ -224,8 +224,21 @@ public final class WebSocketManager
     {
         if (shutdownCalled.get())
         {
-            log.debug("WebSocketManager: connect after shutdown — ignoring");
-            return;
+            // Plugin re-toggle path: RuneLite preserves the parent
+            // injector across off/on toggles, so this {@code @Singleton}
+            // survives shutDown() with {@code shutdownCalled=true}. A
+            // fresh connect() after that re-toggle should succeed, not
+            // sit silently refusing forever (root cause of the "I
+            // turned the plugin off and on and now no one's in the
+            // lobby" QA report). Treat the connect as a soft restart:
+            // clear the latch + the intentional-disconnect flag so the
+            // reconnect ladder + listener callbacks behave like a
+            // fresh-start manager. The shutdown() that flipped the
+            // flag also closed the socket + cancelled any pending
+            // reconnect, so we're starting from a clean state.
+            log.debug("WebSocketManager: connect after shutdown — clearing latch for plugin restart");
+            shutdownCalled.set(false);
+            intentionalDisconnect = false;
         }
         if (uuid == null || !UUID_V4_LOWERCASE.matcher(uuid).matches())
         {

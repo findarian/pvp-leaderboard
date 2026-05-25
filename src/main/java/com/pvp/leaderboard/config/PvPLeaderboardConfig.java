@@ -301,6 +301,43 @@ public interface PvPLeaderboardConfig extends Config
 		return 3;
 	}
 
+	@ConfigItem(
+		keyName = "enableLobbyInviteNotification",
+		name = "Lobby invite popup",
+		description = "Show an OSRS-style in-game popup when another player invites you to fight in the matchmaking lobby",
+		section = notificationSection,
+		position = 4
+	)
+	default boolean enableLobbyInviteNotification()
+	{
+		return true;
+	}
+
+	@ConfigItem(
+		keyName = "lobbyInviteNotificationDurationSeconds",
+		name = "Lobby invite popup duration",
+		description = "How long the lobby invite popup stays on screen (seconds). Includes fade in/out.",
+		section = notificationSection,
+		position = 5
+	)
+	@Range(min = 1, max = 30)
+	default int lobbyInviteNotificationDurationSeconds()
+	{
+		return 3;
+	}
+
+	@ConfigItem(
+		keyName = "enableMatchFoundNotification",
+		name = "Match found popup",
+		description = "Show an OSRS-style in-game popup when a matchmaking fight is locked in (the other player accepted your invite, or you accepted theirs).",
+		section = notificationSection,
+		position = 6
+	)
+	default boolean enableMatchFoundNotification()
+	{
+		return true;
+	}
+
 	// ==================== Other Settings ====================
 
 	@ConfigItem(

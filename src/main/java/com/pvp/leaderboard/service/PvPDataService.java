@@ -713,8 +713,56 @@ public class PvPDataService
 	/**
      * Primary Entry Point: Get Rank by Name using the SHA256 Shard Logic
      * Uses in-flight deduplication to prevent multiple concurrent lookups for the same (player, bucket).
+     *
+     * <p>Passive default — overlay refresh tickers, background fight-monitor
+     * lookups, etc. should call this variant. Hits the in-memory positive
+     * shard cache eagerly to control CDN cost.
      */
 	public CompletableFuture<ShardRank> getShardRankByName(String playerName, String bucket)
+	{
+        return getShardRankByName(playerName, bucket, false);
+	}
+
+	/**
+     * Cache-aware overload of {@link #getShardRankByName(String, String)} for
+     * paths that need the freshest shard data the backend's
+     * DynamoDB-stream-driven incremental writer has produced (≈30 s
+     * propagation, per the 2026-05-24 backend handoff).
+     *
+     * <p>{@code bypassCache=true} flips three behaviours vs the passive
+     * default:
+     * <ul>
+     *   <li>Skip the in-memory positive shard cache read in
+     *       {@link #getShard(String, boolean)} so the next call hits the
+     *       CDN even when a cached payload is still within the 60-min
+     *       TTL.</li>
+     *   <li>Skip the {@link #missingPlayerUntilMs} per-player negative
+     *       cache read so a player whose rank just landed in the shard
+     *       (but who was previously marked "missing") is re-discovered
+     *       on the next explicit refresh.</li>
+     *   <li>De-duplicate against other in-flight bypass requests
+     *       (same name+bucket+bypass) but NOT against passive in-flight
+     *       requests — a passive request's cached behaviour would
+     *       silently degrade the explicit-refresh contract.</li>
+     * </ul>
+     *
+     * <p>{@code bypassCache=true} still respects the {@link #shardFailUntil}
+     * negative-cache (protective backoff against the CDN returning 5xx) and
+     * still writes successful payloads into the positive shard cache so
+     * subsequent passive readers benefit from the fresher data.
+     *
+     * <p>Use {@code bypassCache=true} for:
+     * <ul>
+     *   <li>Explicit user actions (Player Lookup tab open, [Refresh]
+     *       button, etc.).</li>
+     *   <li>Lobby roster enrichment in {@code WebSocketLobbyService} —
+     *       new joiners + periodic "Waiting"-row retries.</li>
+     * </ul>
+     * Passive overlays + auto-triggered post-fight tier checks should
+     * stay on {@link #getShardRankByName(String, String)} to keep CDN
+     * cost bounded.
+     */
+	public CompletableFuture<ShardRank> getShardRankByName(String playerName, String bucket, boolean bypassCache)
 	{
         if (playerName == null || playerName.trim().isEmpty()) {
             return CompletableFuture.completedFuture(null);
@@ -723,9 +771,13 @@ public class PvPDataService
         // 1. Canonicalize Name and bucket (normalize spaces for consistency)
         String canonicalName = playerName.trim().replaceAll("\\s+", " ").toLowerCase();
         String bucketPath = (bucket == null || bucket.isEmpty()) ? "overall" : bucket.toLowerCase();
-        
-        // Create lookup key for deduplication
-        String lookupKey = canonicalName + ":" + bucketPath;
+
+        // Dedupe key includes the bypass flag so a passive cached
+        // request and a bypass request never share a future. Two
+        // concurrent bypass requests for the same (name,bucket) still
+        // share — that's just dedupe and they'd land on the same
+        // network result anyway.
+        String lookupKey = canonicalName + ":" + bucketPath + (bypassCache ? ":bypass" : "");
         
         // Check for existing in-flight lookup - if one exists, return it instead of starting a new one
         CompletableFuture<ShardRank> existingLookup = inFlightLookups.get(lookupKey);
@@ -747,11 +799,18 @@ public class PvPDataService
         future.whenComplete((result, ex) -> inFlightLookups.remove(lookupKey, future));
         
         try {
-            // Check Negative Cache first (1 hour block)
-            Long missingUntil = missingPlayerUntilMs.get(canonicalName);
-            if (missingUntil != null && System.currentTimeMillis() < missingUntil) {
-                future.complete(null);
-                return future;
+            // Negative cache only applies to passive callers. Explicit
+            // refresh paths bypass it intentionally — the 1-h backoff
+            // was the root cause of the "rank stuck on Waiting" QA
+            // report fixed at 2026-05-24, and the new
+            // DynamoDB-stream writer means a "missing" player can flip
+            // to "present" within ~30 s of their first match landing.
+            if (!bypassCache) {
+                Long missingUntil = missingPlayerUntilMs.get(canonicalName);
+                if (missingUntil != null && System.currentTimeMillis() < missingUntil) {
+                    future.complete(null);
+                    return future;
+                }
             }
 
             // 2. Shard Key = first 3 chars of lowercase name (e.g., "toyco" -> "toy").
@@ -766,8 +825,10 @@ public class PvPDataService
                 : canonicalName.toLowerCase();
             String url = SHARD_BASE_URL + "/" + bucketPath + "/" + shardKey + ".json";
 
-            // 4. Fetch/Get Cached Shard
-            getShard(url).thenCompose(shardJson -> {
+            // 4. Fetch/Get Cached Shard — bypass flag propagated so the
+            // network call lands when bypassCache=true even if a cached
+            // payload sits within TTL.
+            getShard(url, bypassCache).thenCompose(shardJson -> {
                 if (shardJson == null) {
                     // Also mark player as missing for 1 hour when shard doesn't exist
                     missingPlayerUntilMs.put(canonicalName, System.currentTimeMillis() + MISSING_PLAYER_BACKOFF_MS);
@@ -786,11 +847,12 @@ public class PvPDataService
                 
                 JsonObject entry = nameMap.getAsJsonObject(canonicalName);
                 
-                // Scenario B: Redirect
+                // Scenario B: Redirect — propagate bypass through the
+                // SHA → shard step so a "fresh data please" call doesn't
+                // half-bypass and pick up a stale account_rank_info_map.
                 if (entry.has("redirect")) {
                     String accountSha = entry.get("redirect").getAsString();
-                    // FIX: Complete the outer future with the redirect result
-                    resolveRedirect(accountSha, bucketPath).thenAccept(result -> {
+                    resolveRedirect(accountSha, bucketPath, bypassCache).thenAccept(result -> {
                         future.complete(result);
                     }).exceptionally(ex -> {
                         future.complete(null);
@@ -816,14 +878,25 @@ public class PvPDataService
 	}
 
     /**
-     * Helper to resolve Redirect (Account SHA -> Rank Shard)
-     * Supports chained redirects with max depth of 10
+     * Helper to resolve Redirect (Account SHA -> Rank Shard).
+     * Supports chained redirects with max depth of 10.
+     *
+     * <p>Default passive entry — preserved for callers that don't care
+     * about freshness. New code should prefer
+     * {@link #resolveRedirect(String, String, boolean)} so the bypass
+     * decision propagates end-to-end (a half-bypassed lookup would
+     * read fresh from the name shard then stale from the account
+     * shard, which defeats the whole point of an explicit refresh).
      */
     private CompletableFuture<ShardRank> resolveRedirect(String accountSha, String bucket) {
-        return resolveRedirectWithDepth(accountSha, bucket, 0);
+        return resolveRedirectWithDepth(accountSha, bucket, 0, false);
     }
 
-    private CompletableFuture<ShardRank> resolveRedirectWithDepth(String accountSha, String bucket, int depth) {
+    private CompletableFuture<ShardRank> resolveRedirect(String accountSha, String bucket, boolean bypassCache) {
+        return resolveRedirectWithDepth(accountSha, bucket, 0, bypassCache);
+    }
+
+    private CompletableFuture<ShardRank> resolveRedirectWithDepth(String accountSha, String bucket, int depth, boolean bypassCache) {
         CompletableFuture<ShardRank> future = new CompletableFuture<>();
         
         if (depth >= 10) {
@@ -843,8 +916,9 @@ public class PvPDataService
         String shardKey = accountSha.substring(0, 3);
         String url = SHARD_BASE_URL + "/" + bucket + "/" + shardKey + ".json";
 
-        // 2. Fetch/Get Cached Shard
-        getShard(url).thenAccept(shardJson -> {
+        // 2. Fetch/Get Cached Shard — bypass propagated for redirect
+        // chains so an explicit refresh reads fresh at every hop.
+        getShard(url, bypassCache).thenAccept(shardJson -> {
             if (shardJson == null) {
                 future.complete(null);
                 return;
@@ -858,7 +932,7 @@ public class PvPDataService
                 // Check for chained redirect
                 if (entry.has("redirect")) {
                     String nextSha = entry.get("redirect").getAsString();
-                    resolveRedirectWithDepth(nextSha, bucket, depth + 1)
+                    resolveRedirectWithDepth(nextSha, bucket, depth + 1, bypassCache)
                         .thenAccept(future::complete);
                     return;
                 }
@@ -899,22 +973,51 @@ public class PvPDataService
     }
 
 	/**
-	 * Low-level shard fetch with 60s Cache
+	 * Low-level shard fetch with 60-min positive cache, 60s failure backoff.
+	 *
+	 * <p>Passive entry — overlay tickers, post-fight tier lookups, etc.
+	 * should call this. The positive cache hit short-circuits before
+	 * any HTTP work so CDN cost stays bounded.
 	 */
 	public CompletableFuture<JsonObject> getShard(String url)
+	{
+		return getShard(url, false);
+	}
+
+	/**
+	 * Cache-aware overload of {@link #getShard(String)}. When
+	 * {@code bypassCache=true} the positive cache read is skipped so the
+	 * call always hits the CDN; the {@link #shardFailUntil} negative
+	 * backoff is still honoured (we don't want explicit refreshes to
+	 * thunder-stampede a 5xx). Successful responses still populate
+	 * {@link #shardCache} so any concurrent passive reader benefits
+	 * from the fresher payload.
+	 *
+	 * <p>Pair with {@link #getShardRankByName(String, String, boolean)}
+	 * which threads the same flag through the redirect chain.
+	 */
+	public CompletableFuture<JsonObject> getShard(String url, boolean bypassCache)
 	{
 		CompletableFuture<JsonObject> future = new CompletableFuture<>();
         
         long now = System.currentTimeMillis();
         
-        // 1. Check Memory Cache
-        ShardEntry cached = shardCache.get(url);
-        if (cached != null && (now - cached.getTimestamp() < SHARD_CACHE_EXPIRY_MS)) {
-            future.complete(cached.getPayload());
-            return future;
+        // 1. Check Memory Cache — bypassed when bypassCache=true so an
+        // explicit refresh picks up the latest DynamoDB-stream write
+        // (≈30 s propagation) instead of serving a payload that might
+        // be up to 60 minutes stale.
+        if (!bypassCache) {
+            ShardEntry cached = shardCache.get(url);
+            if (cached != null && (now - cached.getTimestamp() < SHARD_CACHE_EXPIRY_MS)) {
+                future.complete(cached.getPayload());
+                return future;
+            }
         }
         
-        // 2. Check Negative Cache (Fail Until)
+        // 2. Check Negative Cache (Fail Until). Still honoured even
+        // on bypass — this is a protective backoff against the CDN
+        // returning 5xx, not a freshness cache, and an explicit
+        // refresh shouldn't be a thundering-herd vector.
         Long failUntil = shardFailUntil.get(url);
         if (failUntil != null && now < failUntil) {
             future.complete(null);

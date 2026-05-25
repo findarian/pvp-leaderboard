@@ -48,6 +48,21 @@ public class RankOverlay extends Overlay
     private volatile boolean selfRankAttempted = false;
     private volatile long nextSelfRankAllowedAtMs = 0L;
 
+    /** Scene shard lookup state for whitelisted players visible in the
+     *  world who don't yet have a rank label above their head. Aligns
+     *  retry interval with the backend's DynamoDB-stream shard writer
+     *  (~30 s propagation) so a newly-active opt-in player stops
+     *  sitting blank for minutes while {@code whitelist.json} waits
+     *  for its 9:30 refresh cycle. Uses
+     *  {@link PvPDataService#getShardRankByName(String, String, boolean)}
+     *  with {@code bypassCache=true} on each attempt so we don't serve
+     *  a stale 60-min positive-cache entry from a prior passive read.
+     *  Bounded by whitelist membership + in-scene visibility + this
+     *  per-player backoff — not a whole-world shard poll. */
+    private static final long SCENE_SHARD_RETRY_MS = 30_000L;
+    private final ConcurrentHashMap<String, Long> sceneShardLastAttemptMs = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, Boolean> sceneShardInFlight = new ConcurrentHashMap<>();
+
     // MMR change notification queue (for multi-kill scenarios)
     private final java.util.concurrent.ConcurrentLinkedQueue<MmrNotification> mmrNotificationQueue = new java.util.concurrent.ConcurrentLinkedQueue<>();
     private volatile MmrNotification currentMmrNotification = null;
@@ -365,6 +380,8 @@ public class RankOverlay extends Overlay
             displayedRanksTimestamp.clear();
             apiSetRanks.clear();
             whitelistPlayerCache.clearLookupCache();
+            sceneShardLastAttemptMs.clear();
+            sceneShardInFlight.clear();
             lastBucketKey = currentBucket;
             selfRankAttempted = false;
             nextSelfRankAllowedAtMs = 0L;
@@ -490,8 +507,19 @@ public class RankOverlay extends Overlay
                 // No API data - use whitelist cache
                 displayRank = formattedWhitelistRank;
             }
-            
-            if (displayRank == null) continue;
+
+            // Whitelisted + visible but still no label — the
+            // whitelist.json row may be missing this bucket, the
+            // player may have just opted in (CDN whitelist lags
+            // heartbeats), or shards may have fresher data than
+            // the last whitelist pull. Kick an async shard read
+            // (bypass positive cache) instead of waiting up to
+            // 9:30 for the next whitelist.json refresh.
+            if (displayRank == null)
+            {
+                fetchSceneShardRankIfNeeded(playerName, bucket, nameKey);
+                continue;
+            }
             
             // Get player's screen position
             Point headLoc = player.getCanvasTextLocation(graphics, "", heightOffset);
@@ -503,6 +531,65 @@ public class RankOverlay extends Overlay
             
             renderRankText(graphics, displayRank, x, y, Math.max(10, config.rankTextSize()));
         }
+    }
+
+    /**
+     * Async shard fetch for a whitelisted, in-scene player who still
+     * has no rank label. Uses {@code bypassCache=true} so each retry
+     * picks up the DynamoDB-stream writer's ~30 s shard updates
+     * instead of a stale passive-cache entry. Throttled to one
+     * in-flight attempt per player and {@link #SCENE_SHARD_RETRY_MS}
+     * between attempts so render() doesn't hammer the CDN.
+     */
+    private void fetchSceneShardRankIfNeeded(String playerName, String bucket, String nameKey)
+    {
+        long now = System.currentTimeMillis();
+        if (!shouldAttemptSceneShardLookup(
+            sceneShardLastAttemptMs.get(nameKey), now, SCENE_SHARD_RETRY_MS,
+            sceneShardInFlight.containsKey(nameKey)))
+        {
+            return;
+        }
+        if (sceneShardInFlight.putIfAbsent(nameKey, Boolean.TRUE) != null)
+        {
+            return;
+        }
+        sceneShardLastAttemptMs.put(nameKey, now);
+        log.debug("[Overlay] Scene shard lookup (bypass) for whitelisted player {} bucket={}",
+            playerName, bucket);
+
+        pvpDataService.getShardRankByName(playerName, bucket, true)
+            .whenComplete((sr, ex) ->
+            {
+                sceneShardInFlight.remove(nameKey);
+                if (ex != null)
+                {
+                    log.debug("[Overlay] Scene shard lookup failed for {}: {}",
+                        playerName, ex.getMessage());
+                    return;
+                }
+                if (sr == null || sr.tier == null || sr.tier.trim().isEmpty())
+                {
+                    log.debug("[Overlay] Scene shard lookup miss for {} bucket={} (retry in {}s)",
+                        playerName, bucket, SCENE_SHARD_RETRY_MS / 1000L);
+                    return;
+                }
+                long fetchedAt = System.currentTimeMillis();
+                displayedRanks.put(nameKey, sr.tier);
+                displayedRanksTimestamp.put(nameKey, fetchedAt);
+                log.debug("[Overlay] Scene shard rank for {} bucket={}: {}",
+                    playerName, bucket, sr.tier);
+            });
+    }
+
+    /** Package-private for unit tests — decides whether a new scene
+     *  shard attempt is allowed given backoff + in-flight state. */
+    static boolean shouldAttemptSceneShardLookup(long lastAttemptMs, long nowMs,
+                                                 long retryIntervalMs, boolean inFlight)
+    {
+        if (inFlight) return false;
+        if (lastAttemptMs <= 0L) return true;
+        return nowMs - lastAttemptMs >= retryIntervalMs;
     }
 
     private void fetchRankForSelf(String selfName)

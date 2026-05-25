@@ -4,6 +4,8 @@ import com.google.inject.Provides;
 import com.pvp.leaderboard.config.PvPLeaderboardConfig;
 import com.pvp.leaderboard.game.FightMonitor;
 import com.pvp.leaderboard.game.MenuHandler;
+import com.pvp.leaderboard.overlay.LobbyInviteNotificationOverlay;
+import com.pvp.leaderboard.overlay.MatchFoundNotificationOverlay;
 import com.pvp.leaderboard.overlay.RankOverlay;
 import com.pvp.leaderboard.service.ClientIdentityService;
 import com.pvp.leaderboard.service.CognitoAuthService;
@@ -53,6 +55,12 @@ public class PvPLeaderboardPlugin extends Plugin
 
 	@Inject
 	private RankOverlay rankOverlay;
+
+	@Inject
+	private LobbyInviteNotificationOverlay lobbyInviteNotificationOverlay;
+
+	@Inject
+	private MatchFoundNotificationOverlay matchFoundNotificationOverlay;
 
 	@Inject
 	private EventBus eventBus;
@@ -185,6 +193,30 @@ public class PvPLeaderboardPlugin extends Plugin
 			eventBus.register(overlay);
 		}
 
+		// Lobby invite popup overlay — drawn into the game viewport
+		// when another player invites the user to a fight. Config-gated
+		// inside the overlay itself; safe to register unconditionally.
+		final LobbyInviteNotificationOverlay invitePopup = lobbyInviteNotificationOverlay;
+		if (invitePopup != null)
+		{
+			overlayManager.add(invitePopup);
+			// Hand the overlay reference to the panel as a lambda so
+			// the panel doesn't carry an Overlay-typed field (keeps
+			// unit tests free of RuneLite-client dependencies).
+			dashboardPanel.setLobbyInviteNotifier(invitePopup::showInvite);
+		}
+
+		// Match-found popup overlay — drawn the moment a matchmaking
+		// fight locks in (lobby/fight_proposed) so the user notices
+		// even when they're not watching the sidepanel. Same lifecycle
+		// and config-gated-internally contract as the invite popup.
+		final MatchFoundNotificationOverlay matchFoundPopup = matchFoundNotificationOverlay;
+		if (matchFoundPopup != null)
+		{
+			overlayManager.add(matchFoundPopup);
+			dashboardPanel.setMatchFoundNotifier(matchFoundPopup::showMatch);
+		}
+
 		// Init menu handler with RankOverlay
 		menuHandler.init(dashboardPanel, navButton);
 
@@ -227,6 +259,16 @@ public class PvPLeaderboardPlugin extends Plugin
 		{
 			eventBus.unregister(rankOverlay);
 			overlayManager.remove(rankOverlay);
+		}
+		if (lobbyInviteNotificationOverlay != null)
+		{
+			overlayManager.remove(lobbyInviteNotificationOverlay);
+			lobbyInviteNotificationOverlay.clear();
+		}
+		if (matchFoundNotificationOverlay != null)
+		{
+			overlayManager.remove(matchFoundNotificationOverlay);
+			matchFoundNotificationOverlay.clear();
 		}
 		clientToolbar.removeNavigation(navButton);
 		whitelistService.onLogout();

@@ -134,4 +134,13 @@ public interface LobbyService
      *  Default {@code 0} keeps the no-op service from feeding the
      *  panel a bogus countdown. */
     default long getNextReconnectAttemptEpochMs() { return 0L; }
+
+    /** Hint that the user has just opened a Player Lookup for
+     *  {@code playerName} (or otherwise triggered a fresh {@code /user}
+     *  profile pull). Implementations should clear any negative shard
+     *  caches keyed on this player and re-run lobby rank enrichment
+     *  so a "Waiting" chip caused by a transient shard miss flips to
+     *  the resolved rank without waiting for the next periodic
+     *  retry. No-op for transports without a rank cache. */
+    default void refreshRankForPlayer(String playerName) { /* no-op */ }
 }
