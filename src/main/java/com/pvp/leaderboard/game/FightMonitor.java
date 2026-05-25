@@ -2,7 +2,7 @@ package com.pvp.leaderboard.game;
 
 import com.google.gson.JsonObject;
 import com.pvp.leaderboard.config.PvPLeaderboardConfig;
-import com.pvp.leaderboard.lobby.LobbyJoinGate;
+import com.pvp.leaderboard.lobby.UserProfileLobbyJoinGate;
 import com.pvp.leaderboard.overlay.RankOverlay;
 import com.pvp.leaderboard.service.ClientIdentityService;
 import com.pvp.leaderboard.service.CognitoAuthService;
@@ -41,7 +41,7 @@ public class FightMonitor
     private final PvPDataService pvpDataService;
     private final CognitoAuthService cognitoAuthService;
     private final ClientIdentityService clientIdentityService;
-    private final LobbyJoinGate lobbyJoinGate;
+    private final UserProfileLobbyJoinGate lobbyJoinGate;
 
     // RankOverlay reference for MMR notifications
     private RankOverlay rankOverlay;
@@ -72,7 +72,7 @@ public class FightMonitor
         PvPDataService pvpDataService,
         CognitoAuthService cognitoAuthService,
         ClientIdentityService clientIdentityService,
-        LobbyJoinGate lobbyJoinGate)
+        UserProfileLobbyJoinGate lobbyJoinGate)
     {
         this.client = client;
         this.config = config;
