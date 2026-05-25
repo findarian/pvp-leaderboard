@@ -264,13 +264,15 @@ public final class UserProfileLobbyJoinGate implements LobbyJoinGate
                     {
                         // Soft 404 from the API — player profile doesn't
                         // exist yet (e.g. brand-new account with zero
-                        // matches). Treat as zero in every bucket.
+                        // matches). Surface zeros in the UI but do NOT
+                        // treat this as a successful refresh: promoting
+                        // to the hourly schedule here left new players
+                        // stuck below THRESHOLD until they restarted
+                        // RuneLite or clicked Refresh count manually.
                         applyAllZero();
+                        return;
                     }
-                    else
-                    {
-                        applyProfile(profile);
-                    }
+                    applyProfile(profile);
                     lastRefreshEpochMs = System.currentTimeMillis();
                     // First-success / manual-refresh promote: switch to
                     // the hourly cadence and reset the clock so the

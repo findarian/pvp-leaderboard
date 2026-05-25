@@ -1065,6 +1065,20 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
                 rootCards.show(rootCardHost, CARD_GATE);
                 return;
             }
+            // Don't auto-restore the lobby card while SMURF_GUARD
+            // counts aren't satisfied — the user would land on an empty
+            // roster with no join issued (maybeAutoJoinAfterLogin and
+            // forceRejoinIfEligible both defer on locked counts).
+            Map<Style, Integer> counts = joinGate.getMatchCounts();
+            for (Style s : selectedStyles)
+            {
+                Integer c = counts.get(s);
+                if (c == null || !LobbyJoinGate.isUnlocked(c))
+                {
+                    rootCards.show(rootCardHost, CARD_GATE);
+                    return;
+                }
+            }
             // currentVisibleCard() requires walking the rootCardHost's
             // children to find the one with isVisible()==true; cheaper
             // to just always re-issue the show(CARD_LOBBY) — CardLayout

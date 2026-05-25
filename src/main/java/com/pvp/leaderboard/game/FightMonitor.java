@@ -2,6 +2,7 @@ package com.pvp.leaderboard.game;
 
 import com.google.gson.JsonObject;
 import com.pvp.leaderboard.config.PvPLeaderboardConfig;
+import com.pvp.leaderboard.lobby.LobbyJoinGate;
 import com.pvp.leaderboard.overlay.RankOverlay;
 import com.pvp.leaderboard.service.ClientIdentityService;
 import com.pvp.leaderboard.service.CognitoAuthService;
@@ -40,6 +41,7 @@ public class FightMonitor
     private final PvPDataService pvpDataService;
     private final CognitoAuthService cognitoAuthService;
     private final ClientIdentityService clientIdentityService;
+    private final LobbyJoinGate lobbyJoinGate;
 
     // RankOverlay reference for MMR notifications
     private RankOverlay rankOverlay;
@@ -69,7 +71,8 @@ public class FightMonitor
         MatchResultService matchResultService,
         PvPDataService pvpDataService,
         CognitoAuthService cognitoAuthService,
-        ClientIdentityService clientIdentityService)
+        ClientIdentityService clientIdentityService,
+        LobbyJoinGate lobbyJoinGate)
     {
         this.client = client;
         this.config = config;
@@ -79,6 +82,7 @@ public class FightMonitor
         this.pvpDataService = pvpDataService;
         this.cognitoAuthService = cognitoAuthService;
         this.clientIdentityService = clientIdentityService;
+        this.lobbyJoinGate = lobbyJoinGate;
     }
 
     /**
@@ -593,6 +597,10 @@ public class FightMonitor
         }, scheduler).thenCompose(f -> f);
 
         submissionFuture.thenAccept(success -> {
+            if (Boolean.TRUE.equals(success))
+            {
+                scheduleLobbyGateRefresh();
+            }
             if (config.showMmrChangeNotification() && opponent != null && selfName != null) {
                 log.debug("[PostFight] Submission done (success={}), scheduling MMR fetch in 3s for opponent={}", success, opponent);
                 scheduler.schedule(() -> {
@@ -608,6 +616,27 @@ public class FightMonitor
             }
             return null;
         });
+    }
+
+    /** Re-fetch the local player's cumulative_stats for the lobby
+     *  SMURF_GUARD gate after a successful match submit. Delayed so
+     *  the backend has time to fold the new fight into /user. */
+    private void scheduleLobbyGateRefresh()
+    {
+        if (lobbyJoinGate == null) return;
+        scheduler.schedule(() -> {
+            try
+            {
+                if (lobbyJoinGate.isLoggedIn())
+                {
+                    lobbyJoinGate.refresh();
+                }
+            }
+            catch (Exception e)
+            {
+                log.debug("[PostFight] Lobby gate refresh failed: {}", e.getMessage());
+            }
+        }, 5L, java.util.concurrent.TimeUnit.SECONDS);
     }
 
     /**
