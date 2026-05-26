@@ -80,6 +80,48 @@ public final class BlockedPlayersService
         synchronized (BLOCKED) { return new LinkedHashSet<>(BLOCKED); }
     }
 
+    /** Replaces the entire set with {@code names} (each normalised),
+     *  firing one listener notification per name that actually
+     *  changed state (added or removed). Used by the
+     *  {@code MatchmakingLobbyPanel.onBlockListSnapshot} mirror so a
+     *  reconnect or cross-device rehydrate keeps the UI-side block
+     *  registry in lockstep with the canonical server state.
+     *
+     *  <p>Null input is treated as "empty set" — the registry is
+     *  cleared. Listeners receive a fire per affected name; we don't
+     *  batch into one notification because existing single-name
+     *  listener semantics (one mutation = one fire) is the simpler
+     *  invariant to keep. */
+    public static void replaceAll(Set<String> names)
+    {
+        Set<String> normalised = new LinkedHashSet<>();
+        if (names != null)
+        {
+            for (String n : names)
+            {
+                String norm = normalize(n);
+                if (norm != null) normalised.add(norm);
+            }
+        }
+        Set<String> prev;
+        synchronized (BLOCKED)
+        {
+            prev = new LinkedHashSet<>(BLOCKED);
+            BLOCKED.clear();
+            BLOCKED.addAll(normalised);
+        }
+        // Fire deltas outside the synchronized block to avoid
+        // listener-thread reentrancy on the BLOCKED monitor.
+        for (String added : normalised)
+        {
+            if (!prev.contains(added)) fire(added);
+        }
+        for (String removed : prev)
+        {
+            if (!normalised.contains(removed)) fire(removed);
+        }
+    }
+
     public static void addListener(Consumer<String> l)
     {
         if (l != null) LISTENERS.add(l);

@@ -116,6 +116,23 @@ public interface LobbyService
     /** Removes {@code member} from the local user's block list. Idempotent. */
     void unblock(LobbyMember member);
 
+    /** Same as {@link #block(LobbyMember)} for callers that hold only
+     *  a player id (e.g. the Player-Lookup-tab Block button on
+     *  {@code DashboardPanel}, which has no full {@link LobbyMember}).
+     *  The wire encoding is identical: {@code lobby/block} with
+     *  {@code blocked_player_id=<id>}. Null/empty/blank ids are
+     *  silently dropped — defence-in-depth against a UI bug shipping
+     *  a malformed frame to the server (which auto-bans on
+     *  malformed input). Default impl is a no-op so the
+     *  {@link NoOpLobbyService} test stub doesn't have to override. */
+    default void blockById(String playerId) { /* no-op default */ }
+
+    /** Same as {@link #unblock(LobbyMember)} for callers that hold
+     *  only a player id. Wire encoding is identical to
+     *  {@link #unblock(LobbyMember)}. Idempotent; null/empty/blank
+     *  ids are silently dropped. */
+    default void unblockById(String playerId) { /* no-op default */ }
+
     /** {@code true} when the underlying transport (WebSocket in
      *  production) is in the open state. Drives the lobby panel's
      *  reconnect banner so the user gets visible feedback when the

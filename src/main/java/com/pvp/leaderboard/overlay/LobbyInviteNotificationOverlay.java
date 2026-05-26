@@ -20,6 +20,7 @@ import java.awt.FontMetrics;
 import java.awt.Graphics2D;
 import java.awt.RenderingHints;
 import java.awt.Stroke;
+import java.util.function.BooleanSupplier;
 
 /**
  * In-game popup notification for incoming PvP lobby invites. Painted
@@ -105,6 +106,14 @@ public final class LobbyInviteNotificationOverlay extends Overlay
     private final Client client;
     private final PvPLeaderboardConfig config;
 
+    /** Wired post-construction by {@link com.pvp.leaderboard.PvPLeaderboardPlugin#startUp()}
+     *  to {@code FightMonitor::isInCombat}. {@code null} until that
+     *  wiring lands (and forever if the plugin runs without
+     *  FightMonitor in some test harness) — the render path treats
+     *  null as "not in combat" so a missing wiring never
+     *  inadvertently suppresses every popup. */
+    private volatile BooleanSupplier inCombatProvider;
+
     /** {@code invite_id} of the most-recently-shown invite. Sticky for
      *  the lifetime of the singleton (i.e. the lifetime of the
      *  plugin instance) so a re-push of the same invite — server-side
@@ -125,6 +134,36 @@ public final class LobbyInviteNotificationOverlay extends Overlay
     private volatile Color activeSenderColor;
     private volatile long activeStartMs;
 
+    /** Diagnostic state for the in-combat suppression DEBUG log. We
+     *  emit at most THREE log lines per popup lifecycle:
+     *  <ol>
+     *    <li>{@code showInvite} call (always, when not deduped) —
+     *        captures the in-combat / config / wiring state at the
+     *        moment the invite enters the overlay.</li>
+     *    <li>First decision in {@code renderInner} for THIS lifecycle
+     *        — either "first paint" or "first defer".</li>
+     *    <li>Transition from defer → paint (combat ended, popup
+     *        finally surfaces).</li>
+     *  </ol>
+     *  Keyed off {@link #activeStartMs} (which is the per-lifecycle
+     *  identifier — pinned forward each suppressed frame, so we
+     *  compare against the FIRST stamp captured at {@code showInvite}
+     *  time and stored in {@link #lifecycleId}). Reset each fresh
+     *  {@code showInvite} call. Emitting at DEBUG (not INFO) so the
+     *  default log level stays quiet — user must run with the
+     *  {@code logback-debug.xml} profile to surface them. */
+    private volatile long lifecycleId;
+    /** True once we've emitted the first-decision (paint OR defer)
+     *  log for {@link #lifecycleId}. Defends against 60 FPS log
+     *  spam. */
+    private volatile boolean firstDecisionLogged;
+    /** True once we've started deferring this lifecycle. Used to
+     *  detect the defer→paint transition for the third log line.
+     *  Independent of {@link #firstDecisionLogged} so a popup that
+     *  defers→paints emits both "first decision: defer" and
+     *  "transitioned to paint" lines (full timeline visibility). */
+    private volatile boolean wasDeferred;
+
     @Inject
     public LobbyInviteNotificationOverlay(Client client, PvPLeaderboardConfig config)
     {
@@ -133,6 +172,15 @@ public final class LobbyInviteNotificationOverlay extends Overlay
         setPosition(OverlayPosition.DYNAMIC);
         setLayer(OverlayLayer.ABOVE_WIDGETS);
         setPriority(Overlay.PRIORITY_HIGH);
+    }
+
+    /** Plugin wires {@code FightMonitor::isInCombat} here on
+     *  startup. Pass {@code null} (or never call) to disable the
+     *  combat-suppression branch entirely; pass a const-true / const-
+     *  false supplier in tests. */
+    public void setInCombatProvider(BooleanSupplier provider)
+    {
+        this.inCombatProvider = provider;
     }
 
     /**
@@ -160,9 +208,22 @@ public final class LobbyInviteNotificationOverlay extends Overlay
         // plugin session). A null inviteId is treated as "no
         // dedupe info available" and always shows; in practice the
         // panel always passes a real id.
-        if (inviteId != null && inviteId.equals(this.lastShownInviteId)) return;
+        if (inviteId != null && inviteId.equals(this.lastShownInviteId))
+        {
+            log.debug("[LobbyInvitePopup] showInvite SKIPPED (dedupe) inviteId={} sender={}",
+                inviteId, senderName);
+            return;
+        }
         this.lastShownInviteId = inviteId;
-        if (!config.enableLobbyInviteNotification())
+        boolean enabled = config.enableLobbyInviteNotification();
+        boolean suppressInCombat = config.suppressNotificationsInCombat();
+        BooleanSupplier provider = this.inCombatProvider;
+        boolean providerWired = provider != null;
+        boolean inCombatNow = isInCombatSafe();
+        log.debug("[LobbyInvitePopup] showInvite ACCEPTED inviteId={} sender={} popupEnabled={}"
+                + " suppressInCombat={} inCombatProviderWired={} inCombatNow={}",
+            inviteId, senderName, enabled, suppressInCombat, providerWired, inCombatNow);
+        if (!enabled)
         {
             // Stamped as seen so a later toggle-on doesn't replay it,
             // but no on-screen state mutated.
@@ -171,7 +232,11 @@ public final class LobbyInviteNotificationOverlay extends Overlay
         this.activeSenderName = senderName;
         this.activeSubtext = subtext == null ? "" : subtext;
         this.activeSenderColor = (senderColor != null) ? senderColor : Color.WHITE;
-        this.activeStartMs = System.currentTimeMillis();
+        long stamp = System.currentTimeMillis();
+        this.activeStartMs = stamp;
+        this.lifecycleId = stamp;
+        this.firstDecisionLogged = false;
+        this.wasDeferred = false;
     }
 
     /** Clears any pending popup AND the dedupe state. Called on
@@ -185,6 +250,9 @@ public final class LobbyInviteNotificationOverlay extends Overlay
         this.activeSenderColor = null;
         this.activeStartMs = 0L;
         this.lastShownInviteId = null;
+        this.lifecycleId = 0L;
+        this.firstDecisionLogged = false;
+        this.wasDeferred = false;
     }
 
     /** Effective total-visible window, in ms, derived from the
@@ -197,8 +265,53 @@ public final class LobbyInviteNotificationOverlay extends Overlay
         return Math.max(MIN_TOTAL_VISIBLE_MS, fromConfig);
     }
 
+    /** Null-safe wrapper around {@link #inCombatProvider}. Returns
+     *  {@code false} (out-of-combat) when the provider hasn't been
+     *  wired yet — defends against a startup-order race where the
+     *  overlay registers with OverlayManager before
+     *  {@code PvPLeaderboardPlugin.startUp} sets the provider. */
+    private boolean isInCombatSafe()
+    {
+        BooleanSupplier provider = this.inCombatProvider;
+        if (provider == null) return false;
+        try
+        {
+            return provider.getAsBoolean();
+        }
+        catch (Throwable t)
+        {
+            // The render-path catch-all above would catch this too,
+            // but failing a popup gate due to FightMonitor weirdness
+            // shouldn't take out the whole render — log + treat as
+            // out-of-combat (safer side: at worst the user sees a
+            // popup during combat, never the reverse).
+            log.warn("[LobbyInviteNotificationOverlay] inCombatProvider threw - treating as out-of-combat", t);
+            return false;
+        }
+    }
+
     @Override
     public Dimension render(Graphics2D g)
+    {
+        // Catch-all guard: any throwable from the inner body is logged
+        // once with the overlay class name + a real stack (the first
+        // allocation happens here, before HotSpot's
+        // OmitStackTraceInFastThrow strips the trace from repeat
+        // throws) and swallowed so OverlayRenderer doesn't WARN-spam
+        // every frame at 60 FPS. See {@code RankOverlayRenderSafetyTest}
+        // and the companion test in this class for the contract.
+        try
+        {
+            return renderInner(g);
+        }
+        catch (Throwable t)
+        {
+            log.warn("[LobbyInviteNotificationOverlay] render threw - swallowing", t);
+            return null;
+        }
+    }
+
+    private Dimension renderInner(Graphics2D g)
     {
         if (!config.enableLobbyInviteNotification())
         {
@@ -210,6 +323,32 @@ public final class LobbyInviteNotificationOverlay extends Overlay
                 this.activeSubtext = null;
                 this.activeSenderColor = null;
                 this.activeStartMs = 0L;
+            }
+            return null;
+        }
+        // In-combat suppression — DEFER the popup instead of
+        // dropping it (user-spec refinement 2026-05-25: "still show
+        // the notification after the combat has ended"). Active
+        // state (sender/subtext/colour) is preserved so the next
+        // out-of-combat frame paints normally; activeStartMs is
+        // pinned forward to "now" each suppressed frame so the
+        // visible-window timer effectively freezes during combat —
+        // otherwise an invite arriving at t=0 of a long combat
+        // would burn its full N-second TTL before combat ends and
+        // never render. {@code lastShownInviteId} stays intact so
+        // a server replay of the same invite still dedupes.
+        if (config.suppressNotificationsInCombat() && isInCombatSafe())
+        {
+            if (activeStartMs != 0L)
+            {
+                if (!firstDecisionLogged)
+                {
+                    log.debug("[LobbyInvitePopup] DEFER (in combat) lifecycleId={} sender={}",
+                        lifecycleId, activeSenderName);
+                    this.firstDecisionLogged = true;
+                }
+                this.wasDeferred = true;
+                this.activeStartMs = System.currentTimeMillis();
             }
             return null;
         }
@@ -229,6 +368,21 @@ public final class LobbyInviteNotificationOverlay extends Overlay
             this.activeSenderColor = null;
             this.activeStartMs = 0L;
             return null;
+        }
+        // First-paint diagnostic: emits exactly once per lifecycle when
+        // the popup actually paints (TTL not expired, sender stamped).
+        // If it follows a "DEFER" line it's the defer→paint transition
+        // (combat ended); if it's the first line for this lifecycleId
+        // it's an immediate paint (no suppression engaged). This pair
+        // of cases answers the critical user-facing question: "did
+        // suppression engage at all for this invite, and if so when
+        // did it release?"
+        if (!firstDecisionLogged || wasDeferred)
+        {
+            log.debug("[LobbyInvitePopup] PAINT lifecycleId={} sender={} afterDefer={}",
+                lifecycleId, sender, wasDeferred);
+            this.firstDecisionLogged = true;
+            this.wasDeferred = false;
         }
 
         // Three-segment alpha curve: 0 → 1 over FADE_IN_MS, 1.0 hold,

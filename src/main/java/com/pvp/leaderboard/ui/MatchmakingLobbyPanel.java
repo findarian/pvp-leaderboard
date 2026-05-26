@@ -1897,12 +1897,6 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         caption.setBorder(BorderFactory.createEmptyBorder(2, 2, 4, 2));
         selfPreviewContainer.add(caption);
 
-        // Self-preview LobbyMember.playerId is the lowercased display
-        // name purely as a stable in-process identifier — this
-        // synthetic member never crosses the wire (the server filters
-        // the viewer's own row out of every roster push), so the
-        // value only has to be non-null + non-empty for the renderer.
-        String selfPlayerId = name != null && !name.isEmpty() ? name.toLowerCase() : "self";
         // Pick the displayed rank by Style priority NH > Veng > Multi
         // > DMM among the user's currently-selected styles (Style
         // enum declaration order matches the priority). Falls back
@@ -1913,20 +1907,25 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         // sentinel; PlayerRow then suppresses the rank chip rather
         // than mis-rendering as Bronze 3.
         int peakIdx = pickSelfPreviewRankIdx();
+        // [MOD] chip on the self-preview must reflect the local user's
+        // server-supplied moderator status — the lobby roster filters
+        // the viewer's own row out of every push, so the only path
+        // that surfaces self mod status is the /user profile fetch
+        // owned by {@link LobbyJoinGate#isMod}. Read it lazily here
+        // (instead of caching) so the chip flips the moment the gate
+        // refreshes — the same listener that drives every other
+        // self-preview update fires {@link #renderSelfPreview} on
+        // each gate event.
+        boolean selfIsMod = joinGate != null && joinGate.isMod();
         // Self preview is display-only — it never enters the slider
         // matchmaking gate (the user's own row is hidden from rosters
-        // server-side and the gate excludes self). Pass currentRankIdx
-        // = peakIdx so any code that reads .currentRankIdx on the self
-        // row gets a sensible non-sentinel value.
-        LobbyMember self = new LobbyMember(
-            selfPlayerId,
-            name,
-            selectedStyles,
-            selectedBuildTypes,
-            /* currentRankIdx */ peakIdx,
-            /* peakRankIdx */ peakIdx,
-            selfRegion,
-            false);
+        // server-side and the gate excludes self). The helper passes
+        // currentRankIdx = peakIdx so any code that reads
+        // .currentRankIdx on the self row gets a sensible non-sentinel
+        // value.
+        LobbyMember self = buildSelfPreviewMember(
+            name, selectedStyles, selectedBuildTypes, peakIdx,
+            selfRegion, selfIsMod);
 
         selfPreviewRow = new PlayerRow(self, /*fontBase=*/ ROW_FONT_PT,
             /*isInvited=*/ m -> false,
@@ -2139,10 +2138,28 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
      *  60-s tick is essentially free wire traffic. */
     private void forceRejoinIfEligible()
     {
-        if (currentFightSession != null) return;
-        if (!hasJoinedLobby) return;
-        if (!joinGate.isLoggedIn()) return;
-        if (selectedStyles.isEmpty() || selectedBuildTypes.isEmpty()) return;
+        if (currentFightSession != null)
+        {
+            LOG.debug("MatchmakingLobbyPanel.forceRejoinIfEligible SKIP - currentFightSession active");
+            return;
+        }
+        if (!hasJoinedLobby)
+        {
+            LOG.debug("MatchmakingLobbyPanel.forceRejoinIfEligible SKIP - !hasJoinedLobby");
+            return;
+        }
+        if (!joinGate.isLoggedIn())
+        {
+            LOG.debug("MatchmakingLobbyPanel.forceRejoinIfEligible SKIP - !joinGate.isLoggedIn");
+            return;
+        }
+        if (selectedStyles.isEmpty() || selectedBuildTypes.isEmpty())
+        {
+            LOG.debug("MatchmakingLobbyPanel.forceRejoinIfEligible SKIP - empty styles or builds"
+                    + " (styles={} builds={})",
+                selectedStyles, selectedBuildTypes);
+            return;
+        }
         // Match counts must be loaded + unlocked for every selected
         // style, otherwise the server's SMURF_GUARD v2 will reject
         // the join and the user sees an error banner instead of a
@@ -2153,7 +2170,12 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         for (Style s : selectedStyles)
         {
             Integer c = counts.get(s);
-            if (c == null || !LobbyJoinGate.isUnlocked(c)) return;
+            if (c == null || !LobbyJoinGate.isUnlocked(c))
+            {
+                LOG.debug("MatchmakingLobbyPanel.forceRejoinIfEligible SKIP - style {} count={} not unlocked",
+                    s, c);
+                return;
+            }
         }
         // Defence-in-depth: skip if the panel is on a non-lobby card.
         // The fight / session-expired call sites have already
@@ -2163,7 +2185,14 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         // back to CARD_GATE and we don't want to silently re-join
         // them. CardLayout updates visibility synchronously on the
         // EDT, so this read sees the live state.
-        if (!isCurrentlyOnLobbyCard()) return;
+        if (!isCurrentlyOnLobbyCard())
+        {
+            LOG.debug("MatchmakingLobbyPanel.forceRejoinIfEligible SKIP - not on CARD_LOBBY");
+            return;
+        }
+        LOG.debug("MatchmakingLobbyPanel.forceRejoinIfEligible FIRING - issuing service.joinLobby"
+                + " region={} styles={} builds={} band=[{},{}]",
+            selfRegion, selectedStyles, selectedBuildTypes, rankMinIdx, rankMaxIdx);
         service.joinLobby(selfRegion, selectedStyles, selectedBuildTypes,
             rankMinIdx, rankMaxIdx, pickSortBucket());
     }
@@ -2388,7 +2417,7 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         LocalFightState s = currentFightSession;
         if (s == null)
         {
-            LOG.warn("MatchmakingLobbyPanel: Confirm Fight clicked but currentFightSession=null —"
+            LOG.warn("MatchmakingLobbyPanel: Confirm Fight clicked but currentFightSession=null -"
                 + " session was cleared between view-build and click (most likely cause: late"
                 + " match_found / session_expired). Click is a no-op; user must Find-a-new-match.");
             if (confirmBtn != null)
@@ -2583,6 +2612,94 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
     }
 
     /** Format the remaining time on an outgoing invite as M:SS for the row chip. */
+    /** Source-of-truth for the right-side roster-row action chip's
+     *  text. The chip's COLOUR + tooltip + click handler still live
+     *  on {@link PlayerRow#buildActionChip()} because they depend on
+     *  Swing internals, but the LABEL is pure data and lives here so
+     *  it's covered by a unit test without instantiating the panel
+     *  ({@link MatchmakingLobbyPanelActionChipLabelTest}).
+     *
+     *  <p>Precedence (highest first):
+     *  <ol>
+     *    <li>{@code blocked} → {@code "Blocking"} (per 2026-05-25
+     *    user spec — explicit verb so the row signals the active
+     *    block state without relying on the tooltip).</li>
+     *    <li>{@code outgoing != null} → dynamic
+     *    {@link #formatInviteRemaining(OutgoingInvite)} M:SS
+     *    countdown.</li>
+     *    <li>{@code hasIncomingInvite} → {@code "Lookup"} (chip
+     *    routes to Player Lookup for the Accept/Decline panel).</li>
+     *    <li>default → {@code "Fight"} (both fight-enabled and
+     *    fight-disabled use the same word; disabled vs enabled is
+     *    signalled via colour at the row level, not via this label).</li>
+     *  </ol>
+     *
+     *  <p>{@code blocked} dominates everything: a peer with a
+     *  pending invite that gets blocked mid-flight must visually
+     *  reflect the block immediately, even though the server will
+     *  cascade-cancel the invite as a side-effect of
+     *  {@code lobby/block} ms later.
+     */
+    static String actionChipLabelFor(boolean blocked, OutgoingInvite outgoing,
+                                     boolean hasIncomingInvite)
+    {
+        if (blocked) return "Blocking";
+        if (outgoing != null) return formatInviteRemaining(outgoing);
+        if (hasIncomingInvite) return "Lookup";
+        return "Fight";
+    }
+
+    /** Composes the synthetic {@link LobbyMember} backing the
+     *  self-preview row. Lifted out of {@link #renderSelfPreview} so
+     *  the [MOD] chip wire-through can be unit-tested without
+     *  standing up the full Swing panel + EDT machinery.
+     *
+     *  <p>Three pieces of behaviour are pinned in this helper:
+     *  <ul>
+     *    <li>{@code playerId} = lowercased display name, falling back
+     *        to the literal {@code "self"} when the name is null /
+     *        empty (pre-login state). The synthetic member never
+     *        crosses the wire — the server filters the viewer's own
+     *        row out of every roster push — so any non-null, non-empty
+     *        id is fine; the fallback is purely defensive against
+     *        crashes if the renderer is exercised before
+     *        {@link #setSelfIdentity} fires.</li>
+     *    <li>Both {@code currentRankIdx} and {@code peakRankIdx}
+     *        receive {@code peakRankIdx} verbatim. Self-preview is
+     *        display-only — it never enters the slider matchmaking
+     *        gate (the user's own row is hidden from rosters
+     *        server-side and the gate excludes self) — so any code
+     *        reading {@code .currentRankIdx} on the synthetic member
+     *        gets a sensible non-sentinel value rather than -1.</li>
+     *    <li>{@code selfIsMod} flows verbatim into
+     *        {@link LobbyMember#isMod} so the [MOD] chip on the
+     *        self-preview row obeys the same render rule as roster
+     *        rows — both go through {@code if (p.isMod)} in
+     *        {@code PlayerRow}.</li>
+     *  </ul>
+     */
+    static LobbyMember buildSelfPreviewMember(
+        String playerName,
+        java.util.Set<Style> styles,
+        java.util.Set<BuildType> builds,
+        int peakRankIdx,
+        String region,
+        boolean selfIsMod)
+    {
+        String playerId = (playerName != null && !playerName.isEmpty())
+            ? playerName.toLowerCase()
+            : "self";
+        return new LobbyMember(
+            playerId,
+            playerName,
+            styles,
+            builds,
+            /* currentRankIdx */ peakRankIdx,
+            /* peakRankIdx */ peakRankIdx,
+            region,
+            selfIsMod);
+    }
+
     private static String formatInviteRemaining(OutgoingInvite oi)
     {
         long remainMs = Math.max(0L, oi.expiresAtEpochMs - System.currentTimeMillis());
@@ -2651,7 +2768,7 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
                 // match_found landed in time, handleMatchFound
                 // already nulled currentFightSession and we never
                 // reach here.
-                LOG.debug("MatchmakingLobbyPanel.onFightTick: confirm window elapsed sid={} iConfirmed={} peerConfirmed={} — exiting fight setup",
+                LOG.debug("MatchmakingLobbyPanel.onFightTick: confirm window elapsed sid={} iConfirmed={} peerConfirmed={} - exiting fight setup",
                     s.session.fightSessionId, s.iConfirmed, s.peerConfirmed);
                 exitFightSetup();
             }
@@ -2728,7 +2845,17 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
     @Override
     public void onIncomingInvite(IncomingInvite invite)
     {
-        if (invite == null) return;
+        if (invite == null)
+        {
+            LOG.debug("MatchmakingLobbyPanel.onIncomingInvite DROP - invite==null");
+            return;
+        }
+        LOG.debug("MatchmakingLobbyPanel.onIncomingInvite ENTRY inviteId={} sender={} senderRankIdx={}"
+                + " currentRankBand=[{},{}]",
+            invite.inviteId,
+            invite.sender != null ? invite.sender.name : "<null>",
+            invite.sender != null ? invite.sender.currentRankIdx : -1,
+            rankMinIdx, rankMaxIdx);
         // Spec'd filter: only show invite cards from senders whose rank
         // sits inside the user's [rankMinIdx, rankMaxIdx] slider band.
         // The panel re-applies the same rule the PlayerRow renderer uses
@@ -2738,7 +2865,13 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         // peakRankIdx is display-only and never gates the slider band.
         if (invite.sender != null && rankIdxKnown(invite.sender.currentRankIdx)
             && (invite.sender.currentRankIdx < rankMinIdx
-                || invite.sender.currentRankIdx > rankMaxIdx)) return;
+                || invite.sender.currentRankIdx > rankMaxIdx))
+        {
+            LOG.debug("MatchmakingLobbyPanel.onIncomingInvite DROP - sender rank {} outside band [{},{}]"
+                    + " inviteId={}",
+                invite.sender.currentRankIdx, rankMinIdx, rankMaxIdx, invite.inviteId);
+            return;
+        }
         addIncomingInvite(invite);
         // In-game popup so users not actively looking at the sidepanel
         // still notice the invite. Config-gated inside the overlay
@@ -2884,7 +3017,7 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
     {
         if (session == null || session.opponent == null)
         {
-            LOG.warn("MatchmakingLobbyPanel.onFightProposed: dropped — session or opponent null"
+            LOG.warn("MatchmakingLobbyPanel.onFightProposed: dropped - session or opponent null"
                 + " (session={}, opponent={})",
                 session, session == null ? "n/a" : session.opponent);
             return;
@@ -3261,6 +3394,13 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         if (playerIds == null) return;
         blockedPlayerIds.clear();
         blockedPlayerIds.addAll(playerIds);
+        // Mirror to the static UI-side BlockedPlayersService so the
+        // Player-Lookup-tab Block/Unblock button on DashboardPanel
+        // reflects the canonical server state (e.g. block from
+        // another device, or rehydrate after a socket reconnect).
+        // Both sets normalise on the same lowercased display-name
+        // key, so they round-trip cleanly.
+        com.pvp.leaderboard.service.BlockedPlayersService.replaceAll(playerIds);
         // User-state change — bypass the 60s roster coalescer so the
         // grey-out lands immediately. Block toggles are user-initiated
         // (or initiated from a different device, which is still a
@@ -3272,6 +3412,13 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
     public void onBlockAdded(String playerId)
     {
         if (playerId == null || playerId.isEmpty()) return;
+        // Idempotent mirror to the dashboard-tab block list. Always
+        // call regardless of the {@code .add()} return value: an
+        // optimistic local DashboardPanel click already added it
+        // here, so this push is a redundant set-mutation, but the
+        // BlockedPlayersService side may have missed the optimistic
+        // path (e.g. when the click came from a different device).
+        com.pvp.leaderboard.service.BlockedPlayersService.block(playerId);
         if (blockedPlayerIds.add(playerId)) renderRoster();
     }
 
@@ -3279,6 +3426,7 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
     public void onBlockRemoved(String playerId)
     {
         if (playerId == null || playerId.isEmpty()) return;
+        com.pvp.leaderboard.service.BlockedPlayersService.unblock(playerId);
         if (blockedPlayerIds.remove(playerId)) renderRoster();
     }
 
@@ -3438,7 +3586,7 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         buttonRow.setOpaque(false);
         buttonRow.setAlignmentX(LEFT_ALIGNMENT);
         buttonRow.add(Box.createHorizontalGlue());
-        JButton reset = new JButton("Reset Options");
+        JButton reset = new JButton("Leave Lobby");
         reset.setMargin(new Insets(2, 8, 2, 8));
         reset.setFont(reset.getFont().deriveFont(Font.BOLD, LOBBY_HEADER_PT));
         reset.setFocusPainted(false);
@@ -3741,7 +3889,7 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         {
             String message = roster.isEmpty()
                 ? "No one else is currently in the lobby, please wait while others join or invite some friends to the plugin"
-                : "No players match your filters, click Reset Options and widen your search";
+                : "No players match your filters, click Leave Lobby and re-join with wider filters";
             // HTML wrap forces line breaks inside the ~200px lobby
             // column — JLabel won't wrap plain text inside a
             // BoxLayout.Y_AXIS parent. 15pt BOLD matches the lobby's
@@ -4025,31 +4173,39 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
 
         private JComponent buildActionChip()
         {
+            // Resolve the LABEL via the source-of-truth helper so the
+            // text decision is unit-tested without instantiating the
+            // panel; the COLOUR + tooltip + click handler still
+            // branch here because they depend on Swing internals.
+            OutgoingInvite oi = getOutgoing != null ? getOutgoing.apply(p) : null;
+            boolean invited = isInvited != null && isInvited.test(p);
+            String label = actionChipLabelFor(blocked, oi, invited);
+
             if (blocked)
             {
-                // Blocked card: action chip is Lookup so the user has a
-                // visible route to Player Lookup → Unblock without a
-                // dedicated "Unblock" widget on the row. Colour matches
-                // the greyed body so the chip reads "muted / inactive".
-                JLabel chip = makeActionChip("Lookup", BLOCKED_FG, BLOCKED_BORDER,
+                // Blocked card: chip routes to Player Lookup → Unblock
+                // (no dedicated "Unblock" widget on the row). Colour
+                // matches the greyed body so the chip reads "muted /
+                // inactive". Label is "Blocking" per 2026-05-25 user
+                // spec — explicit verb signals the active block state
+                // without relying on the tooltip.
+                JLabel chip = makeActionChip(label, BLOCKED_FG, BLOCKED_BORDER,
                     () -> { if (onOpenProfile != null) onOpenProfile.accept(p.name); });
                 chip.setName(ROW_ACTION_CHIP_NAME);
-                chip.setToolTipText("Blocked — open " + p.name + "'s profile to Unblock");
+                chip.setToolTipText("Blocking " + p.name + " — open their profile to Unblock");
                 return chip;
             }
-            OutgoingInvite oi = getOutgoing != null ? getOutgoing.apply(p) : null;
             if (oi != null)
             {
-                JLabel chip = makeActionChip(formatInviteRemaining(oi), CHIP_INVITED_COLOR, CHIP_INVITED_COLOR,
+                JLabel chip = makeActionChip(label, CHIP_INVITED_COLOR, CHIP_INVITED_COLOR,
                     () -> { if (onCancelInvite != null) onCancelInvite.cancel(p); });
                 chip.setName(ROW_ACTION_CHIP_NAME);
                 chip.setToolTipText("Pending invite to " + p.name + " — click to cancel");
                 return chip;
             }
-            boolean invited = isInvited != null && isInvited.test(p);
             if (invited)
             {
-                JLabel chip = makeActionChip("Lookup", Color.WHITE, CHIP_BORDER_COLOR,
+                JLabel chip = makeActionChip(label, Color.WHITE, CHIP_BORDER_COLOR,
                     () -> { if (onOpenProfile != null) onOpenProfile.accept(p.name); });
                 chip.setName(ROW_ACTION_CHIP_NAME);
                 chip.setToolTipText("Open " + p.name + "'s profile in Player Lookup");
@@ -4057,13 +4213,13 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
             }
             if (!fightEnabled)
             {
-                JLabel chip = makeActionChip("Fight", BLOCKED_FG, BLOCKED_BORDER, () -> {});
+                JLabel chip = makeActionChip(label, BLOCKED_FG, BLOCKED_BORDER, () -> {});
                 chip.setName(ROW_ACTION_CHIP_NAME);
                 chip.setCursor(Cursor.getDefaultCursor());
-                chip.setToolTipText("No matching style/build — widen your picks via Reset Options");
+                chip.setToolTipText("No matching style/build — click Leave Lobby and re-join with wider filters");
                 return chip;
             }
-            JLabel chip = makeActionChip("Fight", Color.WHITE, CHIP_BORDER_COLOR,
+            JLabel chip = makeActionChip(label, Color.WHITE, CHIP_BORDER_COLOR,
                 () -> { if (onFight != null) onFight.onFight(p); });
             chip.setName(ROW_ACTION_CHIP_NAME);
             chip.setToolTipText("Set up a fight with " + p.name);

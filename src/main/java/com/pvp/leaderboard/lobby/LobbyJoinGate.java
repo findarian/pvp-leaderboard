@@ -106,6 +106,20 @@ public interface LobbyJoinGate
      *  on the OSRS login screen still reports {@code false} here. */
     boolean isLoggedIn();
 
+    /** {@code true} when the local user is a server-recognised
+     *  moderator (member of the {@code OSRS-LobbyMods} table on the
+     *  backend). Authoritative for the {@code MatchmakingLobbyPanel}
+     *  self-preview row's [MOD] chip — the lobby roster server-filters
+     *  the viewer's own row out of every push, so this is the only
+     *  client-side path that surfaces the local user's own mod status.
+     *
+     *  <p>Source of truth: parsed off the {@code /user} profile JSON's
+     *  {@code is_mod} field on every successful refresh. Default
+     *  implementation returns {@code false} so the no-op gate +
+     *  test/placeholder gates don't have to opt in (and so a wiring
+     *  bug doesn't accidentally promote a regular user). */
+    default boolean isMod() { return false; }
+
     /** Triggers an immediate refresh. No-op if already refreshing.
      *  Listeners fire on entry (so the UI can show "Refreshing…") and
      *  again on completion. Resets the auto-refresh clock. */

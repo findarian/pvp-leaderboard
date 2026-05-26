@@ -236,7 +236,7 @@ public final class WebSocketManager
             // fresh-start manager. The shutdown() that flipped the
             // flag also closed the socket + cancelled any pending
             // reconnect, so we're starting from a clean state.
-            log.debug("WebSocketManager: connect after shutdown — clearing latch for plugin restart");
+            log.debug("WebSocketManager: connect after shutdown - clearing latch for plugin restart");
             shutdownCalled.set(false);
             intentionalDisconnect = false;
         }

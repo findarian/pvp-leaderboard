@@ -20,6 +20,7 @@ import java.awt.FontMetrics;
 import java.awt.Graphics2D;
 import java.awt.RenderingHints;
 import java.awt.Stroke;
+import java.util.function.BooleanSupplier;
 
 /**
  * In-game popup notification for the "fight locked in" wire moment —
@@ -106,6 +107,12 @@ public final class MatchFoundNotificationOverlay extends Overlay
     private final Client client;
     private final PvPLeaderboardConfig config;
 
+    /** Wired post-construction by {@link com.pvp.leaderboard.PvPLeaderboardPlugin#startUp()}
+     *  to {@code FightMonitor::isInCombat}. {@code null} until that
+     *  wiring lands; the render path treats null as "not in combat"
+     *  so a missing wiring never inadvertently suppresses every popup. */
+    private volatile BooleanSupplier inCombatProvider;
+
     /** {@code fight_session_id} of the most-recently-shown match. Sticky
      *  for the lifetime of the singleton so a re-push of the same
      *  fight_proposed event (server replay, bus double-fire) does NOT
@@ -124,6 +131,13 @@ public final class MatchFoundNotificationOverlay extends Overlay
     private volatile Color activeOpponentColor;
     private volatile long activeStartMs;
 
+    /** Diagnostic state for the in-combat suppression DEBUG log —
+     *  mirrors {@link LobbyInviteNotificationOverlay}. See its
+     *  comments for the contract. */
+    private volatile long lifecycleId;
+    private volatile boolean firstDecisionLogged;
+    private volatile boolean wasDeferred;
+
     @Inject
     public MatchFoundNotificationOverlay(Client client, PvPLeaderboardConfig config)
     {
@@ -132,6 +146,14 @@ public final class MatchFoundNotificationOverlay extends Overlay
         setPosition(OverlayPosition.DYNAMIC);
         setLayer(OverlayLayer.ABOVE_WIDGETS);
         setPriority(Overlay.PRIORITY_HIGH);
+    }
+
+    /** Plugin wires {@code FightMonitor::isInCombat} here on
+     *  startup. Pass {@code null} to disable the combat-suppression
+     *  branch entirely; pass a const supplier in tests. */
+    public void setInCombatProvider(BooleanSupplier provider)
+    {
+        this.inCombatProvider = provider;
     }
 
     /**
@@ -158,9 +180,22 @@ public final class MatchFoundNotificationOverlay extends Overlay
                           boolean isInviter)
     {
         if (opponentName == null || opponentName.isEmpty()) return;
-        if (fightSessionId != null && fightSessionId.equals(this.lastShownFightSessionId)) return;
+        if (fightSessionId != null && fightSessionId.equals(this.lastShownFightSessionId))
+        {
+            log.debug("[MatchFoundPopup] showMatch SKIPPED (dedupe) fightSessionId={} opponent={}",
+                fightSessionId, opponentName);
+            return;
+        }
         this.lastShownFightSessionId = fightSessionId;
-        if (!config.enableMatchFoundNotification())
+        boolean enabled = config.enableMatchFoundNotification();
+        boolean suppressInCombat = config.suppressNotificationsInCombat();
+        BooleanSupplier provider = this.inCombatProvider;
+        boolean providerWired = provider != null;
+        boolean inCombatNow = isInCombatSafe();
+        log.debug("[MatchFoundPopup] showMatch ACCEPTED fightSessionId={} opponent={} popupEnabled={}"
+                + " suppressInCombat={} inCombatProviderWired={} inCombatNow={}",
+            fightSessionId, opponentName, enabled, suppressInCombat, providerWired, inCombatNow);
+        if (!enabled)
         {
             // Stamped as seen so a later toggle-on doesn't replay it,
             // but no on-screen state mutated.
@@ -170,7 +205,11 @@ public final class MatchFoundNotificationOverlay extends Overlay
         this.activeSubtext = subtext == null ? "" : subtext;
         this.activeIsInviter = isInviter;
         this.activeOpponentColor = (opponentColor != null) ? opponentColor : Color.WHITE;
-        this.activeStartMs = System.currentTimeMillis();
+        long stamp = System.currentTimeMillis();
+        this.activeStartMs = stamp;
+        this.lifecycleId = stamp;
+        this.firstDecisionLogged = false;
+        this.wasDeferred = false;
     }
 
     /** Clears any pending popup AND the dedupe state. Called on
@@ -184,10 +223,51 @@ public final class MatchFoundNotificationOverlay extends Overlay
         this.activeOpponentColor = null;
         this.activeStartMs = 0L;
         this.lastShownFightSessionId = null;
+        this.lifecycleId = 0L;
+        this.firstDecisionLogged = false;
+        this.wasDeferred = false;
+    }
+
+    /** Null-safe wrapper around {@link #inCombatProvider}. Returns
+     *  {@code false} (out-of-combat) when the provider hasn't been
+     *  wired yet — defends against a startup-order race. Mirrors
+     *  the LobbyInviteNotificationOverlay companion helper. */
+    private boolean isInCombatSafe()
+    {
+        BooleanSupplier provider = this.inCombatProvider;
+        if (provider == null) return false;
+        try
+        {
+            return provider.getAsBoolean();
+        }
+        catch (Throwable t)
+        {
+            log.warn("[MatchFoundNotificationOverlay] inCombatProvider threw - treating as out-of-combat", t);
+            return false;
+        }
     }
 
     @Override
     public Dimension render(Graphics2D g)
+    {
+        // Catch-all guard mirrors LobbyInviteNotificationOverlay —
+        // any throwable from the inner body is logged once with the
+        // overlay class name + a real stack (the first allocation
+        // happens here, before HotSpot's OmitStackTraceInFastThrow
+        // strips the trace from repeat throws) and swallowed so
+        // OverlayRenderer doesn't WARN-spam every frame at 60 FPS.
+        try
+        {
+            return renderInner(g);
+        }
+        catch (Throwable t)
+        {
+            log.warn("[MatchFoundNotificationOverlay] render threw - swallowing", t);
+            return null;
+        }
+    }
+
+    private Dimension renderInner(Graphics2D g)
     {
         if (!config.enableMatchFoundNotification())
         {
@@ -200,6 +280,30 @@ public final class MatchFoundNotificationOverlay extends Overlay
                 this.activeIsInviter = false;
                 this.activeOpponentColor = null;
                 this.activeStartMs = 0L;
+            }
+            return null;
+        }
+        // In-combat suppression — DEFER the popup instead of
+        // dropping it. Active state is preserved + activeStartMs is
+        // pinned forward each suppressed frame so the visible-window
+        // timer freezes during combat. Mirror of
+        // {@link LobbyInviteNotificationOverlay} so both popups
+        // share the 2026-05-25 user-spec contract: "still show the
+        // notification after the combat has ended". The match-found
+        // popup carries the meeting world + place — the user MUST
+        // see it eventually, just not while taking hits.
+        if (config.suppressNotificationsInCombat() && isInCombatSafe())
+        {
+            if (activeStartMs != 0L)
+            {
+                if (!firstDecisionLogged)
+                {
+                    log.debug("[MatchFoundPopup] DEFER (in combat) lifecycleId={} opponent={}",
+                        lifecycleId, activeOpponentName);
+                    this.firstDecisionLogged = true;
+                }
+                this.wasDeferred = true;
+                this.activeStartMs = System.currentTimeMillis();
             }
             return null;
         }
@@ -219,6 +323,13 @@ public final class MatchFoundNotificationOverlay extends Overlay
             this.activeOpponentColor = null;
             this.activeStartMs = 0L;
             return null;
+        }
+        if (!firstDecisionLogged || wasDeferred)
+        {
+            log.debug("[MatchFoundPopup] PAINT lifecycleId={} opponent={} afterDefer={}",
+                lifecycleId, opponent, wasDeferred);
+            this.firstDecisionLogged = true;
+            this.wasDeferred = false;
         }
 
         // Three-segment alpha curve: 0 → 1 over FADE_IN_MS, hold,

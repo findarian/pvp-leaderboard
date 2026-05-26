@@ -99,6 +99,22 @@ public final class UserProfileLobbyJoinGate implements LobbyJoinGate
      *  thread. */
     private volatile boolean loggedIn;
 
+    /** Server-supplied moderator bit for the local user, parsed off the
+     *  {@code /user} profile JSON's {@code is_mod} field. Authoritative
+     *  source for the {@link MatchmakingLobbyPanel} self-preview row's
+     *  [MOD] chip — the lobby roster server-filters the viewer's own
+     *  row out of every push, so this is the only client-side path
+     *  that surfaces the local user's own mod status.
+     *
+     *  <p>Strict-boolean read mirrors {@code WebSocketLobbyService.parseMember}
+     *  for peer roster rows: only a JSON boolean primitive {@code true}
+     *  flips the bit. Defaults to {@code false} on construction, on
+     *  {@link #onLogout()}, and on a soft-404 (null profile) refresh
+     *  so a stale mod flag never carries between sessions / accounts.
+     *  {@code volatile} for the same EDT-vs-network-callback reason as
+     *  {@link #loggedIn}. */
+    private volatile boolean isMod = false;
+
     @Inject
     public UserProfileLobbyJoinGate(PvPDataService pvpDataService,
                                     ScheduledExecutorService scheduler)
@@ -159,6 +175,11 @@ public final class UserProfileLobbyJoinGate implements LobbyJoinGate
             rankIdxByStyle.clear();
         }
         lastRefreshEpochMs = 0L;
+        // Drop the mod bit — without this, a non-mod logging in on the
+        // same client right after a moderator would inherit the [MOD]
+        // chip on their self-preview until the first /user fetch
+        // completed.
+        isMod = false;
         fireListenersOnEdt();
     }
 
@@ -209,6 +230,9 @@ public final class UserProfileLobbyJoinGate implements LobbyJoinGate
 
     @Override
     public boolean isLoggedIn() { return loggedIn; }
+
+    @Override
+    public boolean isMod() { return isMod; }
 
     @Override
     public void refresh()
@@ -313,10 +337,21 @@ public final class UserProfileLobbyJoinGate implements LobbyJoinGate
 
     private void applyProfile(JsonObject profile)
     {
-        if (profile == null || !profile.has("cumulative_stats") ||
-            !profile.get("cumulative_stats").isJsonObject())
+        if (profile == null)
         {
             applyAllZero();
+            return;
+        }
+        // Parse is_mod before any cumulative_stats early-return so a
+        // mod account still surfaces the [MOD] chip on the self-preview
+        // row even when match counts are absent (brand-new account,
+        // partial profile payload, etc.). Strict-boolean only — mirrors
+        // WebSocketLobbyService.parseMember's wire contract.
+        isMod = parseIsModStrict(profile);
+        if (!profile.has("cumulative_stats") ||
+            !profile.get("cumulative_stats").isJsonObject())
+        {
+            applyCountsZero();
             return;
         }
         JsonObject cum = profile.getAsJsonObject("cumulative_stats");
@@ -438,6 +473,15 @@ public final class UserProfileLobbyJoinGate implements LobbyJoinGate
 
     private void applyAllZero()
     {
+        applyCountsZero();
+        isMod = false;
+    }
+
+    /** Clears match counts + rank indices without touching {@link #isMod}.
+     *  Used when {@code cumulative_stats} is absent but {@code is_mod}
+     *  was still parsed from the top-level profile object. */
+    private void applyCountsZero()
+    {
         synchronized (counts)
         {
             counts.clear();
@@ -448,6 +492,17 @@ public final class UserProfileLobbyJoinGate implements LobbyJoinGate
             // Bronze 3.
             rankIdxByStyle.clear();
         }
+    }
+
+    /** Strict-boolean read of {@code is_mod} from a {@code /user} profile
+     *  JSON object. Package-visible for unit tests. */
+    static boolean parseIsModStrict(JsonObject profile)
+    {
+        if (profile == null) return false;
+        return profile.has("is_mod")
+            && profile.get("is_mod").isJsonPrimitive()
+            && profile.get("is_mod").getAsJsonPrimitive().isBoolean()
+            && profile.get("is_mod").getAsBoolean();
     }
 
     private static String bucketFor(Style s)

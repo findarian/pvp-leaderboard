@@ -200,6 +200,13 @@ public class PvPLeaderboardPlugin extends Plugin
 		if (invitePopup != null)
 		{
 			overlayManager.add(invitePopup);
+			// Wire the in-combat probe so the suppress-in-combat
+			// config toggle has a signal source. FightMonitor::isInCombat
+			// reads !activeFights.isEmpty() filtered by the
+			// COMBAT_WINDOW_MS recency window — see FightMonitor for
+			// the contract. Safe to call before fightMonitor.init() —
+			// isInCombat short-circuits to false on an empty map.
+			invitePopup.setInCombatProvider(fightMonitor::isInCombat);
 			// Hand the overlay reference to the panel as a lambda so
 			// the panel doesn't carry an Overlay-typed field (keeps
 			// unit tests free of RuneLite-client dependencies).
@@ -214,8 +221,27 @@ public class PvPLeaderboardPlugin extends Plugin
 		if (matchFoundPopup != null)
 		{
 			overlayManager.add(matchFoundPopup);
+			matchFoundPopup.setInCombatProvider(fightMonitor::isInCombat);
 			dashboardPanel.setMatchFoundNotifier(matchFoundPopup::showMatch);
 		}
+
+		// One-shot startup diagnostic — pins the in-combat suppression
+		// config toggle state + whether each overlay's provider got
+		// wired. The popup-mid-combat bug class has been recurrent
+		// (2026-05-25 series of QA cycles); without this log we can't
+		// disambiguate "user toggled it off" from "wiring race" from
+		// "FightMonitor.isInCombat returned false at popup time" when
+		// reading a captured client log. Pairs with the per-popup
+		// DEBUG lines emitted by the overlay {@code showInvite} /
+		// {@code showMatch} entry points and the rate-limited
+		// {@code FightMonitor.isInCombat} decision log.
+		log.debug("[Plugin] popup suppression wired - suppressInCombat={} invitePopupRegistered={}"
+				+ " inviteProviderWired={} matchPopupRegistered={} matchProviderWired={}",
+			config.suppressNotificationsInCombat(),
+			invitePopup != null,
+			invitePopup != null,
+			matchFoundPopup != null,
+			matchFoundPopup != null);
 
 		// Init menu handler with RankOverlay
 		menuHandler.init(dashboardPanel, navButton);

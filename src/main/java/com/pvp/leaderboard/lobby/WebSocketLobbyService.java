@@ -362,7 +362,16 @@ public final class WebSocketLobbyService implements LobbyService
         d.addProperty("to_player_id", opponent.playerId);
         d.addProperty("style", style.name().toLowerCase());
         d.addProperty("build", build.name().toLowerCase());
-        d.addProperty("location", location == null ? "" : location);
+        // Wire-protocol boundary: convert the picker's display string
+        // ("Arena" / "Wildy" / "FFA Portal" / "Wilderness" /
+        // "Clan Wars", or null for Veng/DMM) into the canonical wire
+        // enum the backend's ALLOWED_LOCATIONS_BY_STYLE expects
+        // ("arena" / "wildy" / "ffa" / "wilderness" / "clan_wars" /
+        // "none"). Without this the server rejects NH→FFA Portal,
+        // Multi→Clan Wars, Veng, and DMM with INVALID_LOCATION
+        // before the row is even minted (operator report 2026-05-25).
+        d.addProperty("location",
+            LobbyLocationCodec.toCanonical(style, location));
         socket.send("lobby/invite", d);
     }
 
@@ -405,7 +414,7 @@ public final class WebSocketLobbyService implements LobbyService
         String sid = currentFightSessionId;
         if (sid == null)
         {
-            log.debug("confirmFight() with no active fight session — dropping");
+            log.debug("confirmFight() with no active fight session - dropping");
             return;
         }
         JsonObject d = new JsonObject();
@@ -483,6 +492,28 @@ public final class WebSocketLobbyService implements LobbyService
         socket.send("lobby/unblock", d);
     }
 
+    @Override
+    public void blockById(String playerId)
+    {
+        if (playerId == null) return;
+        String trimmed = playerId.trim();
+        if (trimmed.isEmpty()) return;
+        JsonObject d = new JsonObject();
+        d.addProperty("blocked_player_id", trimmed);
+        socket.send("lobby/block", d);
+    }
+
+    @Override
+    public void unblockById(String playerId)
+    {
+        if (playerId == null) return;
+        String trimmed = playerId.trim();
+        if (trimmed.isEmpty()) return;
+        JsonObject d = new JsonObject();
+        d.addProperty("blocked_player_id", trimmed);
+        socket.send("lobby/unblock", d);
+    }
+
     /** Pass-through to {@link WebSocketManager#isConnected()}. The
      *  panel's reconnect banner reads this to decide whether to show
      *  the countdown — the wire state is the single source of truth
@@ -529,7 +560,7 @@ public final class WebSocketLobbyService implements LobbyService
         JsonElement membersEl = data.get("members");
         if (stale || membersEl == null || membersEl.isJsonNull())
         {
-            log.debug("WebSocketLobbyService: lobby/roster stale or null members — re-sending lobby/join");
+            log.debug("WebSocketLobbyService: lobby/roster stale or null members - re-sending lobby/join");
             replayJoinOnReconnect();
             return;
         }
@@ -606,7 +637,7 @@ public final class WebSocketLobbyService implements LobbyService
     {
         if (roster.isEmpty())
         {
-            log.debug("WebSocketLobbyService: enrich skipped — empty roster (version={})", version);
+            log.debug("WebSocketLobbyService: enrich skipped - empty roster (version={})", version);
             return;
         }
         JoinArgs args = lastJoinArgs;
@@ -654,57 +685,29 @@ public final class WebSocketLobbyService implements LobbyService
             // stale PvPDataService positive-cache entry.
             CompletableFuture<ShardRank> lookup = pvpDataService.getShardRankByName(mname, bucket, true);
             if (lookup == null) continue;
-            futures.add(lookup.handle((sr, ex) ->
+            futures.add(lookup.thenCompose(sr ->
             {
-                if (ex != null)
-                {
-                    log.debug("WebSocketLobbyService:   shard lookup name={} bucket={} threw {}",
-                        mname, bucket, ex.getClass().getSimpleName());
-                    // Fall through to the cached-profile fallback below
-                    // — a transient CDN error shouldn't show "Waiting"
-                    // if we already have a Player Lookup result cached.
-                }
                 String tier = (sr != null) ? sr.tier : null;
-                String source = "shard";
-                if (tier == null)
+                if (tier != null)
                 {
-                    // Shard didn't have this player in this bucket
-                    // (generator hasn't picked them up, transient CDN
-                    // miss, or they only have ranks in other buckets).
-                    // Surface the rank from any /user response the
-                    // panel or dashboard previously cached via
-                    // PvPDataService.getUserProfile — the user has
-                    // explicitly looked this player up at some point
-                    // this session, so showing "Waiting" while we
-                    // hold the data ourselves is the UX bug we're
-                    // closing.
-                    ShardRank profile = pvpDataService.getRankFromCachedProfile(mname, bucket);
-                    if (profile != null && profile.tier != null)
+                    recordEnrichedRank(pid, mname, bucket, tier, "shard", resolved, cacheKey);
+                    return CompletableFuture.<Void>completedFuture(null);
+                }
+                // Shard miss — one /user fetch per (name, bucket), deduped
+                // in PvPDataService. Whitelist membership is not consulted.
+                return pvpDataService.getRankFromProfileForLobby(mname, bucket).thenAccept(profileSr ->
+                {
+                    if (profileSr != null && profileSr.tier != null)
                     {
-                        tier = profile.tier;
-                        source = "profile_cache";
+                        recordEnrichedRank(pid, mname, bucket, profileSr.tier, "profile_api",
+                            resolved, cacheKey);
                     }
-                }
-                if (tier == null)
-                {
-                    log.debug("WebSocketLobbyService:   shard lookup name={} bucket={} -> null (no rank yet, no cached profile)",
-                        mname, bucket);
-                    return null;
-                }
-                int idx = RankUtils.rankIndexForTier(tier);
-                log.debug("WebSocketLobbyService:   shard lookup name={} bucket={} -> tier={} rankIdx={} source={}",
-                    mname, bucket, tier, idx, source);
-                if (idx >= 0)
-                {
-                    resolved.put(pid, idx);
-                    // Cache only positive resolutions. Null/-1 rows
-                    // stay uncached so the periodic
-                    // retryUnresolvedRanks() ticker can re-attempt
-                    // once the shard generator publishes the player.
-                    resolvedRankCache.put(cacheKey,
-                        new ResolvedRankEntry(idx, System.currentTimeMillis()));
-                }
-                return null;
+                    else
+                    {
+                        log.debug("WebSocketLobbyService:   rank lookup name={} bucket={} -> null (shard + /user)",
+                            mname, bucket);
+                    }
+                });
             }));
         }
         log.debug("WebSocketLobbyService: enrich kicking off bucket={} members={} version={} cacheHits={} cacheMisses={}",
@@ -724,7 +727,7 @@ public final class WebSocketLobbyService implements LobbyService
             }
             else
             {
-                log.debug("WebSocketLobbyService: enrich skipped — no lookups queued (version={})", version);
+                log.debug("WebSocketLobbyService: enrich skipped - no lookups queued (version={})", version);
             }
             return;
         }
@@ -742,6 +745,21 @@ public final class WebSocketLobbyService implements LobbyService
         String canon = name.trim().replaceAll("\\s+", " ").toLowerCase();
         String bk = (bucket == null || bucket.isEmpty()) ? "overall" : bucket.toLowerCase();
         return canon + ":" + bk;
+    }
+
+    private void recordEnrichedRank(String pid, String mname, String bucket, String tier,
+                                  String source, Map<String, Integer> resolved,
+                                  String cacheKey)
+    {
+        int idx = RankUtils.rankIndexForTier(tier);
+        log.debug("WebSocketLobbyService:   rank lookup name={} bucket={} -> tier={} rankIdx={} source={}",
+            mname, bucket, tier, idx, source);
+        if (idx >= 0)
+        {
+            resolved.put(pid, idx);
+            resolvedRankCache.put(cacheKey,
+                new ResolvedRankEntry(idx, System.currentTimeMillis()));
+        }
     }
 
     /** Single exit point for an enrichment pass: applies the
@@ -763,7 +781,7 @@ public final class WebSocketLobbyService implements LobbyService
     {
         if (rosterVersion.get() != version)
         {
-            log.debug("WebSocketLobbyService: enrich version={} superseded — dropping", version);
+            log.debug("WebSocketLobbyService: enrich version={} superseded - dropping", version);
             return;
         }
         log.debug("WebSocketLobbyService: enrich version={} settled, resolved={}/{} members",
@@ -953,11 +971,44 @@ public final class WebSocketLobbyService implements LobbyService
     {
         String inviteId = optString(data, "invite_id");
         String fromPlayerId = optString(data, "from_player_id");
-        if (inviteId.isEmpty() || fromPlayerId.isEmpty()) return;
-        Style style = parseStyle(optString(data, "style"));
-        BuildType build = parseBuild(optString(data, "build"));
-        if (style == null || build == null) return;
-        String location = optString(data, "location");
+        log.debug("WebSocketLobbyService: handleInviteReceived ENTRY inviteId={} fromPlayerId={}",
+            inviteId, fromPlayerId);
+        if (inviteId.isEmpty() || fromPlayerId.isEmpty())
+        {
+            log.debug("WebSocketLobbyService: handleInviteReceived DROP - missing inviteId or fromPlayerId"
+                    + " (inviteId='{}' fromPlayerId='{}')",
+                inviteId, fromPlayerId);
+            return;
+        }
+        // Defence-in-depth: server already cancels invites between
+        // blocked pairs (BACKEND_HANDOFF_LOBBY.md §lobby/block) but a
+        // partial deploy or a block-vs-invite race could still let a
+        // frame slip through. Drop here so the panel + the
+        // LobbyInviteNotificationOverlay both stay clean — single
+        // chokepoint, no need to re-check downstream.
+        if (blockedPlayerIds.contains(fromPlayerId))
+        {
+            log.debug("WebSocketLobbyService: handleInviteReceived DROP - blocked sender player_id={}",
+                fromPlayerId);
+            return;
+        }
+        String rawStyle = optString(data, "style");
+        String rawBuild = optString(data, "build");
+        Style style = parseStyle(rawStyle);
+        BuildType build = parseBuild(rawBuild);
+        if (style == null || build == null)
+        {
+            log.debug("WebSocketLobbyService: handleInviteReceived DROP - unparseable style/build"
+                    + " (rawStyle='{}' rawBuild='{}' parsedStyle={} parsedBuild={})",
+                rawStyle, rawBuild, style, build);
+            return;
+        }
+        // Inbound wire-protocol boundary: convert the canonical wire
+        // string ("ffa" / "clan_wars" / "none") into the picker
+        // display string ("FFA Portal" / "Clan Wars" / "") so the
+        // panel's render paths (inviteLocationLabel, formatStyleBuildPlace,
+        // meetAtPlace) keep showing display-cased text without churn.
+        String location = LobbyLocationCodec.toDisplay(optString(data, "location"));
         long expiresAt = optLong(data, "expires_at_epoch_ms");
 
         LobbyMember sender = rosterByPlayerId.get(fromPlayerId);
@@ -983,7 +1034,16 @@ public final class WebSocketLobbyService implements LobbyService
         }
         IncomingInvite invite = new IncomingInvite(inviteId, sender, style, build, location, expiresAt);
         LobbyEventListener l = listener;
-        if (l == null) return;
+        if (l == null)
+        {
+            log.debug("WebSocketLobbyService: handleInviteReceived DROP - no listener wired"
+                    + " (panel hasn't called setListener yet); inviteId={} fromPlayerId={}",
+                inviteId, fromPlayerId);
+            return;
+        }
+        log.debug("WebSocketLobbyService: handleInviteReceived DISPATCH to listener inviteId={}"
+                + " fromPlayerId={} senderRankIdx={} style={} build={}",
+            inviteId, fromPlayerId, sender.currentRankIdx, style, build);
         SwingUtilities.invokeLater(() -> l.onIncomingInvite(invite));
     }
 
@@ -1025,8 +1085,28 @@ public final class WebSocketLobbyService implements LobbyService
         Style style = parseStyle(optString(data, "style"));
         BuildType build = parseBuild(optString(data, "build"));
         if (style == null || build == null) return;
-        String location = optString(data, "location");
-        long expiresAt = optLong(data, "expires_at_epoch_ms");
+        // Inbound wire-protocol boundary — see handleInviteReceived.
+        String location = LobbyLocationCodec.toDisplay(optString(data, "location"));
+        // Canonical wire field per BACKEND_HANDOFF_LOBBY.md §FightSession
+        // is `confirm_expires_at_epoch_ms`. The plugin previously read
+        // the wrong key (`expires_at_epoch_ms`, the IncomingInvite
+        // field), which silently defaulted the deadline to 0L and made
+        // the panel's 1-Hz fight tick exit the Confirm-Fight card on
+        // its very first tick — the user saw the popup vanish before
+        // they could click anything (QA bug 2026-05-25). Read the
+        // canonical key first; fall back to the legacy name so a
+        // partial backend deploy doesn't strand every fight; and if
+        // BOTH are missing/zero, synthesise a sane 30s window keyed to
+        // the local clock so the user still gets a usable popup.
+        long expiresAt = optLong(data, "confirm_expires_at_epoch_ms");
+        if (expiresAt <= 0L) expiresAt = optLong(data, "expires_at_epoch_ms");
+        if (expiresAt <= 0L)
+        {
+            long synth = System.currentTimeMillis() + 30_000L;
+            log.warn("WebSocketLobbyService.handleFightProposed: missing confirm_expires_at_epoch_ms (and legacy expires_at_epoch_ms) on lobby/fight_proposed sid={} - synthesising local-clock deadline now+30s={} so the Confirm-Fight card doesn't insta-exit",
+                sid, synth);
+            expiresAt = synth;
+        }
         LobbyMember opponent = resolveOpponent(data);
         if (opponent == null) return;
         FightSession session = new FightSession(sid, opponent, style, build, location, expiresAt);
@@ -1051,7 +1131,8 @@ public final class WebSocketLobbyService implements LobbyService
         Style style = parseStyle(optString(data, "style"));
         BuildType build = parseBuild(optString(data, "build"));
         if (style == null || build == null) return;
-        String location = optString(data, "location");
+        // Inbound wire-protocol boundary — see handleInviteReceived.
+        String location = LobbyLocationCodec.toDisplay(optString(data, "location"));
         String world = optString(data, "world");
         String meetingPlace = optString(data, "meeting_place");
         LobbyMember opponent = resolveOpponent(data);

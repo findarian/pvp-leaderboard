@@ -84,6 +84,12 @@ public class PvPDataService
     private static final long USER_CACHE_TTL_MS = 1L * 60L * 1000L; // 1 minute
     private final ConcurrentHashMap<String, UserStatsCache> userStatsCache = new ConcurrentHashMap<>();
 
+    /** In-flight dedupe for lobby roster {@code /user} fallbacks after
+     *  a shard miss — at most one network roundtrip per (player, bucket)
+     *  at a time. */
+    private final ConcurrentHashMap<String, CompletableFuture<ShardRank>> inFlightProfileRankLookups =
+        new ConcurrentHashMap<>();
+
     // Matches Caching
     private static final long MATCHES_CACHE_TTL_MS = 1L * 60L * 1000L; // 1 minute
     private final ConcurrentHashMap<String, MatchesCacheEntry> matchesCache = new ConcurrentHashMap<>();
@@ -469,11 +475,22 @@ public class PvPDataService
 		return getUserProfile(playerName, clientUniqueId, false);
 	}
 
+    private static String canonicalUserCacheKey(String playerName)
+    {
+        if (playerName == null) return "";
+        return playerName.trim().replaceAll("\\s+", " ").toLowerCase();
+    }
+
+    private static String userProfileCacheKey(String playerName)
+    {
+        return "user:" + canonicalUserCacheKey(playerName);
+    }
+
 	public CompletableFuture<JsonObject> getUserProfile(String playerName, String clientUniqueId, boolean forceRefresh)
 	{
 		CompletableFuture<JsonObject> future = new CompletableFuture<>();
 
-		String cacheKey = "user:" + playerName;
+		String cacheKey = userProfileCacheKey(playerName);
 		UserStatsCache cached = userStatsCache.get(cacheKey);
 		if (!forceRefresh && cached != null && System.currentTimeMillis() - cached.getTimestamp() <= USER_CACHE_TTL_MS) {
 			future.complete(cached.getStats().deepCopy());
@@ -572,7 +589,7 @@ public class PvPDataService
     public CompletableFuture<String> getTierFromProfile(String playerName, String bucket)
     {
         // Force refresh to get fresh data after a fight, but keep cached data as fallback
-        String cacheKey = "user:" + playerName;
+        String cacheKey = userProfileCacheKey(playerName);
         UserStatsCache cachedData = userStatsCache.get(cacheKey);
         
         return getUserProfile(playerName, null, true).thenApply(profile -> {
@@ -681,33 +698,74 @@ public class PvPDataService
 	public ShardRank getRankFromCachedProfile(String playerName, String bucket)
 	{
 		if (playerName == null || playerName.isEmpty()) return null;
-		String cacheKey = "user:" + playerName;
+		String cacheKey = userProfileCacheKey(playerName);
 		UserStatsCache cached = userStatsCache.get(cacheKey);
 		if (cached == null) return null;
 		JsonObject profile = cached.getStats();
 		if (profile == null) return null;
+		String tier = tierFromUserProfile(profile, bucket);
+		if (tier == null) return null;
+		return new ShardRank(tier, 0);
+	}
+
+	/**
+	 * Lobby roster rank fallback after a shard miss. Whitelist membership
+	 * is irrelevant — any lobby member gets at most one in-flight
+	 * {@code /user} fetch per (name, bucket). Warm session cache is
+	 * checked first so repeated roster pushes don't spam the API.
+	 */
+	public CompletableFuture<ShardRank> getRankFromProfileForLobby(String playerName, String bucket)
+	{
+		if (playerName == null || playerName.trim().isEmpty())
+		{
+			return CompletableFuture.completedFuture(null);
+		}
+		ShardRank cached = getRankFromCachedProfile(playerName, bucket);
+		if (cached != null)
+		{
+			return CompletableFuture.completedFuture(cached);
+		}
+		String canon = canonicalUserCacheKey(playerName);
+		String bucketPath = (bucket == null || bucket.isEmpty()) ? "overall" : bucket.toLowerCase();
+		String lookupKey = canon + ":" + bucketPath;
+		CompletableFuture<ShardRank> existing = inFlightProfileRankLookups.get(lookupKey);
+		if (existing != null)
+		{
+			return existing;
+		}
+		CompletableFuture<ShardRank> future = getUserProfile(playerName, null, false)
+			.thenApply(profile ->
+			{
+				if (profile == null) return null;
+				String tier = tierFromUserProfile(profile, bucketPath);
+				return tier != null ? new ShardRank(tier, 0) : null;
+			});
+		future.whenComplete((result, ex) -> inFlightProfileRankLookups.remove(lookupKey, future));
+		CompletableFuture<ShardRank> raced = inFlightProfileRankLookups.putIfAbsent(lookupKey, future);
+		return raced != null ? raced : future;
+	}
+
+	private String tierFromUserProfile(JsonObject profile, String bucket)
+	{
+		if (profile == null) return null;
+		String bucketPath = (bucket == null || bucket.isEmpty()) ? "overall" : bucket.toLowerCase();
 		String resolvedTier = null;
-		if (bucket != null && !bucket.isEmpty()
+		if (!"overall".equals(bucketPath)
 			&& profile.has("buckets")
 			&& profile.get("buckets").isJsonObject())
 		{
 			JsonObject buckets = profile.getAsJsonObject("buckets");
-			if (buckets.has(bucket) && buckets.get(bucket).isJsonObject())
+			if (buckets.has(bucketPath) && buckets.get(bucketPath).isJsonObject())
 			{
 				resolvedTier = extractTierFromUserResponse(
-					buckets.getAsJsonObject(bucket), playerName, bucket);
+					buckets.getAsJsonObject(bucketPath), null, bucketPath);
 			}
 		}
 		if (resolvedTier == null)
 		{
-			// Fall back to top-level rank/division fields — matches
-			// extractTierFromUserResponse's "overall" semantics so a
-			// cache populated before bucket sharding existed still
-			// surfaces SOMETHING rather than nothing.
-			resolvedTier = extractTierFromUserResponse(profile, playerName, "overall");
+			resolvedTier = extractTierFromUserResponse(profile, null, "overall");
 		}
-		if (resolvedTier == null) return null;
-		return new ShardRank(resolvedTier, 0);
+		return resolvedTier;
 	}
 
 	/**

@@ -116,7 +116,16 @@ public class RankOverlay extends Overlay
     private int getHeightOffsetForPosition()
     {
         PvPLeaderboardConfig.RankPosition pos = config.rankPosition();
-        
+        // Defensive: a corrupted/missing persisted setting can return
+        // null here. {@code switch (null)} would NPE every render frame
+        // (~60 fps) and feed RuneLite's OverlayRenderer a stack-stripped
+        // exception via HotSpot's OmitStackTraceInFastThrow. Fall back
+        // to the same default the switch's default arm uses so behaviour
+        // is identical to a normal {@code ABOVE_HEAD} setting.
+        if (pos == null)
+        {
+            return ABOVE_HEAD_HEIGHT;
+        }
         switch (pos)
         {
             case FEET:
@@ -363,8 +372,60 @@ public class RankOverlay extends Overlay
         return (now - selfLastCombatMs) <= timeoutMs;
     }
 
+    /** Tracks the last time we logged a render-loop throwable, in
+     *  millis since epoch. Used to rate-limit the swallow-warn so a
+     *  pathological 60-fps NPE storm produces at most one WARN per
+     *  minute instead of ~3,600 per minute. */
+    private volatile long lastRenderErrorLogMs = 0L;
+
+    /** Minimum interval between {@code "render threw — swallowing"}
+     *  WARN entries when the inner body is failing every frame. One
+     *  minute is enough to keep the user's log readable while still
+     *  giving prompt feedback if a new failure appears mid-session. */
+    private static final long RENDER_ERROR_LOG_INTERVAL_MS = 60_000L;
+
     @Override
     public Dimension render(Graphics2D graphics)
+    {
+        // Catch-all guard: the rank overlay paints every frame at
+        // ~60 FPS and reaches into client/Player APIs that can
+        // transiently null out around login / world-hop / scene
+        // transitions. Without this wrapper, a single null deref
+        // would feed RuneLite's OverlayRenderer a same-bytecode-
+        // location throw every frame; HotSpot then strips the
+        // stack via OmitStackTraceInFastThrow and the user sees
+        // 60 untraceable WARN lines/sec. Logging once with a real
+        // stack here + swallowing downstream restores the diagnostic
+        // signal. See {@code RankOverlayRenderSafetyTest} for the
+        // contract.
+        try
+        {
+            return renderInner(graphics);
+        }
+        catch (Throwable t)
+        {
+            // Rate-limit the WARN line so a pathological 60-fps NPE
+            // cannot flood the log. The synthetic Throwable allocated
+            // at the catch site always carries a real stack — even
+            // when HotSpot has stack-stripped {@code t} via
+            // {@code -XX:+OmitStackTraceInFastThrow} after thousands
+            // of throws from the same bytecode location — so the user
+            // can still locate the call path through {@code render()}.
+            long now = System.currentTimeMillis();
+            if (now - lastRenderErrorLogMs >= RENDER_ERROR_LOG_INTERVAL_MS)
+            {
+                lastRenderErrorLogMs = now;
+                log.warn(
+                    "[RankOverlay] render threw {} (msg={}) — swallowing. " +
+                        "Diagnostic stack (HotSpot may have stripped the original):",
+                    t.getClass().getName(), t.getMessage(),
+                    new Throwable("RankOverlay render diagnostic capture"));
+            }
+            return new Dimension(0, 0);
+        }
+    }
+
+    private Dimension renderInner(Graphics2D graphics)
     {
         if (config == null || client == null)
         {
@@ -413,31 +474,44 @@ public class RankOverlay extends Overlay
         boolean showRanks = shouldShowRanks();
         int heightOffset = getHeightOffsetForPosition();
 
-        // Render self rank if enabled
-        if (config.showOwnRank())
+        // Render self rank if enabled.
+        // Order of guards matters: localName + cachedRank + showRanks
+        // are checked BEFORE invoking RuneLite's getCanvasTextLocation.
+        // Two reasons:
+        //   1. localName == null happens transiently during world hops /
+        //      login. Passing null into getCanvasTextLocation can NPE
+        //      deep inside RuneLite (FontMetrics.stringWidth(null)),
+        //      which surfaces as a stack-stripped NPE in the wrapper.
+        //   2. When cachedRank == null or showRanks == false the result
+        //      would be discarded anyway, so skipping the call is also
+        //      a per-frame perf win.
+        if (config.showOwnRank() && localName != null && showRanks)
         {
             String nameKey = NameUtils.canonicalKey(localName);
             String cachedRank = displayedRanks.get(nameKey);
 
-            Point nameLocation = localPlayer.getCanvasTextLocation(graphics, localName, heightOffset);
-            if (nameLocation != null && cachedRank != null && showRanks)
+            if (cachedRank != null)
             {
-                FontMetrics fm = graphics.getFontMetrics();
-
-                Point headLoc = localPlayer.getCanvasTextLocation(graphics, "", heightOffset);
-                int x, y;
-                if (headLoc != null)
+                Point nameLocation = localPlayer.getCanvasTextLocation(graphics, localName, heightOffset);
+                if (nameLocation != null)
                 {
-                    x = headLoc.getX() + config.rankOffsetX();
-                    y = headLoc.getY() - fm.getAscent() - 2 + config.rankOffsetY();
-                }
-                else
-                {
-                    x = nameLocation.getX() + config.rankOffsetX();
-                    y = nameLocation.getY() - fm.getAscent() - 2 + config.rankOffsetY();
-                }
+                    FontMetrics fm = graphics.getFontMetrics();
 
-                renderRankText(graphics, cachedRank, x, y, Math.max(10, config.rankTextSize()));
+                    Point headLoc = localPlayer.getCanvasTextLocation(graphics, "", heightOffset);
+                    int x, y;
+                    if (headLoc != null)
+                    {
+                        x = headLoc.getX() + config.rankOffsetX();
+                        y = headLoc.getY() - fm.getAscent() - 2 + config.rankOffsetY();
+                    }
+                    else
+                    {
+                        x = nameLocation.getX() + config.rankOffsetX();
+                        y = nameLocation.getY() - fm.getAscent() - 2 + config.rankOffsetY();
+                    }
+
+                    renderRankText(graphics, cachedRank, x, y, Math.max(10, config.rankTextSize()));
+                }
             }
         }
 
@@ -466,8 +540,19 @@ public class RankOverlay extends Overlay
     {
         String localName = localPlayer.getName();
         long whitelistRefreshMs = whitelistPlayerCache.getLastRefreshMs();
-        
-        for (Player player : client.getPlayers())
+
+        // Defensive: client.getPlayers() can return null transiently
+        // during scene loads / world hops. The enhanced-for below would
+        // NPE on the implicit .iterator() call and feed RuneLite's
+        // OverlayRenderer a stack-stripped NPE every frame at 60 fps
+        // until the scene settles. Treat null as "no players visible".
+        java.util.List<Player> scenePlayers = client.getPlayers();
+        if (scenePlayers == null)
+        {
+            return;
+        }
+
+        for (Player player : scenePlayers)
         {
             if (player == null || player == localPlayer) continue;
             

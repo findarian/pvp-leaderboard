@@ -19,7 +19,12 @@ public class PerformanceStatsPanel extends JPanel
     private JTable rankBreakdownTable;
     
     private String currentBucket = "overall";
-    
+
+    /** All-time wins/losses/ties per bucket from {@code /user} →
+     *  {@code cumulative_stats}. Source of truth for the K/D summary
+     *  row — matches the website's {@code updatePerformanceOverviewDisplay}. */
+    private Map<String, int[]> cumulativeStatsByBucket;
+
     // Cumulative opponent rank stats per bucket: bucket -> (rank -> [wins, losses])
     private Map<String, Map<String, int[]>> opponentRankStatsByBucket;
 
@@ -122,12 +127,59 @@ public class PerformanceStatsPanel extends JPanel
     }
     
     /**
-     * Update the cumulative stats display by summing opponent rank stats for the selected bucket.
+     * Receive all-time wins/losses/ties from {@code /user} →
+     * {@code cumulative_stats}. Drives the K/D summary label for the
+     * selected bucket. Matches the website's performance overview.
+     */
+    public void setCumulativeStats(JsonObject cumulativeStats)
+    {
+        cumulativeStatsByBucket = parseCumulativeStats(cumulativeStats);
+        updateCumulativeDisplay();
+    }
+
+    private static Map<String, int[]> parseCumulativeStats(JsonObject cumulativeStats)
+    {
+        Map<String, int[]> out = new HashMap<>();
+        if (cumulativeStats == null) return out;
+        for (String bucket : cumulativeStats.keySet())
+        {
+            try
+            {
+                if (!cumulativeStats.get(bucket).isJsonObject()) continue;
+                JsonObject b = cumulativeStats.getAsJsonObject(bucket);
+                int wins = b.has("wins") ? b.get("wins").getAsInt() : 0;
+                int losses = b.has("losses") ? b.get("losses").getAsInt() : 0;
+                int ties = b.has("ties") ? b.get("ties").getAsInt() : 0;
+                out.put(bucket.toLowerCase(), new int[]{wins, losses, ties});
+            }
+            catch (Exception ignored) {}
+        }
+        return out;
+    }
+
+    /**
+     * Update the K/D summary from {@link #cumulativeStatsByBucket}, falling
+     * back to summing {@link #opponentRankStatsByBucket} when cumulative
+     * data is absent (legacy /user payloads).
      */
     private void updateCumulativeDisplay()
     {
-        int kills = 0, deaths = 0;
-        if (opponentRankStatsByBucket != null)
+        int kills = 0, deaths = 0, ties = 0;
+        if (cumulativeStatsByBucket != null && !cumulativeStatsByBucket.isEmpty())
+        {
+            int[] row = cumulativeStatsByBucket.get(currentBucket);
+            if (row == null && !"overall".equals(currentBucket))
+            {
+                row = cumulativeStatsByBucket.get("overall");
+            }
+            if (row != null)
+            {
+                kills = row[0];
+                deaths = row[1];
+                ties = row[2];
+            }
+        }
+        else if (opponentRankStatsByBucket != null)
         {
             Map<String, int[]> currentStats = opponentRankStatsByBucket.getOrDefault(
                 currentBucket, Collections.emptyMap()
@@ -138,17 +190,18 @@ public class PerformanceStatsPanel extends JPanel
                 deaths += v[1];
             }
         }
-        int total = kills + deaths;
+        int total = kills + deaths + ties;
         double winRate = total > 0 ? (double) kills / total * 100 : 0;
-        
+
         final int k = kills, d = deaths;
+        final double wr = winRate;
         SwingUtilities.invokeLater(() -> {
-            cumulativeStatsLabel.setText(String.format("K: %d D: %d Winrate %.1f%%", k, d, winRate));
+            cumulativeStatsLabel.setText(String.format("K: %d D: %d Winrate %.1f%%", k, d, wr));
         });
     }
 
     /**
-     * @deprecated Use setCumulativeStats() instead. Kept for backward compatibility.
+     * @deprecated Use {@link #setCumulativeStats(JsonObject)} instead.
      */
     @Deprecated
     public void updateStats(int wins, int losses, int ties)
@@ -209,7 +262,6 @@ public class PerformanceStatsPanel extends JPanel
             }
         }
         updateRankBreakdownDisplay();
-        updateCumulativeDisplay();
     }
     
     /**
@@ -307,6 +359,7 @@ public class PerformanceStatsPanel extends JPanel
     public void reset()
     {
         opponentRankStatsByBucket = null;
+        cumulativeStatsByBucket = null;
         currentBucket = "overall";
         SwingUtilities.invokeLater(() -> {
             cumulativeStatsLabel.setText("K: - D: - Winrate -%");

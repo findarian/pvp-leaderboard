@@ -705,7 +705,31 @@ public class DashboardPanel extends PluginPanel
     private void handleBlockPlayerToggle()
     {
         if (currentMatchesPlayerId == null || currentMatchesPlayerId.isEmpty()) return;
-        boolean nowBlocked = BlockedPlayersService.toggle(currentMatchesPlayerId);
+        // Capture the id first so a concurrent loadMatchHistory mid-click
+        // can't wire the wrong wire frame.
+        String playerId = currentMatchesPlayerId;
+        boolean nowBlocked = BlockedPlayersService.toggle(playerId);
+        // Wire the toggle to the lobby/server. Pre-2026-05-25 this
+        // method only flipped the static UI-side BlockedPlayersService
+        // set, so the server never knew about the block — the blocked
+        // player kept showing as "Fight" on the lobby roster (server
+        // never pushed lobby/block_added back) and could keep sending
+        // invites (server never rejected them, receiver-side defence-
+        // in-depth checked the same server-fed set). Both gates are
+        // now load-bearing on this wire send.
+        if (nowBlocked) lobbyService.blockById(playerId);
+        else            lobbyService.unblockById(playerId);
+        // Optimistic local update — the server's lobby/block_added
+        // echo lands 100–500 ms later and would re-trigger the same
+        // mutation on MatchmakingLobbyPanel.blockedPlayerIds, but
+        // the user expects the chip to flip the instant they click.
+        // Idempotent: onBlockAdded short-circuits when the id is
+        // already in the set, so the server echo is a no-op.
+        if (matchmakingLobbyPanel != null)
+        {
+            if (nowBlocked) matchmakingLobbyPanel.onBlockAdded(playerId);
+            else            matchmakingLobbyPanel.onBlockRemoved(playerId);
+        }
         refreshBlockButtonState(nowBlocked);
     }
 
@@ -856,14 +880,6 @@ public class DashboardPanel extends PluginPanel
         {
             SwingUtilities.invokeLater(open);
         }
-        // Trigger a lobby rank-refresh for this player. The lookup path
-        // fetches /user which the lobby service can fall back to when
-        // a shard miss left a roster row stuck on "Waiting". Without
-        // this nudge a user has to wait up to 60 s (the periodic
-        // retry) for the chip to update — even though we now hold the
-        // freshest rank data locally. NoOpLobbyService + DevLobbyFixture
-        // get the default-no-op via the LobbyService interface.
-        lobbyService.refreshRankForPlayer(playerId);
     }
 
     /**
@@ -969,6 +985,10 @@ public class DashboardPanel extends PluginPanel
                 {
                     return;
                 }
+                // Re-enrich the lobby row once /user is cached — the
+                // profile_cache fallback keys off display name while
+                // the cache stores canonical lowercase ids.
+                lobbyService.refreshRankForPlayer(playerId);
                 SwingUtilities.invokeLater(() -> {
                     if (gen != loadGeneration) return;
                     updateProgressBars(stats, gen);
@@ -990,6 +1010,11 @@ public class DashboardPanel extends PluginPanel
         if (playerName != null)
         {
             applyAllBucketStats(stats, playerName, gen);
+        }
+
+        if (stats.has("cumulative_stats") && stats.get("cumulative_stats").isJsonObject())
+        {
+            performanceStatsPanel.setCumulativeStats(stats.getAsJsonObject("cumulative_stats"));
         }
 
         if (stats.has("opponent_rank_stats_by_bucket") && stats.get("opponent_rank_stats_by_bucket").isJsonObject())

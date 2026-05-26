@@ -60,6 +60,50 @@ public class FightMonitor
     private static final int OUT_OF_COMBAT_TICKS = 16;
     private int gcTicksCounter = 0;
 
+    /** Wall-clock timestamp (ms) of the most recent inbound damage
+     *  hitsplat where the attacker is identifiable as another Player
+     *  (not an NPC, not a self-deal). Updated on every qualifying
+     *  hit in {@link #handleHitsplatApplied}; used by
+     *  {@link #updateInCombatFlag()} to gate popup suppression for
+     *  the "passively-attacked, not yet retaliated" case —
+     *  {@link #activeFights} is only populated by OUTBOUND damage
+     *  (see resolveInboundAttacker's intentional null-on-no-existing-fight
+     *  contract), so without this separate signal a user being
+     *  ganked / opener-attacked in a matchmaking arena reads as
+     *  out-of-combat for the ~600ms–4s window before they retaliate,
+     *  and an invite popup arriving in that window slips through
+     *  the suppression gate (QA bug 2026-05-25). */
+    private volatile long lastInboundPvpDamageMs = 0L;
+
+    /** Push-model cache for {@link #isInCombat()}. The previous
+     *  pull model recomputed the answer on every popup-render frame
+     *  (~50 FPS × 2 overlays ≈ 100 calls/sec): walk
+     *  {@link #activeFights}, read {@link #lastInboundPvpDamageMs},
+     *  call {@link #isInCombatDecision}, emit a rate-limited DEBUG
+     *  log. The user (2026-05-26) called out the obvious smell:
+     *  combat is <em>state</em>, not a derived predicate, so it
+     *  should be cached and updated only at the mutation sites that
+     *  can change it. The cached field is updated by
+     *  {@link #updateInCombatFlag()}, which is called from every
+     *  site that mutates {@link #activeFights} or
+     *  {@link #lastInboundPvpDamageMs}:
+     *  <ul>
+     *    <li>{@link #handleHitsplatApplied} — after recording inbound
+     *        damage and/or seeding/touching a {@link FightEntry}.</li>
+     *    <li>{@link #handleGameTick} — after the 33-tick GC pass
+     *        evicts stale entries (combat exit edge).</li>
+     *    <li>{@link #endFightFor} — after the conditional
+     *        {@link #shouldClearInboundSignalAfterSubmission} clear
+     *        on kill/death.</li>
+     *    <li>{@link #clearFightFor} — covers the other entry-removal
+     *        path used post-fight.</li>
+     *    <li>{@link #resetFightState} — login/logout bounce reset.</li>
+     *  </ul>
+     *  Default value {@code false} is the correct login/startup
+     *  reading: a fresh plugin start has never seen a combat event
+     *  and must not read as in-combat until one fires. */
+    private volatile boolean inCombat = false;
+
     // MMR tracking - no longer using pre-fight profile, using match history API instead
 
     @Inject
@@ -100,7 +144,146 @@ public class FightMonitor
         activeFights.clear();
         perOpponentSuppressUntilTicks.clear();
         shardPresence.clear();
+        // Reset the inbound-PvP-damage signal too — a logout/login
+        // or game-state bounce should not leave the popup-suppression
+        // gate stuck on "in combat" indefinitely.
+        lastInboundPvpDamageMs = 0L;
+        updateInCombatFlag();
         try { log.debug("[Fight] state reset; suppressTicks={}", suppressFightStartTicks); } catch (Exception ignore) {}
+    }
+
+    /** Recency window (ms) for {@link #isInCombat()}. Matches the GC
+     *  threshold inside {@link #handleGameTick} (line ~157) so the
+     *  popup-suppression window is coherent with when stale fights
+     *  drop out of {@link #activeFights}. */
+    static final long COMBAT_WINDOW_MS = 10_000L;
+
+    /** Pure recency predicate. {@code true} iff {@code lastActivityMs}
+     *  sits within {@link #COMBAT_WINDOW_MS} of {@code nowMs}.
+     *
+     *  <p>Edge cases (pinned in {@code FightMonitorCombatWindowTest}):
+     *  <ul>
+     *    <li>Exact-boundary elapsed → in combat (inclusive).</li>
+     *    <li>Negative elapsed (clock skew, e.g. NTP correction
+     *        mid-fight) → in combat. Safer side: at worst we delay
+     *        a popup, we never replay one the user already
+     *        dismissed.</li>
+     *  </ul>
+     */
+    static boolean isWithinCombatWindow(long lastActivityMs, long nowMs)
+    {
+        long elapsed = nowMs - lastActivityMs;
+        if (elapsed < 0L) return true;
+        return elapsed <= COMBAT_WINDOW_MS;
+    }
+
+    /** Push-model accessor — returns the cached {@link #inCombat}
+     *  flag. Single volatile read, no map walk, no decision math,
+     *  no per-call log emission. The value is updated only at the
+     *  mutation sites enumerated on {@link #inCombat}; see that
+     *  field's javadoc for the full transition list and rationale.
+     *
+     *  <p>Used by the popup notification overlays to suppress
+     *  in-game popups while the user is in PvP. The user-facing
+     *  config gate
+     *  {@link com.pvp.leaderboard.config.PvPLeaderboardConfig#suppressNotificationsInCombat()}
+     *  decides whether to consult this.
+     *
+     *  <p>"PvP combat" specifically — both update sites
+     *  ({@link #handleHitsplatApplied} for inbound damage,
+     *  {@link #touchFight} for outbound) filter hitsplats so only
+     *  player-vs-player damage seeds either signal; an item trade,
+     *  NPC tick, or skilling action will never flip this flag. */
+    public boolean isInCombat()
+    {
+        return inCombat;
+    }
+
+    /** Recompute {@link #inCombat} from the current values of
+     *  {@link #activeFights} and {@link #lastInboundPvpDamageMs}.
+     *  Called from every site that mutates either of those (see
+     *  {@link #inCombat} field docs for the enumerated list).
+     *
+     *  <p><b>Decision rule</b> (unchanged from the pre-2026-05-26
+     *  pull model — only the trigger model flipped, not the truth
+     *  table): in combat iff EITHER any non-finalized entry exists
+     *  in {@link #activeFights} (regardless of recency — let the
+     *  33-tick GC at {@link #handleGameTick} decide when to evict),
+     *  OR {@link #lastInboundPvpDamageMs} is within
+     *  {@link #COMBAT_WINDOW_MS} of now. Both branches are pinned
+     *  by {@link FightMonitorCombatWindowTest}.
+     *
+     *  <p><b>Why this method is package-private:</b> not for tests
+     *  (those rely solely on the public {@link #isInCombat()} surface
+     *  to avoid reflection / over-fitting to internals). It's
+     *  package-private so the same-package overlay diagnostics
+     *  could trigger a recompute on demand if a future regression
+     *  needs it; production code only ever calls this from the
+     *  five enumerated mutation sites.
+     *
+     *  <p><b>Logging:</b> emits a single DEBUG line per
+     *  {@code false→true} or {@code true→false} transition,
+     *  capturing which branch of {@link #isInCombatDecision}
+     *  carried it (active-fight-count + inbound-damage age). Steady
+     *  state is silent — that's the central refactor win, replacing
+     *  the previous rate-limited 1-line-per-second polling spam. */
+    void updateInCombatFlag()
+    {
+        long now = System.currentTimeMillis();
+        int activeFightCount = 0;
+        for (FightEntry fe : activeFights.values())
+        {
+            if (fe == null) continue;
+            if (fe.finalized) continue;
+            activeFightCount++;
+        }
+        boolean hasActiveFight = activeFightCount > 0;
+        long inboundMs = lastInboundPvpDamageMs;
+        boolean newValue = isInCombatDecision(inboundMs, hasActiveFight, now);
+
+        if (newValue != inCombat)
+        {
+            long inboundAgeMs = (inboundMs > 0L) ? (now - inboundMs) : -1L;
+            try
+            {
+                log.debug("[FightMonitor] in-combat transition {} -> {} hasActiveFight={}"
+                        + " activeFightCount={} inboundAgeMs={} combatWindowMs={}",
+                    inCombat, newValue, hasActiveFight, activeFightCount, inboundAgeMs,
+                    COMBAT_WINDOW_MS);
+            }
+            catch (Exception ignore)
+            {
+                // Logger may be uninitialized in some test paths; the
+                // flag update itself MUST still happen.
+            }
+            inCombat = newValue;
+        }
+    }
+
+    /** Pure decision helper: in combat iff EITHER
+     *  {@code lastInboundPvpDamageMs} is within
+     *  {@link #COMBAT_WINDOW_MS} of {@code nowMs}, OR
+     *  {@code hasActiveFight} is true. Both signals are independent;
+     *  either alone is sufficient.
+     *
+     *  <p>The active-fight branch deliberately does NOT consult a
+     *  recency window — see {@link #isInCombat()} for the rationale.
+     *  In short: the source of truth for "match is over" is the GC
+     *  pass that removes idle entries from {@link #activeFights},
+     *  not a parallel 10s recency check that would un-suppress the
+     *  popup before the GC actually runs. The inbound-damage branch
+     *  still uses the recency window because it has no FightEntry
+     *  backing it (no GC to defer to).
+     *
+     *  <p>Extracted as a static helper so
+     *  {@code FightMonitorCombatWindowTest} can pin the two-signal
+     *  OR-gate without instantiating FightMonitor (which has nine
+     *  injected dependencies). */
+    static boolean isInCombatDecision(long lastInboundPvpDamageMs, boolean hasActiveFight, long nowMs)
+    {
+        if (lastInboundPvpDamageMs > 0L
+            && isWithinCombatWindow(lastInboundPvpDamageMs, nowMs)) return true;
+        return hasActiveFight;
     }
     
     /**
@@ -119,6 +302,12 @@ public class FightMonitor
             opponent = null;
             suppressFightStartTicks = 2;
         }
+        // Recompute the cached in-combat flag — removing a FightEntry
+        // can flip the gate to false (singles kill, last multi
+        // opponent cleared, GC after fight-finalize). Without this
+        // the cache would lag the activeFights truth until the next
+        // unrelated mutation.
+        updateInCombatFlag();
     }
 
     public void handleGameTick(GameTick tick)
@@ -163,6 +352,29 @@ public class FightMonitor
 
             // Combat window idle check - individual fight expiration is handled by GC above
             // No global damage maps to clear anymore; damage is per-FightEntry
+
+            // Recompute the cached in-combat flag every tick. Two
+            // reasons this lives here rather than only at GC time:
+            //
+            //  (1) The {@code lastInboundPvpDamageMs} recency window
+            //      auto-expires without an event — no hitsplat fires
+            //      to mark the moment 10 seconds have elapsed since
+            //      the last inbound hit. The game tick (~600ms
+            //      cadence) is the natural carrier for this exit
+            //      transition. At ~1.7 ticks/sec we'll detect the
+            //      edge within one tick of {@link #COMBAT_WINDOW_MS}
+            //      elapsing, well below any user-visible latency.
+            //  (2) The 33-tick GC pass above can evict entries that
+            //      change the flag; sharing the recompute call with
+            //      the per-tick recency check keeps both edges on
+            //      the same code path.
+            //
+            // {@link #updateInCombatFlag} is a no-op when the
+            // computed value matches the cache, so 99%+ of ticks
+            // fire zero log lines and do only a small map walk —
+            // far cheaper than the previous ~100 calls/sec from
+            // the popup-render polling.
+            updateInCombatFlag();
         }
         catch (Exception e)
         {
@@ -229,7 +441,24 @@ public class FightMonitor
 
             if (hitPlayer == localPlayer)
             {
-                // Hitsplat on us = opponent dealt damage to us (inbound)
+                // Hitsplat on us = opponent dealt damage to us (inbound).
+                // Mark the inbound-PvP-damage timestamp BEFORE the
+                // resolveInboundAttacker call so the popup-suppression
+                // gate engages even when there's no active fight yet
+                // (which is the whole reason this branch exists —
+                // resolveInboundAttacker only returns existing fight
+                // opponents, by design, to prevent NPC/trade/item-use
+                // damage from spawning false PvP fights). The "is
+                // there a real player attacker" check uses the cheap
+                // {@link #findActualKiller}-equivalent walk: any
+                // other Player whose getInteracting() is the local
+                // player is treated as our attacker for combat-state
+                // purposes only (still no fight registered, so no
+                // false match-tracking).
+                if (isDamageHitsplat && hasPlayerAttacker(localPlayer))
+                {
+                    lastInboundPvpDamageMs = System.currentTimeMillis();
+                }
                 opponentName = resolveInboundAttacker(localPlayer);
                 if (opponentName != null)
                 {
@@ -351,6 +580,15 @@ public class FightMonitor
             //     log.debug("[DmgTrack] NO_OPPONENT {} on {} - couldn't resolve as opponent", 
             //         amt, hitPlayerName);
             // }
+
+            // Recompute the cached in-combat flag — this hitsplat
+            // path is the primary "false→true" transition source
+            // (inbound damage seeds {@link #lastInboundPvpDamageMs};
+            // outbound damage seeds {@link #activeFights}). The
+            // recompute is a no-op when no signal changed (e.g. an
+            // NPC hitsplat that bailed early), so it's free in
+            // practice.
+            updateInCombatFlag();
         }
         catch (Exception e)
         {
@@ -426,6 +664,61 @@ public class FightMonitor
         fe.finalized = true;
         finalizeFight(opponentName, result, fe);
         clearFightFor(opponentName);  // Use targeted clear instead of resetFightState
+
+        // Release the popup-suppression gate the moment the match is
+        // submitted, instead of waiting up to {@link #COMBAT_WINDOW_MS}
+        // for the lingering {@link #lastInboundPvpDamageMs} from the
+        // just-finished fight to age out (user spec 2026-05-25:
+        // "right after a match submission or when combat ends and
+        // the match is discarded"). Multi-opponent guard: stays
+        // engaged while any other {@code activeFights} entry remains
+        // OR a fresh player attacker is interacting-with the local
+        // player. See
+        // {@link FightMonitorCombatWindowTest#shouldClearInboundSignalAfterSubmission_singlesKillNoAttacker_returnsTrue}
+        // and the multi/attacker companion tests for the contract.
+        Player local = (client != null) ? client.getLocalPlayer() : null;
+        boolean hasOtherActiveFights = !activeFights.isEmpty();
+        boolean hasCurrentAttacker = (local != null) && hasPlayerAttacker(local);
+        if (shouldClearInboundSignalAfterSubmission(hasOtherActiveFights, hasCurrentAttacker))
+        {
+            lastInboundPvpDamageMs = 0L;
+        }
+        // Final recompute after all the kill-path mutations
+        // (clearFightFor above already triggered one, but the
+        // conditional inbound clear here can additionally flip the
+        // flag in the singles-no-attacker case where activeFights
+        // emptied AND inbound just zeroed in the same call).
+        updateInCombatFlag();
+    }
+
+    /** Pure decision helper: should {@link #lastInboundPvpDamageMs}
+     *  be cleared after {@link #endFightFor} finalizes a fight?
+     *
+     *  <p>Clear iff BOTH:
+     *  <ul>
+     *    <li>{@code hasOtherActiveFights} is {@code false} — no
+     *        multi-opponent FightEntry still in
+     *        {@link #activeFights}. In multi the gate must stay
+     *        engaged until ALL multi-opponents are cleared (user
+     *        spec 2026-05-25: "they can't be in combat with anyone
+     *        since they may be in combat with multiple people").</li>
+     *    <li>{@code hasCurrentAttacker} is {@code false} — no Player
+     *        on the scene whose {@code getInteracting()} is the local
+     *        player. Defends against the singles-with-fresh-attacker
+     *        flicker case: opp1 dies and the gate would briefly read
+     *        "out of combat" before opp2's first hitsplat re-seeds
+     *        {@code lastInboundPvpDamageMs}; that one-frame
+     *        un-suppression would surface a partial popup paint.</li>
+     *  </ul>
+     *
+     *  <p>Extracted as a static helper so
+     *  {@code FightMonitorCombatWindowTest} can pin the truth table
+     *  without instantiating FightMonitor (which has nine injected
+     *  dependencies). */
+    static boolean shouldClearInboundSignalAfterSubmission(boolean hasOtherActiveFights,
+                                                           boolean hasCurrentAttacker)
+    {
+        return !hasOtherActiveFights && !hasCurrentAttacker;
     }
 
     private void finalizeFight(String opponentName, String result, FightEntry entry)
@@ -975,6 +1268,26 @@ public class FightMonitor
             if (player != localPlayer && player.getInteracting() == localPlayer) return player.getName();
         }
         return null;
+    }
+
+    /** Fast boolean variant of {@link #findActualKiller} — returns
+     *  true the moment any other Player is found whose
+     *  {@code getInteracting()} is the local player. Used by the
+     *  inbound-damage path of {@link #handleHitsplatApplied} to
+     *  decide whether to update {@link #lastInboundPvpDamageMs}.
+     *  Doesn't allocate a String. Walks the same player list as
+     *  findActualKiller so the two stay coherent. */
+    private boolean hasPlayerAttacker(Player localPlayer)
+    {
+        if (client == null || localPlayer == null) return false;
+        List<Player> players = client.getPlayers();
+        if (players == null) return false;
+        for (Player player : players)
+        {
+            if (player == null || player == localPlayer) continue;
+            if (player.getInteracting() == localPlayer) return true;
+        }
+        return false;
     }
 
     private boolean isPlayerOpponent(String name)

@@ -338,6 +338,18 @@ public interface PvPLeaderboardConfig extends Config
 		return true;
 	}
 
+	@ConfigItem(
+		keyName = "suppressNotificationsInCombat",
+		name = "Hide popups while in combat",
+		description = "Defer lobby invite + match found in-game popups while you're in a PvP fight, then show the deferred popup the moment the plugin closes out the match. On by default. The popup's visible-window timer is paused for the duration of the fight (so a popup arriving mid-combat doesn't expire before you see it). Release triggers: (a) right after a match is submitted on a kill or death, or (b) when combat ends naturally and the FightEntry is GC'd (~10-30s after the last damage hitsplat). Multi-combat: stays deferred until you're out of combat with ALL opponents, not just the first one.",
+		section = notificationSection,
+		position = 7
+	)
+	default boolean suppressNotificationsInCombat()
+	{
+		return true;
+	}
+
 	// ==================== Other Settings ====================
 
 	@ConfigItem(
