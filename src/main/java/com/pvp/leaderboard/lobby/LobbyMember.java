@@ -25,6 +25,15 @@ import java.util.Set;
  */
 public final class LobbyMember
 {
+    /** Sentinel value used by both {@link #minRankIdx} and
+     *  {@link #maxRankIdx} when the server has not (yet) pushed the
+     *  member's slider settings. Callers must treat either field
+     *  equalling this value as "range unknown" and skip the
+     *  out-of-their-range greyout — never as "accepts no-one" (which
+     *  would incorrectly grey every row on every pre-deploy
+     *  build of the backend). */
+    public static final int UNKNOWN_RANK_IDX = -1;
+
     public final String playerId;
     public final String name;
     public final Set<Style> styles;
@@ -41,9 +50,39 @@ public final class LobbyMember
     public final int peakRankIdx;
     public final String region;
     public final boolean isMod;
+    /** Lower bound of this member's own accept-invite slider (index into
+     *  {@code RANK_LABELS}, inclusive). The plugin compares the
+     *  <b>viewer's</b> own rank against {@code [minRankIdx, maxRankIdx]}
+     *  to decide whether to grey their row out — when the viewer is
+     *  outside this band the member would server-reject any
+     *  {@code lobby/invite} with {@code RANK_OUT_OF_RANGE}, so showing
+     *  a live [Fight] chip would be misleading.
+     *
+     *  <p>{@link #UNKNOWN_RANK_IDX} (-1) when the server did not push
+     *  the field (pre-deploy build of the lobby backend, or a partial
+     *  roster row); the greyout logic interprets that as "range
+     *  unknown — show the row normally" so missing data never causes
+     *  every row to grey out. */
+    public final int minRankIdx;
+    /** Upper bound of this member's own accept-invite slider — see
+     *  {@link #minRankIdx} for semantics. {@link #UNKNOWN_RANK_IDX}
+     *  (-1) when the server did not push the field. */
+    public final int maxRankIdx;
 
+    /** Backwards-compatible ctor — defaults the new slider-bound fields
+     *  to {@link #UNKNOWN_RANK_IDX}. Kept so test fixtures, the
+     *  self-preview builder, and the lookup-row constructors don't
+     *  have to thread two more args through every call site. */
     public LobbyMember(String playerId, String name, Set<Style> styles, Set<BuildType> builds,
                        int currentRankIdx, int peakRankIdx, String region, boolean isMod)
+    {
+        this(playerId, name, styles, builds, currentRankIdx, peakRankIdx, region, isMod,
+            UNKNOWN_RANK_IDX, UNKNOWN_RANK_IDX);
+    }
+
+    public LobbyMember(String playerId, String name, Set<Style> styles, Set<BuildType> builds,
+                       int currentRankIdx, int peakRankIdx, String region, boolean isMod,
+                       int minRankIdx, int maxRankIdx)
     {
         this.playerId = playerId;
         this.name = name;
@@ -57,6 +96,8 @@ public final class LobbyMember
         this.peakRankIdx = peakRankIdx;
         this.region = region;
         this.isMod = isMod;
+        this.minRankIdx = minRankIdx;
+        this.maxRankIdx = maxRankIdx;
     }
 
     /** Compact style-flag string ("NVMD" if all four styles are set).

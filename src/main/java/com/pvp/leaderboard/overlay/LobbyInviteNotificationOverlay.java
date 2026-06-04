@@ -1,5 +1,6 @@
 package com.pvp.leaderboard.overlay;
 
+import com.pvp.leaderboard.PvPLeaderboardPlugin;
 import com.pvp.leaderboard.config.PvPLeaderboardConfig;
 import lombok.extern.slf4j.Slf4j;
 import net.runelite.api.Client;
@@ -7,6 +8,7 @@ import net.runelite.client.ui.FontManager;
 import net.runelite.client.ui.overlay.Overlay;
 import net.runelite.client.ui.overlay.OverlayLayer;
 import net.runelite.client.ui.overlay.OverlayPosition;
+import net.runelite.client.util.ImageUtil;
 
 import javax.inject.Inject;
 import javax.inject.Singleton;
@@ -20,6 +22,9 @@ import java.awt.FontMetrics;
 import java.awt.Graphics2D;
 import java.awt.RenderingHints;
 import java.awt.Stroke;
+import java.awt.image.BufferedImage;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.function.BooleanSupplier;
 
 /**
@@ -34,11 +39,19 @@ import java.util.function.BooleanSupplier;
  * eyedropper against a screenshot of that widget so the two
  * notifications visually rhyme.
  *
- * <p>Lifecycle is single-shot: {@link #showInvite(String, String)}
- * stamps the active notification + start time and the overlay's
+ * <p>Lifecycle is single-shot: {@link #showInvite} stamps the active
+ * notification + start time and the overlay's
  * {@link #render(Graphics2D)} handles the fade-in / hold / fade-out
  * animation and self-clears when the duration elapses. A second
  * invite while one is still on screen replaces the old one.
+ *
+ * <p><b>Body copy (2026-05-29 spec):</b> the body is a single
+ * instruction sentence — "Click the [icon] on the right to accept a
+ * fight from {sender}" — where {@code [icon]} is the plugin's RuneLite
+ * sidebar nav icon drawn inline and {sender} is tinted with the
+ * sender's rank-tier colour. The earlier "{sender} wants to fight:" +
+ * style/build/location sub-line was dropped per the same spec, so the
+ * overlay no longer carries any sub-text state.
  *
  * <p><b>Threading:</b> {@link #showInvite} is callable from any
  * thread; the overlay's render runs on the RuneLite game thread.
@@ -98,10 +111,34 @@ public final class LobbyInviteNotificationOverlay extends Overlay
      *  notifications. */
     private static final int POPUP_TOP_OFFSET = 22;
 
-    /** Body text size — caption + sub-line share one bold font so
-     *  "Giezey wants to fight:" and "NH (Pure) at wildy" render at
-     *  the same weight/size (user-facing spec 2026-05-24). */
+    /** Body text size for the instruction sentence. */
     private static final float BODY_FONT_PT = 16f;
+
+    /** Horizontal inset applied to each side of the body text block so
+     *  the wrapped instruction never runs into the frame bevel. */
+    private static final int BODY_SIDE_PAD = 12;
+
+    /** The plugin's RuneLite sidebar nav icon, drawn inline in the
+     *  body so "Click the [icon] on the right …" points the user at
+     *  the exact toolbar button they need to press. Loaded once from
+     *  the same resource the plugin's {@code NavigationButton} uses
+     *  (anchored on {@link PvPLeaderboardPlugin} so the classpath
+     *  lookup matches). {@code null} if the resource can't be read —
+     *  the body still renders, just without the inline glyph. */
+    private static final BufferedImage PANEL_ICON = loadPanelIcon();
+
+    private static BufferedImage loadPanelIcon()
+    {
+        try
+        {
+            return ImageUtil.loadImageResource(PvPLeaderboardPlugin.class, "panel-icon.png");
+        }
+        catch (Throwable t)
+        {
+            log.warn("[LobbyInviteNotificationOverlay] failed to load panel-icon.png for inline popup glyph", t);
+            return null;
+        }
+    }
 
     private final Client client;
     private final PvPLeaderboardConfig config;
@@ -124,7 +161,6 @@ public final class LobbyInviteNotificationOverlay extends Overlay
     private volatile String lastShownInviteId;
 
     private volatile String activeSenderName;
-    private volatile String activeSubtext;
     /** Tint for {@link #activeSenderName} in the body line. By spec
      *  the panel passes the same rank-tier colour the lobby row uses
      *  for this player, or {@link Color#WHITE} when the shard hasn't
@@ -185,9 +221,10 @@ public final class LobbyInviteNotificationOverlay extends Overlay
 
     /**
      * Triggers a fresh popup for an incoming fight invite from
-     * {@code senderName}. {@code subtext} is a short summary
-     * ({@code "NH (Main) at Arena"}) that becomes the body's second
-     * line. Safe to call from any thread.
+     * {@code senderName}. The body renders the fixed instruction
+     * "Click the [icon] on the right to accept a fight from
+     * {senderName}", with {@code senderName} tinted in
+     * {@code senderColor}. Safe to call from any thread.
      *
      * <p><b>De-duplication:</b> if {@code inviteId} matches the last
      * invite this overlay rendered, the call is silently dropped —
@@ -201,7 +238,7 @@ public final class LobbyInviteNotificationOverlay extends Overlay
      * popup later doesn't suddenly surface a stale invite the user
      * "missed" while it was off.
      */
-    public void showInvite(String inviteId, String senderName, String subtext, Color senderColor)
+    public void showInvite(String inviteId, String senderName, Color senderColor)
     {
         if (senderName == null || senderName.isEmpty()) return;
         // Dedupe by invite id — once per id, ever (within this
@@ -230,7 +267,6 @@ public final class LobbyInviteNotificationOverlay extends Overlay
             return;
         }
         this.activeSenderName = senderName;
-        this.activeSubtext = subtext == null ? "" : subtext;
         this.activeSenderColor = (senderColor != null) ? senderColor : Color.WHITE;
         long stamp = System.currentTimeMillis();
         this.activeStartMs = stamp;
@@ -246,7 +282,6 @@ public final class LobbyInviteNotificationOverlay extends Overlay
     public void clear()
     {
         this.activeSenderName = null;
-        this.activeSubtext = null;
         this.activeSenderColor = null;
         this.activeStartMs = 0L;
         this.lastShownInviteId = null;
@@ -320,7 +355,6 @@ public final class LobbyInviteNotificationOverlay extends Overlay
             if (activeStartMs != 0L)
             {
                 this.activeSenderName = null;
-                this.activeSubtext = null;
                 this.activeSenderColor = null;
                 this.activeStartMs = 0L;
             }
@@ -364,7 +398,6 @@ public final class LobbyInviteNotificationOverlay extends Overlay
             // outlive the visual window so a later re-push of the
             // same invite stays suppressed.
             this.activeSenderName = null;
-            this.activeSubtext = null;
             this.activeSenderColor = null;
             this.activeStartMs = 0L;
             return null;
@@ -475,13 +508,26 @@ public final class LobbyInviteNotificationOverlay extends Overlay
         g.drawLine(x + 2, sepY + 1, x + POPUP_W - 3, sepY + 1);
     }
 
+    /** Sentinel token marking where the inline sidebar icon is drawn
+     *  inside the wrapped instruction sentence. Identity-compared in
+     *  the layout loop (never rendered as text). */
+    private static final Object ICON_TOKEN = new Object();
+
+    /** Wrapper marking the rank-tier-coloured sender-name token so the
+     *  layout loop can tint it differently from the plain body words. */
+    private static final class NameToken
+    {
+        final String text;
+        NameToken(String text) { this.text = text; }
+    }
+
     /** Paints the title (orange, centred in the title bar) and the
-     *  body's two centred lines: a "{@code Sender wants to fight}"
-     *  caption followed by the {@code style/build/location} sub-text.
-     *  Both body lines use {@link #BODY_FONT_PT} Runescape Bold so
-     *  the caption and summary render at the same size/weight.
-     *  Text is rendered with AA on (smoother glyphs) while the
-     *  frame paint above forced AA off for crisp 1-px strokes. */
+     *  body instruction: "Click the [icon] on the right to accept a
+     *  fight from {sender}". The sentence is word-wrapped to the body
+     *  width with the sidebar icon drawn inline and the sender name
+     *  tinted in its rank-tier colour. Text is rendered with AA on
+     *  (smoother glyphs) while the frame paint above forced AA off for
+     *  crisp 1-px strokes. */
     private void paintText(Graphics2D g, int x, int y, String sender)
     {
         g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
@@ -499,59 +545,108 @@ public final class LobbyInviteNotificationOverlay extends Overlay
         g.setColor(TITLE_FG);
         g.drawString(title, titleX, titleY);
 
-        // Body — two centred lines: caption + sub-line. Both use the
-        // same bold Runescape font at {@link #BODY_FONT_PT} so the
-        // name/caption and the style/build/location summary read as
-        // one uniform block (not a small plain caption + oversized
-        // headline sub-line).
+        // Body — the single instruction sentence, word-wrapped.
         Font bodyFont = FontManager.getRunescapeBoldFont().deriveFont(BODY_FONT_PT);
         g.setFont(bodyFont);
-        FontMetrics bodyFm = g.getFontMetrics();
-        final String captionTail = " wants to fight:";
-        int senderW = bodyFm.stringWidth(sender);
-        int tailW = bodyFm.stringWidth(captionTail);
-        int captionX = x + (POPUP_W - (senderW + tailW)) / 2;
-        // Body region spans (TITLE_BAR_H + 2 [separator]) to POPUP_H.
+        FontMetrics fm = g.getFontMetrics();
+        int lineH = fm.getHeight();
+        int spaceW = fm.stringWidth(" ");
+        // Inline glyph sized to the text cap-height so it sits in the
+        // run of words rather than towering over them.
+        int iconSize = fm.getAscent();
+        int maxW = POPUP_W - 2 * BODY_SIDE_PAD;
+
+        // "Click the [icon] on the right to accept a fight from {name}"
+        List<Object> tokens = new ArrayList<>();
+        for (String w : new String[]{"Click", "the"}) tokens.add(w);
+        tokens.add(ICON_TOKEN);
+        for (String w : new String[]{"on", "the", "right", "to", "accept", "a", "fight", "from"}) tokens.add(w);
+        tokens.add(new NameToken(sender));
+
+        // Greedy word-wrap into lines that fit within maxW.
+        List<List<Object>> lines = new ArrayList<>();
+        List<Object> cur = new ArrayList<>();
+        int curW = 0;
+        for (Object t : tokens)
+        {
+            int tw = tokenWidth(t, fm, iconSize);
+            int add = cur.isEmpty() ? tw : spaceW + tw;
+            if (!cur.isEmpty() && curW + add > maxW)
+            {
+                lines.add(cur);
+                cur = new ArrayList<>();
+                curW = 0;
+                add = tw;
+            }
+            cur.add(t);
+            curW += add;
+        }
+        if (!cur.isEmpty()) lines.add(cur);
+
+        // Vertically centre the wrapped block in the body region.
         int bodyTop = y + TITLE_BAR_H + 2;
         int bodyBottom = y + POPUP_H;
-        int bodyMidY = (bodyTop + bodyBottom) / 2;
-        int captionY = bodyMidY - (bodyFm.getHeight() / 2);
-        // Sender name in rank-tier colour (or white when "Waiting").
-        // {@link #activeSenderColor} is set by {@link #showInvite}
-        // from the panel's RankUtils-based resolution; null only for
-        // overlapping clear/render races, so guard defensively.
-        Color senderColor = activeSenderColor;
-        g.setColor(senderColor != null ? senderColor : BODY_FG);
-        g.drawString(sender, captionX, captionY);
-        g.setColor(BODY_FG);
-        g.drawString(captionTail, captionX + senderW, captionY);
+        int blockH = lines.size() * lineH;
+        int blockTop = bodyTop + Math.max(0, ((bodyBottom - bodyTop) - blockH) / 2);
 
-        String sub = activeSubtext;
-        if (sub == null) sub = "";
-        String trimmed = truncateToFit(sub, bodyFm, POPUP_W - 24);
-        int subX = x + (POPUP_W - bodyFm.stringWidth(trimmed)) / 2;
-        int subY = captionY + bodyFm.getHeight() - 2;
-        g.drawString(trimmed, subX, subY);
+        // Sender colour set at showInvite from the panel's RankUtils
+        // resolution; guard defensively against a clear/render race.
+        Color senderColor = activeSenderColor != null ? activeSenderColor : BODY_FG;
+
+        for (int i = 0; i < lines.size(); i++)
+        {
+            List<Object> line = lines.get(i);
+            int lineW = lineWidth(line, fm, iconSize, spaceW);
+            int cx = x + (POPUP_W - lineW) / 2;
+            int baseline = blockTop + i * lineH + fm.getAscent();
+            for (Object t : line)
+            {
+                int tw = tokenWidth(t, fm, iconSize);
+                if (t == ICON_TOKEN)
+                {
+                    if (PANEL_ICON != null)
+                    {
+                        // Vertically centre the glyph on the text run.
+                        int iconY = baseline - fm.getAscent()
+                            + ((fm.getAscent() + fm.getDescent()) - iconSize) / 2;
+                        g.drawImage(PANEL_ICON, cx, iconY, iconSize, iconSize, null);
+                    }
+                }
+                else if (t instanceof NameToken)
+                {
+                    g.setColor(senderColor);
+                    g.drawString(((NameToken) t).text, cx, baseline);
+                }
+                else
+                {
+                    g.setColor(BODY_FG);
+                    g.drawString((String) t, cx, baseline);
+                }
+                cx += tw + spaceW;
+            }
+        }
     }
 
-    /** Truncates {@code text} with a trailing ellipsis so it fits in
-     *  {@code maxWidth} pixels under {@code fm}. Returns the input
-     *  verbatim when no truncation is needed. */
-    private static String truncateToFit(String text, FontMetrics fm, int maxWidth)
+    /** Pixel width of a single layout token under {@code fm}. The icon
+     *  token is a fixed {@code iconSize} square; name + word tokens
+     *  measure their glyph run. */
+    private static int tokenWidth(Object t, FontMetrics fm, int iconSize)
     {
-        if (fm.stringWidth(text) <= maxWidth) return text;
-        String ell = "\u2026";
-        int ellW = fm.stringWidth(ell);
-        if (ellW >= maxWidth) return ell;
-        int lo = 0;
-        int hi = text.length();
-        while (lo < hi)
+        if (t == ICON_TOKEN) return iconSize;
+        if (t instanceof NameToken) return fm.stringWidth(((NameToken) t).text);
+        return fm.stringWidth((String) t);
+    }
+
+    /** Total pixel width of one wrapped line: the sum of its token
+     *  widths plus a single space between adjacent tokens. */
+    private static int lineWidth(List<Object> line, FontMetrics fm, int iconSize, int spaceW)
+    {
+        int w = 0;
+        for (int i = 0; i < line.size(); i++)
         {
-            int mid = (lo + hi + 1) >>> 1;
-            int w = fm.stringWidth(text.substring(0, mid)) + ellW;
-            if (w <= maxWidth) lo = mid;
-            else hi = mid - 1;
+            if (i > 0) w += spaceW;
+            w += tokenWidth(line.get(i), fm, iconSize);
         }
-        return text.substring(0, lo) + ell;
+        return w;
     }
 }

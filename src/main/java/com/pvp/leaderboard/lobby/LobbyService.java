@@ -57,6 +57,32 @@ public interface LobbyService
     void joinLobby(String region, Set<Style> styles, Set<BuildType> builds,
                    int minDisplayRankIdx, int maxDisplayRankIdx, String sortBucket);
 
+    /** Pushes a slider-bound change to the server so other clients can
+     *  grey the local user's row when the viewer is outside the
+     *  newly-set range. The plugin throttles outbound frames so this
+     *  method is safe to call on every {@code RangeSlider} commit —
+     *  the implementation guarantees no more than one
+     *  {@code lobby/update_range} cmd fires per
+     *  {@code RANGE_UPDATE_MIN_INTERVAL_MS} (5 s) per client, with the
+     *  latest values coalesced into a single trailing-edge send when
+     *  the user drags rapidly.
+     *
+     *  <p>Default implementation is a no-op so {@link NoOpLobbyService}
+     *  and any future stubs don't have to override. Wire encoding when
+     *  overridden:
+     *
+     *  <pre>{ "cmd": "lobby/update_range",
+     *    "data": { "min_rank_idx": &lt;int&gt;, "max_rank_idx": &lt;int&gt; } }</pre> */
+    default void updateRankRange(int minRankIdx, int maxRankIdx) { /* no-op */ }
+
+    /** Minimum interval (ms) between consecutive
+     *  {@code lobby/update_range} sends per client. Plugin-side
+     *  throttle pinned at 5 s by the 2026-05-26 design decision so a
+     *  user dragging the slider can't flood the server. The server
+     *  treats anything below this cadence as a no-op (defence-in-
+     *  depth) but the canonical enforcement is here on the client. */
+    long RANGE_UPDATE_MIN_INTERVAL_MS = 5_000L;
+
     /** Asks the server to remove the local user from the lobby. Outstanding
      *  outgoing invites and active fight sessions are cancelled server-side.
      *

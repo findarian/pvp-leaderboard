@@ -85,7 +85,7 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
 
     /** Root card keys: pre-lobby gate, browseable lobby, and the full-screen
      *  fight-setup view (Pick Style → optional sub-location → Meet At) that
-     *  takes over the panel between [Fight] and "Find a new match". The
+     *  takes over the panel between [Fight] and "Go back to Lobby". The
      *  card-key strings double as {@link Component#getName()} on each
      *  card's root panel so tests (and any future "which card am I on?"
      *  diagnostic) can find the currently-visible card by name. */
@@ -174,7 +174,7 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
     private JPanel rosterContainer;
     /** Held as a field so we can snap the viewport back to the top when the
      *  user enters the fight-setup flow — they shouldn't have to scroll
-     *  back up after returning from Find-a-new-match. */
+     *  back up after returning from Go-back-to-Lobby. */
     private JScrollPane rosterScroll;
     private JLabel presenceLabel;
     private JLabel currentStyleLabel;
@@ -286,7 +286,7 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
 
     /** Active fight session occupying the FIGHT card. One at a time — set
      *  on opponent-accept (sender side) or on receiver Accept Fight click;
-     *  cleared on Find-a-new-match, 30s confirm-window expiry, or fight
+     *  cleared on Go-back-to-Lobby, 30s confirm-window expiry, or fight
      *  completion. Null while in the lobby. */
     private LocalFightState currentFightSession;
 
@@ -356,17 +356,45 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
      *  min unless the opponent accepts first. Same as the spec'd block window. */
     private static final long FIGHT_INVITE_TTL_MS = 10L * 60L * 1000L;
 
+    /** Fixed length of the mutual-confirm window the user gets after a
+     *  fight is proposed (matches the backend's
+     *  {@code LOBBY_FIGHT_CONFIRM_TTL_SEC = 30 s}). The countdown is
+     *  always exactly this long — see {@link LocalFightState} for why it
+     *  is measured monotonically rather than against the server's
+     *  absolute deadline. */
+    static final long CONFIRM_WINDOW_MS = 30_000L;
+
     /** Panel-local UI state for the active mutual-confirm session. Wraps
      *  the immutable {@link FightSession} pushed by the service with two
      *  mutable flags the panel toggles in response to the local user
      *  clicking Confirm + the service's {@code onFightConfirmedByPeer} push.
-     *  Timer ownership lives in the service implementation, so this type
-     *  is a pure UI-state record — no {@code Timer} fields.
+     *
+     *  <p><b>Clock-independent countdown.</b> The confirm window is
+     *  driven by a fixed {@link #CONFIRM_WINDOW_MS} duration measured
+     *  from {@link #startNanos} (a {@link System#nanoTime()} reading
+     *  captured the instant the fight was proposed) — NOT by comparing
+     *  {@link System#currentTimeMillis()} against the server's absolute
+     *  {@code confirmExpiresAtEpochMs}. {@code nanoTime()} is monotonic:
+     *  it is immune to the wall clock being set wrong, to NTP step
+     *  corrections, to manual clock edits, and to DST jumps. This fixes
+     *  the QA report where a player whose computer clock was wrong saw
+     *  the Confirm-Fight card flash and return to the lobby immediately
+     *  instead of waiting the full 30 s — with the old wall-clock
+     *  comparison a clock running ahead of the server (or a
+     *  seconds-as-ms units bug on the wire) produced an already-elapsed
+     *  deadline, so {@code onFightTick} called {@code exitFightSetup()}
+     *  on its very first tick.
+     *
+     *  <p>{@link #confirmExpiresAt} is retained as the server's advisory
+     *  deadline (for logging / diagnostics) but is deliberately NOT used
+     *  to time the local countdown. The server stays authoritative via
+     *  its {@code lobby/match_found} and {@code lobby/session_expired}
+     *  pushes, which can end the window early regardless of this timer.
      *
      *  <p>Fields {@link #opponent}, {@link #style}, {@link #build},
-     *  {@link #location}, {@link #confirmExpiresAt} are aliased directly
-     *  from the immutable session bundle so existing rendering code that
-     *  reads e.g. {@code s.opponent.name} keeps working without churn. */
+     *  {@link #location} are aliased directly from the immutable session
+     *  bundle so existing rendering code that reads e.g.
+     *  {@code s.opponent.name} keeps working without churn. */
     private static final class LocalFightState
     {
         final FightSession session;
@@ -374,7 +402,20 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         final Style style;
         final BuildType build;
         final String location;
+        /** Server's advisory absolute confirm deadline (epoch ms).
+         *  Diagnostics only — see class doc; the countdown uses the
+         *  monotonic {@link #startNanos} + {@link #windowMs} instead. */
         final long confirmExpiresAt;
+        /** Monotonic anchor captured at construction (fight-proposed
+         *  time). Immune to wall-clock changes — the basis for all
+         *  elapsed-time math below. */
+        final long startNanos;
+        /** Confirm-window length. Normally {@link #CONFIRM_WINDOW_MS};
+         *  package-private + mutable ONLY so unit tests can force the
+         *  window to zero to deterministically simulate "window elapsed"
+         *  without sleeping (mirrors the existing mutable
+         *  {@link #iConfirmed}/{@link #peerConfirmed} test seam). */
+        long windowMs;
         boolean iConfirmed;
         boolean peerConfirmed;
 
@@ -386,6 +427,28 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
             this.build = session.build;
             this.location = session.location;
             this.confirmExpiresAt = session.confirmExpiresAtEpochMs;
+            this.startNanos = System.nanoTime();
+            this.windowMs = CONFIRM_WINDOW_MS;
+        }
+
+        /** Real milliseconds elapsed since the fight was proposed,
+         *  measured monotonically. Never negative; never affected by
+         *  wall-clock changes. */
+        long elapsedMs()
+        {
+            return (System.nanoTime() - startNanos) / 1_000_000L;
+        }
+
+        /** Milliseconds left in the confirm window, clamped at 0. */
+        long remainingMs()
+        {
+            return Math.max(0L, windowMs - elapsedMs());
+        }
+
+        /** True once the full confirm window has elapsed in real time. */
+        boolean confirmWindowElapsed()
+        {
+            return elapsedMs() >= windowMs;
         }
     }
 
@@ -494,6 +557,27 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
      *  unless they Reset Options. Also surfaces if the user toggles the
      *  plugin off and back on within the same RuneLite session. */
     private boolean hasJoinedLobby;
+
+    /** Sticky "user explicitly left the lobby" opt-out (2026-05-29 spec).
+     *  Defaults to {@code false} so a fresh, qualified user is auto-joined
+     *  with zero configuration (all unlocked styles + all builds) the
+     *  moment they log in — no gate visit required. Flipped {@code true}
+     *  by Leave Lobby ({@link #resetGateOptions()}), which suppresses the
+     *  zero-config auto-join until the user manually re-joins via the
+     *  gate's Go-to-lobby button (which clears it). Persisted via
+     *  {@link #prefs} so the opt-out survives restarts. */
+    private boolean userLeftLobby;
+
+    /** {@code true} once {@link #maybeAutoJoinAfterLogin()} has issued a
+     *  <i>zero-config</i> join (all unlocked styles + all builds) for the
+     *  current login session — i.e. a user who never manually pressed
+     *  Go-to-lobby. Distinct from {@link #hasJoinedLobby} (which is the
+     *  persisted manual-join sticky): zero-config is intentionally NOT
+     *  persisted so it stays dynamic and re-computes "all unlocked styles"
+     *  fresh each login. Lets {@link #applyLoginGateState()} keep the
+     *  lobby card shown on subsequent gate-listener ticks. Cleared on
+     *  logout and by Leave Lobby. */
+    private boolean zeroConfigJoinedThisSession;
 
     /** Persistence backend for gate selections (region / styles / builds /
      *  rank-slider bounds / hasJoined sticky flag). Always non-null —
@@ -928,6 +1012,10 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
             // subsequent gate-listener tick (e.g. hourly count refresh)
             // doesn't re-fire a redundant lobby/join with the same args.
             autoJoinIssuedThisSession = true;
+            // A manual join clears any prior Leave-Lobby opt-out so future
+            // logins resume auto-restoring this (manual) pick set.
+            userLeftLobby = false;
+            prefs.setUserLeftLobby(false);
             saveGateSelections();
             prefs.setHasJoined(true);
             renderRoster();
@@ -1025,20 +1113,24 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
 
         if (!gateReady)
         {
-            // Reset the auto-join sticky so the next login re-issues
+            // Reset the auto-join stickies so the next login re-issues
             // service.joinLobby(...). The server already drops the
             // OSRS-LobbyMembers row on $disconnect (60s grace, then
             // TTL), so a fresh join is the right thing on re-login.
+            // zeroConfigJoinedThisSession also clears so the next login
+            // re-computes the unlocked-style set from scratch.
             autoJoinIssuedThisSession = false;
+            zeroConfigJoinedThisSession = false;
             // Active fight session pinning: the user is mid-confirm
             // (CARD_FIGHT) or already in MeetAt. World hops can briefly
             // pass through LOGIN_SCREEN, and an intentional logout
             // mid-confirm shouldn't yank the dialog out from under
             // the user. Keep CARD_FIGHT visible — the local 30s
             // confirm-window ticker still drives exitFightSetup() if
-            // the window elapses (onFightTick), and "Find a new match"
-            // is the user's manual escape hatch. MeetAt has no auto-
-            // expiry; the user clicks Find-a-new-match when ready.
+            // the window elapses AND the peer hasn't confirmed
+            // (onFightTick), and "Go back to Lobby" is the user's manual
+            // escape hatch. MeetAt has no auto-expiry; the user clicks
+            // "Go back to Lobby" when ready.
             // Backend rules: a logged-out user's fight session is
             // expired server-side on $disconnect, so a re-login won't
             // resume a real session — but the panel staying on
@@ -1049,7 +1141,7 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
             return;
         }
 
-        if (hasJoinedLobby && currentFightSession == null)
+        if ((hasJoinedLobby || zeroConfigJoinedThisSession) && currentFightSession == null)
         {
             // Auto-restore safety net: if the persisted gate picks have
             // become invalid since the user last logged in (e.g. all
@@ -1087,47 +1179,119 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         }
     }
 
-    /** Re-issues {@code service.joinLobby(...)} once per login session
-     *  when the persisted "I'm in the lobby" sticky flag is set and the
-     *  gate picks are valid (every advertised style has a known +
-     *  unlocked match count). Idempotent — once
-     *  {@link #autoJoinIssuedThisSession} flips true, subsequent calls
-     *  no-op until the next logout clears it.
+    /** Auto-issues {@code service.joinLobby(...)} once per login session.
+     *  Idempotent — once {@link #autoJoinIssuedThisSession} flips true,
+     *  subsequent calls no-op until the next logout clears it. Two modes:
      *
-     *  <p>Defers when match counts haven't loaded yet — the gate
-     *  listener will fire again when they do, and this method gets
-     *  called from {@link #onJoinGateChanged()} on every refresh. The
-     *  server's {@code SMURF_GUARD v2} would reject locked-style joins
-     *  anyway, but issuing them at all generates a noisy
-     *  {@code error/lobby} push that the user briefly sees in the
-     *  banner — better to wait for trusted counts.
+     *  <ol>
+     *    <li><b>Legacy manual join</b> — when {@link #hasJoinedLobby} is
+     *    set (the user previously pressed Go-to-lobby and persisted a
+     *    specific pick set), re-issue with those persisted
+     *    {@link #selectedStyles}/{@link #selectedBuildTypes}, gated on
+     *    every one being unlocked.</li>
+     *    <li><b>Zero-config (2026-05-29 spec)</b> — when the user has
+     *    NOT manually joined and has NOT explicitly left
+     *    ({@link #userLeftLobby} false), auto-join the instant they
+     *    qualify in any style, advertising <i>all unlocked styles</i> +
+     *    <i>all builds</i> with no gate visit. The selections are
+     *    populated in-memory (so the lobby/self-preview render) but
+     *    deliberately NOT persisted — so the unlocked-style set
+     *    re-computes fresh each login as the user unlocks more styles.</li>
+     *  </ol>
      *
-     *  <p>Defers when {@link #selectedStyles} or
-     *  {@link #selectedBuildTypes} is empty — that path is
-     *  drop-to-gate, handled by {@link #applyLoginGateState()}. */
+     *  <p>Defers (no-op, retried on the next gate-listener tick) when the
+     *  user is logged out, mid-fight, opted out via Leave Lobby, or — for
+     *  zero-config — qualifies in no style yet (match counts unknown /
+     *  all locked). The server's {@code SMURF_GUARD v2} would reject a
+     *  locked-style join anyway and emit a noisy {@code error/lobby}
+     *  push, so we only ever advertise unlocked styles. */
     private void maybeAutoJoinAfterLogin()
     {
         if (autoJoinIssuedThisSession) return;
-        if (!hasJoinedLobby) return;
         if (currentFightSession != null) return;
         if (!joinGate.isLoggedIn()) return;
-        if (selectedStyles.isEmpty() || selectedBuildTypes.isEmpty()) return;
+        // Explicit opt-out — the user clicked Leave Lobby and hasn't
+        // manually re-joined since. Suppress zero-config entirely; the
+        // legacy manual-join sticky is cleared alongside this flag so
+        // hasJoinedLobby is false here too.
+        if (userLeftLobby) return;
 
-        Map<Style, Integer> counts = joinGate.getMatchCounts();
-        for (Style s : selectedStyles)
+        if (hasJoinedLobby)
         {
-            Integer c = counts.get(s);
-            // Unknown count → defer to a later refresh. Locked count →
-            // applyStyleToggleLockState() will force-deselect on this
-            // same gate-listener tick, and the next call to this method
-            // will see selectedStyles cleaned up (or empty → drop-to-gate
-            // via applyLoginGateState).
-            if (c == null || !LobbyJoinGate.isUnlocked(c)) return;
+            // Legacy: respect the user's persisted explicit pick set.
+            if (selectedStyles.isEmpty() || selectedBuildTypes.isEmpty()) return;
+            Map<Style, Integer> counts = joinGate.getMatchCounts();
+            for (Style s : selectedStyles)
+            {
+                Integer c = counts.get(s);
+                // Unknown count → defer to a later refresh. Locked count →
+                // applyStyleToggleLockState() will force-deselect on this
+                // same gate-listener tick, and the next call to this method
+                // will see selectedStyles cleaned up (or empty → drop-to-gate
+                // via applyLoginGateState).
+                if (c == null || !LobbyJoinGate.isUnlocked(c)) return;
+            }
+            service.joinLobby(selfRegion, selectedStyles, selectedBuildTypes,
+                rankMinIdx, rankMaxIdx, pickSortBucket());
+            autoJoinIssuedThisSession = true;
+            return;
         }
+
+        // Zero-config: advertise every unlocked style + every build.
+        EnumSet<Style> unlocked = unlockedStyles();
+        if (unlocked.isEmpty()) return; // doesn't qualify in any style yet
+
+        selectedStyles.clear();
+        selectedStyles.addAll(unlocked);
+        selectedBuildTypes.clear();
+        selectedBuildTypes.addAll(EnumSet.allOf(BuildType.class));
+        // Mirror the new advertised set onto the (hidden) gate widgets +
+        // the self-preview row so a later Leave Lobby → gate visit shows
+        // a coherent starting state.
+        syncGateToggleSelections();
+        refreshCurrentStyleLabel();
+        renderSelfPreview();
 
         service.joinLobby(selfRegion, selectedStyles, selectedBuildTypes,
             rankMinIdx, rankMaxIdx, pickSortBucket());
         autoJoinIssuedThisSession = true;
+        zeroConfigJoinedThisSession = true;
+        renderRoster();
+        rootCards.show(rootCardHost, CARD_LOBBY);
+    }
+
+    /** The set of styles the user has unlocked (match count at/over the
+     *  anti-smurf {@link LobbyJoinGate#THRESHOLD}) per the current
+     *  {@link #joinGate} snapshot. Styles with an unknown count are
+     *  excluded — zero-config only ever advertises styles we're certain
+     *  pass the server-side guard. */
+    private EnumSet<Style> unlockedStyles()
+    {
+        EnumSet<Style> out = EnumSet.noneOf(Style.class);
+        Map<Style, Integer> counts = joinGate.getMatchCounts();
+        for (Style s : Style.values())
+        {
+            Integer c = counts.get(s);
+            if (c != null && LobbyJoinGate.isUnlocked(c)) out.add(s);
+        }
+        return out;
+    }
+
+    /** Pushes {@link #selectedStyles}/{@link #selectedBuildTypes} onto the
+     *  gate toggle buttons' selected state. {@code setSelected} fires only
+     *  the item-listener (visual repaint), never the action-listener (which
+     *  is what mutates+persists the sets), so this is a one-way render sync
+     *  with no feedback loop. No-op before the gate widgets are built. */
+    private void syncGateToggleSelections()
+    {
+        for (Map.Entry<Style, JToggleButton> e : styleToggles.entrySet())
+        {
+            e.getValue().setSelected(selectedStyles.contains(e.getKey()));
+        }
+        for (Map.Entry<BuildType, JToggleButton> e : buildToggles.entrySet())
+        {
+            e.getValue().setSelected(selectedBuildTypes.contains(e.getKey()));
+        }
     }
 
     /** Enables {@link #goToLobbyBtn} only when all gate picks are
@@ -1499,6 +1663,7 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         rankMaxIdx = max;
 
         hasJoinedLobby = prefs.getHasJoined();
+        userLeftLobby = prefs.getUserLeftLobby();
     }
 
     /** Clamps {@code idx} into {@code [0, RANK_LABELS.length - 1]}. */
@@ -1567,7 +1732,15 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         // the next login doesn't bypass the gate, AND wipe the persisted
         // values so a plugin restart starts at the gate too.
         hasJoinedLobby = false;
+        zeroConfigJoinedThisSession = false;
         prefs.clear();
+        // Leave Lobby is an explicit opt-out: set the sticky flag (AFTER
+        // prefs.clear(), which resets it to false) so zero-config auto-join
+        // stays suppressed across restarts until the user manually
+        // re-joins via Go-to-lobby. Without this, the very next
+        // gate-listener tick would zero-config them straight back in.
+        userLeftLobby = true;
+        prefs.setUserLeftLobby(true);
 
         for (Map.Entry<Style, JToggleButton> e : styleToggles.entrySet())
         {
@@ -1771,9 +1944,9 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
 
     /** Wires the in-game popup notifier used by {@link #onIncomingInvite}
      *  to flash an OSRS-style notification when another player invites
-     *  the user to fight. The accept callback fires
-     *  {@code notifier.showInvite(name, subtext)}; the no-op default
-     *  keeps the panel functional in unit tests and the
+     *  the user to fight. The panel fires
+     *  {@code notifier.showInvite(inviteId, name, color)}; the no-op
+     *  default keeps the panel functional in unit tests and the
      *  no-overlay-wired startup window. */
     public void setLobbyInviteNotifier(LobbyInviteNotifier notifier)
     {
@@ -1803,7 +1976,7 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
          *  state). This mirrors how the same name is coloured on
          *  their lobby row so the popup feels of-a-piece with the
          *  rest of the matchmaking UI. */
-        void showInvite(String inviteId, String senderName, String subtext, Color senderNameColor);
+        void showInvite(String inviteId, String senderName, Color senderNameColor);
     }
 
     /** Wires the in-game popup notifier used by {@link #onFightProposed}
@@ -1995,9 +2168,10 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
     //   -> rest is identical to sender path
     //
     // Termination paths (all clear the [Invited] block + currentFightSession):
-    //   - Both confirm -> MeetAt -> Find a new match -> LOBBY
-    //   - 30s confirm window expires -> LOBBY
-    //   - Find a new match clicked from any FIGHT view -> LOBBY
+    //   - Both confirm -> MeetAt -> Go back to Lobby -> LOBBY
+    //   - 30s confirm window expires AND peer hasn't confirmed -> LOBBY
+    //   - server lobby/session_expired push -> LOBBY (authoritative; any state)
+    //   - Go back to Lobby clicked from any FIGHT view -> LOBBY
     //   - 10-min original invite TTL elapses (only meaningful in INVITED state)
 
     private boolean isPlayerInvited(LobbyMember p)
@@ -2077,7 +2251,7 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
     }
 
     /** Cleans up any in-flight FIGHT session + outgoing invite for the same
-     *  opponent (Find-a-new-match exit, 30s expiry, both-confirmed exit, etc.)
+     *  opponent (Go-back-to-Lobby exit, 30s expiry, both-confirmed exit, etc.)
      *  and returns the user to the lobby. The server's session TTL keeps
      *  running server-side; the panel just drops its local state and
      *  ignores the late {@link #onFightConfirmedByPeer onFightConfirmedByPeer}
@@ -2240,7 +2414,7 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         }
 
         card.add(leftAlignedStrut(12));
-        card.add(makeGateCancelButton("Find a new match", this::exitFightSetup));
+        card.add(makeGateCancelButton("Go back to Lobby", this::exitFightSetup));
         return wrapInScroll(card);
     }
 
@@ -2285,7 +2459,7 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         }
 
         card.add(leftAlignedStrut(12));
-        card.add(makeGateCancelButton("Find a new match", this::exitFightSetup));
+        card.add(makeGateCancelButton("Go back to Lobby", this::exitFightSetup));
         return wrapInScroll(card);
     }
 
@@ -2317,7 +2491,7 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         }
 
         card.add(leftAlignedStrut(12));
-        card.add(makeGateCancelButton("Find a new match", this::exitFightSetup));
+        card.add(makeGateCancelButton("Go back to Lobby", this::exitFightSetup));
         return wrapInScroll(card);
     }
 
@@ -2401,7 +2575,7 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
      *        the button flips to "(expired)", disabled, and the view
      *        DOES NOT swap — the user is left on the Confirm Fight
      *        card with the dead button so they can read the label and
-     *        click Find-a-new-match. Pre-debounce, this code path was
+     *        click Go-back-to-Lobby. Pre-debounce, this code path was
      *        a silent no-op (matches the "I clicked Confirm and
      *        nothing happened" QA report when a race clears the
      *        session between view-build and click).</li>
@@ -2419,7 +2593,7 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         {
             LOG.warn("MatchmakingLobbyPanel: Confirm Fight clicked but currentFightSession=null -"
                 + " session was cleared between view-build and click (most likely cause: late"
-                + " match_found / session_expired). Click is a no-op; user must Find-a-new-match.");
+                + " match_found / session_expired). Click is a no-op; user must Go-back-to-Lobby.");
             if (confirmBtn != null)
             {
                 confirmBtn.setEnabled(false);
@@ -2456,9 +2630,14 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
     /** Live label on the FIGHT card that the ticker rewrites every second. */
     private JLabel fightCountdownLabel;
 
-    /** Confirm Fight view — both sides land here when mutual-confirm starts.
-     *  Shows a big [Confirm Fight] button and the live 30s countdown. If the
-     *  opponent has already confirmed, an extra subheader makes that visible. */
+    /** Confirm Fight view — shown to the INVITER while they decide to lock
+     *  in (the acceptor auto-confirms in {@link #onFightProposed} and skips
+     *  straight to the Waiting view). Shows a big [Get Match Location] button
+     *  and the live 30s countdown; clicking it confirms the fight and, once
+     *  both sides are in, the server reveals the world + meeting place — hence
+     *  the label describes that outcome rather than the mechanical "Confirm".
+     *  If the opponent has already confirmed, an extra subheader makes that
+     *  visible. */
     private JComponent buildConfirmFightView()
     {
         LocalFightState s = currentFightSession;
@@ -2473,7 +2652,17 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         }
         card.add(leftAlignedStrut(14));
 
-        JButton confirm = makeGateActionButton("Confirm Fight", true);
+        JButton confirm = makeGateActionButton("Get Match Location", true);
+        // Primary CTA — green (the colour the exit button used to be) so
+        // it reads as the prominent positive action; the secondary
+        // "Go back to Lobby" exit below now uses the neutral default
+        // button colour (2026-05-29 request). Label is "Get Match Location"
+        // (2026-05-30 request) since confirming reveals the match world +
+        // meeting place.
+        confirm.setBackground(new Color(0x2e, 0x7d, 0x32));
+        confirm.setForeground(Color.WHITE);
+        confirm.setOpaque(true);
+        confirm.setBorderPainted(false);
         confirm.addActionListener(e -> onUserConfirmedFight(confirm));
         card.add(confirm);
         card.add(leftAlignedStrut(8));
@@ -2482,7 +2671,7 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         card.add(fightCountdownLabel);
         card.add(leftAlignedStrut(12));
 
-        card.add(makeGateCancelButton("Find a new match", this::exitFightSetup));
+        card.add(makeGateCancelButton("Go back to Lobby", this::exitFightSetup));
         return wrapInScroll(card);
     }
 
@@ -2512,7 +2701,7 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         card.add(fightCountdownLabel);
         card.add(leftAlignedStrut(12));
 
-        card.add(makeGateCancelButton("Find a new match", this::exitFightSetup));
+        card.add(makeGateCancelButton("Go back to Lobby", this::exitFightSetup));
         return wrapInScroll(card);
     }
 
@@ -2555,10 +2744,10 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         card.add(makeMeetAtRow("Meet at:", meetingPlaceText));
         card.add(leftAlignedStrut(14));
 
-        // Per spec: this screen also has a Find-a-new-match exit; auto-return
+        // Per spec: this screen also has a Go-back-to-Lobby exit; auto-return
         // on real fight submission is a future hook tied to the in-game match
         // submission pipeline ().
-        card.add(makeGateCancelButton("Find a new match", this::exitFightSetup));
+        card.add(makeGateCancelButton("Go back to Lobby", this::exitFightSetup));
         return wrapInScroll(card);
     }
 
@@ -2606,7 +2795,10 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
     private static String formatRemaining(LocalFightState s)
     {
         if (s == null) return "";
-        long remainMs = Math.max(0L, s.confirmExpiresAt - System.currentTimeMillis());
+        // Monotonic remaining time — independent of the wall clock so the
+        // displayed countdown always counts a full CONFIRM_WINDOW_MS down
+        // to zero. See LocalFightState doc.
+        long remainMs = s.remainingMs();
         long secs = (remainMs + 999L) / 1000L;
         return "0:" + (secs < 10 ? "0" + secs : Long.toString(secs)) + " remaining";
     }
@@ -2711,24 +2903,27 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
 
     /** 1Hz tick: expires INVITED outgoing invites whose 10-min TTL has run out
      *  (refreshes affected rows), updates the FIGHT card's 30s countdown
-     *  label, and force-exits the FIGHT card if the confirm window elapsed
-     *  without a {@code lobby/match_found} push landing.
+     *  label, and force-exits the FIGHT card when the confirm window
+     *  elapses <em>and the peer has not confirmed</em>.
      *
-     *  <p>The exit at {@code confirmExpiresAt} is unconditional: it
-     *  used to guard on {@code !bothConfirmed()} (rationale: "the
-     *  server will push match_found any moment now"), but the QA
-     *  scenario where the second-to-confirm player is stuck on
-     *  "Confirming\u2026" forever (logs at 19:55:35 toyco confirm \u2192
-     *  no match_found ever arrived \u2192 30s elapsed \u2192 UI did NOT
-     *  return to lobby because bothConfirmed=true) proves that
-     *  assumption is unsafe \u2014 a backend issue (e.g.
-     *  {@code confirmed_by} overwrite that loses one of the two
-     *  confirms) silently strands the panel. When {@code match_found}
-     *  DOES land in time, {@link #handleMatchFound} clears
-     *  {@code currentFightSession} so this branch is moot \u2014 the
-     *  outer {@code if (s != null)} guard skips. Removing the
-     *  {@code bothConfirmed} predicate therefore only changes
-     *  behaviour in the failure mode we want to fix. */
+     *  <p><b>Expiry policy (2026-05-29 user request).</b> On window
+     *  elapse the panel returns to the lobby ONLY when
+     *  {@code !peerConfirmed}. Once the other player has confirmed the
+     *  screen stays put — the user explicitly does not want to be bounced
+     *  back to the lobby while a match is being finalized. In that state
+     *  the panel waits for the server's authoritative
+     *  {@code lobby/match_found} (\u2192 MeetAt) or
+     *  {@code lobby/session_expired} (\u2192 lobby) push, or the user's
+     *  manual "Go back to Lobby" click. When {@code match_found} lands in
+     *  time, {@link #handleMatchFound} clears {@code currentFightSession}
+     *  so this branch is moot — the outer {@code if (s != null)} guard
+     *  skips.
+     *
+     *  <p>Trade-off: if the backend ever loses BOTH confirms (the old
+     *  {@code confirmed_by} overwrite bug) and never pushes
+     *  match_found/session_expired, a both-confirmed user is no longer
+     *  auto-evicted after 30s — the manual "Go back to Lobby" button is
+     *  the intended escape hatch in that (server-bug) scenario. */
     private void onFightTick()
     {
         long now = System.currentTimeMillis();
@@ -2762,15 +2957,36 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         LocalFightState s = currentFightSession;
         if (s != null)
         {
-            if (now >= s.confirmExpiresAt)
+            // Monotonic, clock-independent window — see LocalFightState
+            // doc. The window only elapses after CONFIRM_WINDOW_MS of
+            // REAL time, so a wrong / skewed wall clock (or a
+            // seconds-as-ms deadline on the wire) can no longer pop the
+            // card on the first tick. If match_found landed in time,
+            // handleMatchFound already nulled currentFightSession and we
+            // never reach here.
+            if (s.confirmWindowElapsed())
             {
-                // Unconditional safety-net exit — see method doc. If
-                // match_found landed in time, handleMatchFound
-                // already nulled currentFightSession and we never
-                // reach here.
-                LOG.debug("MatchmakingLobbyPanel.onFightTick: confirm window elapsed sid={} iConfirmed={} peerConfirmed={} - exiting fight setup",
-                    s.session.fightSessionId, s.iConfirmed, s.peerConfirmed);
-                exitFightSetup();
+                if (!s.peerConfirmed)
+                {
+                    // Peer never confirmed within the window — return to
+                    // the lobby so a one-sided confirm doesn't strand the
+                    // user. serverDeadlineMs is logged next to the
+                    // monotonic elapsedMs so client clock skew is obvious
+                    // in a bug report (e.g. a serverDeadlineMs already in
+                    // the past at elapsedMs≈30000).
+                    LOG.debug("MatchmakingLobbyPanel.onFightTick: confirm window elapsed without peer confirm sid={} iConfirmed={} peerConfirmed={} elapsedMs={} serverDeadlineMs={} - exiting fight setup",
+                        s.session.fightSessionId, s.iConfirmed, s.peerConfirmed, s.elapsedMs(), s.confirmExpiresAt);
+                    exitFightSetup();
+                }
+                // else: the peer HAS confirmed — per the 2026-05-29 user
+                // request the screen must stay put (a match is being
+                // finalized; don't bounce the user back to the lobby).
+                // The server stays authoritative: lobby/match_found swaps
+                // to MeetAt and lobby/session_expired returns to the
+                // lobby. The user's manual "Go back to Lobby" button is
+                // always available as the escape hatch. We stop updating
+                // the countdown label here so it freezes instead of
+                // showing a stale "0:00 remaining".
             }
             else if (fightCountdownLabel != null)
             {
@@ -2882,38 +3098,14 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         if (notifier != null && invite.sender != null)
         {
             String senderName = displayNameOf(invite.sender);
-            String sub = buildInviteNotificationSubtext(invite);
             // Mirror the lobby row's name-tint logic exactly (see the
             // PlayerRow render in #addLobbyRow) so the popup's sender
             // name is the same colour as the same name displayed in
             // the sidepanel: rank-tier hue when the shard has
             // resolved, plain white while "Waiting".
             Color senderColor = senderNameColorForPopup(invite.sender);
-            notifier.showInvite(invite.inviteId, senderName, sub, senderColor);
+            notifier.showInvite(invite.inviteId, senderName, senderColor);
         }
-    }
-
-    /** Builds the second-line summary for the lobby invite popup —
-     *  "{style} ({build}) at {location}" with sensible omissions when
-     *  fields are absent (e.g. Veng has no sub-location). Public-package
-     *  for testability so the notifier wiring can be verified without
-     *  spinning up the overlay. */
-    static String buildInviteNotificationSubtext(IncomingInvite invite)
-    {
-        if (invite == null) return "";
-        StringBuilder sb = new StringBuilder();
-        if (invite.style != null) sb.append(invite.style.label);
-        if (invite.build != null)
-        {
-            if (sb.length() > 0) sb.append(' ');
-            sb.append('(').append(invite.build.label).append(')');
-        }
-        if (invite.location != null && !invite.location.isEmpty())
-        {
-            if (sb.length() > 0) sb.append(" at ");
-            sb.append(invite.location);
-        }
-        return sb.toString();
     }
 
     /** Resolves the sender's name colour for the in-game popup using
@@ -3009,7 +3201,7 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
      *  drop the [Invited M:SS] chip and swap to ConfirmFight; (b) receiver
      *  — we just clicked Accept on an incoming card, server promoted us
      *  to mutual-confirm. Either way the lobby is hidden until the user
-     *  exits via Find-a-new-match, the 30s window expires
+     *  exits via Go-back-to-Lobby, the 30s window expires
      *  ({@link #onFightSessionExpired}), or both sides confirm
      *  ({@link #onMatchFound}). */
     @Override
@@ -3061,9 +3253,27 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         });
 
         currentFightSession = new LocalFightState(session);
-        // showFightSetup() already snaps the JScrollPane viewport to (0,0)
-        // post-layout, so no extra scroll-to-top is needed here.
-        showFightSetup(buildConfirmFightView());
+        // showFightSetup() (invoked below in both branches) already snaps the
+        // JScrollPane viewport to (0,0) post-layout, so no extra
+        // scroll-to-top is needed here.
+        if (iWasInviter)
+        {
+            // The inviter still does the explicit final step: the Confirm
+            // Fight view with the "Get Match Location" CTA + 30s countdown.
+            showFightSetup(buildConfirmFightView());
+        }
+        else
+        {
+            // The acceptor already opted in by clicking "Accept Fight" on the
+            // incoming invite — that gesture IS their confirm. Auto-confirm on
+            // their behalf so they don't have to click a second button, and
+            // drop them straight onto the Waiting view. onUserConfirmedFight()
+            // sets iConfirmed, sends the wire confirm, and swaps to
+            // buildWaitingView(); null = no in-card button to debounce here
+            // (2026-05-30 request). If match_found lands moments later,
+            // onMatchFound swaps Waiting -> MeetAt.
+            onUserConfirmedFight(null);
+        }
 
         // In-game popup so users not actively looking at the sidepanel
         // still notice the match locking in. Config-gated inside the
@@ -3081,10 +3291,9 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
 
     /** Builds the second-line summary for the match-found popup —
      *  "{style} ({build}) at {location}" with sensible omissions when
-     *  fields are absent (e.g. Veng has no sub-location). Mirrors
-     *  {@link #buildInviteNotificationSubtext} but for the
-     *  {@link FightSession} carrier instead of {@link IncomingInvite}.
-     *  Package-private + static for testability. */
+     *  fields are absent (e.g. Veng has no sub-location). Keyed off the
+     *  {@link FightSession} carrier. Package-private + static for
+     *  testability. */
     static String buildMatchFoundNotificationSubtext(FightSession session)
     {
         if (session == null) return "";
@@ -3138,7 +3347,7 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         if (s == null) return;
         if (s.session.fightSessionId != null
             && !s.session.fightSessionId.equals(match.fightSessionId)) return;
-        // Both sides confirmed — MeetAt is terminal until Find-a-new-match.
+        // Both sides confirmed — MeetAt is terminal until Go-back-to-Lobby.
         // Server-resolved world + meeting_place travel through `match`
         // so the view can render them verbatim (see buildMeetAtView).
         showFightSetup(buildMeetAtView(match));
@@ -3200,6 +3409,50 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
             cancelOutgoingInvite(stalePlayerId, false);
             renderRoster();
         }
+    }
+
+    /** {@inheritDoc}
+     *
+     *  <p>A linked alt logged in and took this account's lobby slot — the
+     *  server has already deleted our {@code OSRS-LobbyMembers} row, so
+     *  we're no longer visible to peers. Mirror that locally: clear our
+     *  in-lobby state, suppress every client-driven re-join path
+     *  (zero-config auto-join via {@link #maybeAutoJoinAfterLogin}, the
+     *  60-s safety-net {@link #forceRejoinIfEligible} ticker, and the
+     *  service's reconnect-replay — already disarmed service-side), and
+     *  drop to the gate so the user can SEE they're not matchmaking on
+     *  this account anymore.
+     *
+     *  <p>Deliberately NOT persisted (unlike Leave Lobby's
+     *  {@link #userLeftLobby} opt-out): displacement is a this-session
+     *  event. A future fresh login with no alt active auto-joins per the
+     *  normal zero-config rules. The user can also re-enter immediately
+     *  via Go-to-lobby (which re-displaces the alt — a deliberate act). */
+    @Override
+    public void onDisplacedByAlt(String activeAccountName)
+    {
+        if (currentFightSession != null)
+        {
+            // Don't route through exitFightSetup() — it calls
+            // forceRejoinIfEligible() which would re-join us and bounce
+            // the alt back out. Just drop the local session.
+            cancelOutgoingInvite(currentFightSession.opponent.playerId, false);
+            currentFightSession = null;
+        }
+        hasJoinedLobby = false;
+        zeroConfigJoinedThisSession = false;
+        // Mark the auto-issue path done so a subsequent gate-listener tick
+        // (hourly smurf-count refresh, etc.) doesn't zero-config us
+        // straight back in while the alt is the active account. A genuine
+        // re-login clears this in applyLoginGateState() (logout branch).
+        autoJoinIssuedThisSession = true;
+        rootCards.show(rootCardHost, CARD_GATE);
+        renderRoster();
+        showErrorBanner(activeAccountName == null || activeAccountName.trim().isEmpty()
+            ? "You're now in the lobby on another account, so you were removed here."
+                + " Only one of your accounts can be in the lobby at a time."
+            : "You're now in the lobby on " + activeAccountName + ", so you were removed here."
+                + " Only one of your accounts can be in the lobby at a time.");
     }
 
     /**
@@ -3492,7 +3745,12 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         return b;
     }
 
-    /** Bottom exit button — green-tinted to mirror the gate's "Go to lobby". */
+    /** Bottom exit button ("Go back to Lobby"). Neutral default button
+     *  colour — it deliberately does NOT set a background so it matches
+     *  the colour the Confirm button used to be. The green tint moved to
+     *  the Confirm CTA (see {@link #buildConfirmFightView}) so green now
+     *  reads exclusively as the prominent positive action and the exit
+     *  is the secondary, de-emphasised affordance (2026-05-29 request). */
     private static JButton makeGateCancelButton(String text, Runnable onClick)
     {
         JButton b = new JButton(text);
@@ -3501,10 +3759,6 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         b.setAlignmentX(LEFT_ALIGNMENT);
         b.setMaximumSize(new Dimension(Integer.MAX_VALUE, 44));
         b.setFocusPainted(false);
-        b.setBackground(new Color(0x2e, 0x7d, 0x32));
-        b.setForeground(Color.WHITE);
-        b.setOpaque(true);
-        b.setBorderPainted(false);
         b.addActionListener(e -> onClick.run());
         return b;
     }
@@ -3710,6 +3964,13 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
                 // per drag while still ensuring the final value lands.
                 prefs.setMinRankIdx(rankMinIdx);
                 prefs.setMaxRankIdx(rankMaxIdx);
+                // Push the new range to the server so peers' rosters
+                // re-evaluate the "viewer is outside my accept-invite
+                // range" greyout for the local user. The service
+                // throttles the wire frame (≤ 1 per
+                // {@link LobbyService#RANGE_UPDATE_MIN_INTERVAL_MS});
+                // we just fire-and-forget and let it coalesce.
+                if (service != null) service.updateRankRange(rankMinIdx, rankMaxIdx);
                 renderRoster();
                 // Slider also gates incoming invite cards — re-evaluate per-card
                 // visibility so out-of-range invites disappear (and reappear if
@@ -3791,7 +4052,7 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
 
     /** Snaps the roster scroll back to the top. Called when entering the
      *  fight-setup flow so the user lands at the top of the roster on
-     *  return (Find-a-new-match / both-confirmed / window-expired) rather
+     *  return (Go-back-to-Lobby / both-confirmed / window-expired) rather
      *  than at whatever position they had clicked Fight from.
      *
      *  Implementation note: a direct {@code setValue(0)} on the scrollbar
@@ -3857,13 +4118,20 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         }
         Collections.sort(visible, (a, b) -> Integer.compare(b.peakRankIdx, a.peakRankIdx));
 
+        // Snapshot the viewer's current rank once per render pass so
+        // every row in this pass compares against the same value (no
+        // race between rows if the gate refresh fires mid-render).
+        final int viewerRankIdx = viewerCurrentRankIdx();
         for (LobbyMember p : visible)
         {
-            // Chip precedence: [Blocked Lookup] > [Invited M:SS] > [Lookup] > [Fight].
-            //   [Blocked Lookup] — local user has blocked this player_id, card greyed
-            //   [Invited M:SS]   — pending outgoing invite, click cancels
-            //   [Lookup]         — outstanding incoming invite from this player
-            //   [Fight]          — default; opens full-screen fight-setup card
+            // Chip precedence: [Blocked Lookup] > [Invited M:SS] > [Lookup] >
+            //                  [out-of-their-range Fight] > [Fight].
+            //   [Blocked Lookup]            — local user has blocked this player_id, card greyed
+            //   [Invited M:SS]              — pending outgoing invite, click cancels
+            //   [Lookup]                    — outstanding incoming invite from this player
+            //   [out-of-their-range Fight]  — viewer's rank is outside their accept-invite
+            //                                 slider, row greyed, chip is a no-op
+            //   [Fight]                     — default; opens full-screen fight-setup card
             rosterContainer.add(new PlayerRow(p, ROW_FONT_PT,
                 this::isPlayerInvited,
                 this::getOutgoingInvite,
@@ -3872,6 +4140,7 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
                 opp -> cancelOutgoingInvite(opp.playerId, true),
                 m -> m != null && m.playerId != null && blockedPlayerIds.contains(m.playerId),
                 this::fightAllowed,
+                m -> viewerOutsideMemberRange(viewerRankIdx, m),
                 false));
             rosterContainer.add(Box.createVerticalStrut(2));
         }
@@ -3962,6 +4231,146 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         return idx >= rankMinIdx && idx <= rankMaxIdx;
     }
 
+    /** True iff the {@code viewerRankIdx} sits outside {@code m}'s
+     *  own accept-invite slider band — i.e. the member would
+     *  server-reject any {@code lobby/invite} from us with
+     *  {@code RANK_OUT_OF_RANGE}. Pure helper; lifted out so it can
+     *  be unit-tested without standing up the panel.
+     *
+     *  <p>Defaults to {@code false} ("in range") whenever any input is
+     *  missing — null member, sentinel viewer rank, or either
+     *  {@link LobbyMember#minRankIdx} / {@link LobbyMember#maxRankIdx}
+     *  unknown. Reason: on a pre-deploy backend the new slider fields
+     *  ship as {@link LobbyMember#UNKNOWN_RANK_IDX}; if we treated
+     *  unknown as "out of range" we'd grey every row on the first
+     *  push. Keeping unknown as "show normally" means the greyout
+     *  silently activates when the backend lands the field and is a
+     *  no-op until then. */
+    static boolean viewerOutsideMemberRange(int viewerRankIdx, LobbyMember m)
+    {
+        if (m == null) return false;
+        if (viewerRankIdx < 0) return false;
+        if (m.minRankIdx == LobbyMember.UNKNOWN_RANK_IDX) return false;
+        if (m.maxRankIdx == LobbyMember.UNKNOWN_RANK_IDX) return false;
+        return viewerRankIdx < m.minRankIdx || viewerRankIdx > m.maxRankIdx;
+    }
+
+    /** Returns the HTML string rendered into the "Accepts fights from
+     *  &lt;min&gt; to &lt;max&gt; rating" replacement label that
+     *  takes over the bottom row of an out-of-their-range greyed
+     *  {@code PlayerRow}. The two rank labels are wrapped in
+     *  {@code <font color="#RRGGBB">} spans whose hex matches
+     *  {@link RankUtils#getRankColor(String)} for that label — same
+     *  palette the panel's own rank-range slider min / max value
+     *  labels use, so the row reads as "your rank vs. their
+     *  band" without the user having to map tier names → colours
+     *  themselves.
+     *
+     *  <p>Lifted out as a static (rather than building the markup
+     *  inline) so it can be pinned by unit tests without standing up
+     *  Swing. {@code rankLabels} is parameterised for the same
+     *  reason — tests pass the real {@link #RANK_LABELS} but a
+     *  fixture could pass a smaller table.
+     *
+     *  <p>Returns an empty string when either bound is the
+     *  {@link LobbyMember#UNKNOWN_RANK_IDX} sentinel or out of the
+     *  rank-label table's bounds — the call site guards against
+     *  this (the predicate that triggers the swap requires both
+     *  bounds known) but the defensive return keeps the helper safe
+     *  to call from future call sites. */
+    static String buildAcceptsRangeHtml(int minRankIdx, int maxRankIdx, String[] rankLabels)
+    {
+        if (rankLabels == null || rankLabels.length == 0) return "";
+        if (minRankIdx < 0 || minRankIdx >= rankLabels.length) return "";
+        if (maxRankIdx < 0 || maxRankIdx >= rankLabels.length) return "";
+        String minLabel = rankLabels[minRankIdx];
+        String maxLabel = rankLabels[maxRankIdx];
+        String minHex = colorToHex(RankUtils.getRankColor(minLabel));
+        String maxHex = colorToHex(RankUtils.getRankColor(maxLabel));
+        // Width-capped <div> so the JLabel stays inside the row's centre
+        // column (the ~200px row content area MINUS the EAST [Fight]
+        // action chip, ~55-60px) instead of running under the button or
+        // off the right edge on the narrowest RuneLite sidepanel.
+        //
+        // HARD <br> after the lead-in copy (NOT just relying on the div's
+        // auto-wrap): under the panel L&F an auto-wrapped HTML JLabel is
+        // wrapped correctly when *painted* but its *preferred height* is
+        // mis-measured as a single line, so the row sized one line short
+        // and the wrapped tail ("<max> rating") clipped at the card's
+        // bottom edge (user report 2026-06-03). A literal <br> gives the
+        // HTML view a real second row in BOTH the paint and
+        // preferred-height passes, so the row reserves the right height
+        // and nothing clips. It also pins the wrap the user wants:
+        //   line 1: "Accepts fights from"
+        //   line 2: "<min> to <max> rating"  (range kept together)
+        // 150px comfortably fits the longest common pair on line 2.
+        return "<html><div style='width:150px'>Accepts fights from<br>"
+            + "<font color='" + minHex + "'>" + minLabel + "</font>"
+            + " to "
+            + "<font color='" + maxHex + "'>" + maxLabel + "</font>"
+            + " rating</div></html>";
+    }
+
+    /** Bounds-checked lookup into the {@link #RANK_LABELS} table.
+     *  Returns {@code "?"} for sentinel / out-of-bounds indices so a
+     *  tooltip never embeds an array-index-out-of-bounds exception
+     *  message. */
+    static String safeRankLabel(int idx, String[] rankLabels)
+    {
+        if (rankLabels == null) return "?";
+        if (idx < 0 || idx >= rankLabels.length) return "?";
+        return rankLabels[idx];
+    }
+
+    /** {@link Color} → CSS-friendly {@code "#RRGGBB"} hex string.
+     *  JLabel HTML rendering accepts both {@code #rgb} and
+     *  {@code #rrggbb} forms; we always use the 6-digit form so the
+     *  string is unambiguous in tests and matches the convention
+     *  used elsewhere in the panel. */
+    static String colorToHex(Color c)
+    {
+        if (c == null) return "#666666";
+        return String.format("#%02x%02x%02x", c.getRed(), c.getGreen(), c.getBlue());
+    }
+
+    /** Local viewer's own current rank index for the active sort
+     *  bucket — i.e. the rank the server would compare to each
+     *  member's {@code [min_rank_idx, max_rank_idx]} on a
+     *  {@code lobby/invite}. Read off {@link LobbyJoinGate#getRankIdxByStyle()}
+     *  for the {@link #pickSortBucket()} bucket's matching {@link Style}.
+     *  Returns {@code -1} (unknown) when the gate has no rank data
+     *  for the active bucket (pre-login, brand-new player, etc.) —
+     *  callers treat that as "skip the greyout, show row normally".
+     *
+     *  <p>"overall" bucket falls back to the highest known rank across
+     *  any style (matches {@link #pickSelfPreviewRankIdx()}'s
+     *  fallback) so a user who hasn't picked a style still gets a
+     *  meaningful comparison value. */
+    private int viewerCurrentRankIdx()
+    {
+        if (joinGate == null) return -1;
+        Map<Style, Integer> ranks = joinGate.getRankIdxByStyle();
+        if (ranks == null || ranks.isEmpty()) return -1;
+        String bucket = pickSortBucket();
+        if (!"overall".equals(bucket))
+        {
+            try
+            {
+                Style s = Style.valueOf(bucket.toUpperCase());
+                Integer idx = ranks.get(s);
+                if (idx != null && idx >= 0) return idx;
+            }
+            catch (IllegalArgumentException ignored) { /* fall through to overall */ }
+        }
+        int best = -1;
+        for (Style s : Style.values())
+        {
+            Integer idx = ranks.get(s);
+            if (idx != null && idx > best) best = idx;
+        }
+        return best;
+    }
+
     /** True if {@code idx} is a real rank (server returned a value), not
      *  a -1 sentinel or a label-overflow. Used to distinguish "no current
      *  rank yet" (don't filter out) from "current rank known and out of
@@ -4048,6 +4457,22 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
          *  block changes immediately (block listener overrides call
          *  renderRoster directly). */
         private final boolean blocked;
+        /** Re-queried at construction — true when the viewer's own rank
+         *  sits outside this member's accept-invite slider band. The
+         *  member would server-reject any {@code lobby/invite} from us
+         *  with {@code RANK_OUT_OF_RANGE}, so the row renders with the
+         *  whole-row grey treatment (matches Blocking visually) and a
+         *  greyed-disabled [Fight] chip. Differs from {@link #blocked}
+         *  in chip text + tooltip + click handler; both flags fold
+         *  into {@link #greyed} for the body greying. */
+        private final boolean outOfTheirRange;
+        /** Unified "render this row as muted / inactive" flag — the union
+         *  of {@link #blocked} and {@link #outOfTheirRange}. Drives the
+         *  name colour, rank-chip hue, and every region/style/build
+         *  chip's active/inactive palette so the whole row reads as
+         *  inactive when either condition holds. The two source flags
+         *  stay separate for chip text + click semantics. */
+        private final boolean greyed;
         /** Re-queried at construction — false when style/build
          *  advertisement doesn't overlap the local user's gate picks;
          *  [Fight] renders greyed and is a no-op. */
@@ -4073,7 +4498,7 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
                   boolean selfPreview)
         {
             this(p, fontBase, isInvited, getOutgoing, onOpenProfile, onFight,
-                onCancelInvite, isBlocked, m -> true, selfPreview);
+                onCancelInvite, isBlocked, m -> true, m -> false, selfPreview);
         }
 
         PlayerRow(LobbyMember p, int fontBase,
@@ -4084,6 +4509,7 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
                   InviteCancelCallback onCancelInvite,
                   Predicate<LobbyMember> isBlocked,
                   Predicate<LobbyMember> fightEnabled,
+                  Predicate<LobbyMember> isOutOfTheirRange,
                   boolean selfPreview)
         {
             this.p = p;
@@ -4094,6 +4520,8 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
             this.onFight = onFight;
             this.onCancelInvite = onCancelInvite;
             this.blocked = isBlocked != null && isBlocked.test(p);
+            this.outOfTheirRange = isOutOfTheirRange != null && isOutOfTheirRange.test(p);
+            this.greyed = this.blocked || this.outOfTheirRange;
             this.fightEnabled = fightEnabled == null || fightEnabled.test(p);
             this.selfPreview = selfPreview;
             setLayout(new BorderLayout());
@@ -4137,12 +4565,29 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
             center.add(buildHeaderRow());
             center.add(Box.createVerticalStrut(3));
             center.add(buildChipsRow());
+            // Bottom row: build chips by default ([MOD]? [Main] [Zerker]
+            // [Pure]) OR — when the row is greyed because the viewer's
+            // rank is outside this member's accept-invite band — the
+            // "Accepts fights from <min> to <max> rating" label with
+            // both rank labels rank-colour-coded. The swap matches
+            // 2026-05-26 user spec: the build chips carry no
+            // actionable info when we can't invite them anyway, so we
+            // reclaim that row to explain WHY the row is greyed.
+            // Blocking-greyed rows keep the build chips because the
+            // [Blocking] chip + tooltip already explain that state.
             // Build chips render on a separate row below so [Pure][Zerker]
             // [Main] don't compete with the longer [Region][NH][Veng][Multi]
             // [DMM] strip — 8 chips on one FlowLayout row wraps unpredictably
             // in the 225px sidepanel.
             center.add(Box.createVerticalStrut(2));
-            center.add(buildBuildsRow());
+            if (outOfTheirRange && !blocked)
+            {
+                center.add(buildAcceptsRangeRow());
+            }
+            else
+            {
+                center.add(buildBuildsRow());
+            }
 
             add(center, BorderLayout.CENTER);
 
@@ -4209,6 +4654,21 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
                     () -> { if (onOpenProfile != null) onOpenProfile.accept(p.name); });
                 chip.setName(ROW_ACTION_CHIP_NAME);
                 chip.setToolTipText("Open " + p.name + "'s profile in Player Lookup");
+                return chip;
+            }
+            if (outOfTheirRange)
+            {
+                // Their accept-invite slider excludes the viewer's
+                // current rank — server would RANK_OUT_OF_RANGE any
+                // lobby/invite we sent, so the chip renders greyed
+                // and is a no-op. Body greying is handled separately
+                // via the {@link #greyed} flag so the whole row
+                // reads as muted (matches the Blocking visual
+                // treatment, per 2026-05-26 user spec).
+                JLabel chip = makeActionChip(label, BLOCKED_FG, BLOCKED_BORDER, () -> {});
+                chip.setName(ROW_ACTION_CHIP_NAME);
+                chip.setCursor(Cursor.getDefaultCursor());
+                chip.setToolTipText(p.name + " only accepts invites within their own rank range — your rank is outside it");
                 return chip;
             }
             if (!fightEnabled)
@@ -4312,11 +4772,13 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
             // out-of-range index from a malformed wire payload.
             boolean rankKnown = p.peakRankIdx >= 0 && p.peakRankIdx < RANK_LABELS.length;
             String rankLabel = rankKnown ? RANK_LABELS[p.peakRankIdx] : "";
-            // Blocked rows render in a muted grey across the entire
+            // Greyed rows render in a muted grey across the entire
             // header (name + rank chip) so the row reads as inactive.
+            // Covers both Blocking (the local user blocked them) and
+            // out-of-their-range (their slider excludes the viewer).
             // The rank label's normal hue would otherwise pop against
             // the greyed name.
-            Color rankColor = blocked
+            Color rankColor = greyed
                 ? BLOCKED_FG
                 : (rankKnown ? RankUtils.getRankColor(rankLabel) : Color.WHITE);
 
@@ -4324,9 +4786,15 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
             NonEllipsisLabel name = new NonEllipsisLabel(displayName);
             name.setFont(name.getFont().deriveFont(Font.BOLD, (float) fontBase));
             name.setForeground(rankColor);
-            name.setToolTipText(blocked
-                ? displayName + " (blocked — click to Unblock from Player Lookup)"
-                : displayName);
+            // Blocking and out-of-their-range share the muted body but
+            // need different hover text so the user knows WHY the row
+            // is dim. Blocking wins precedence (it implies a deliberate
+            // user action; out-of-their-range is just a slider state).
+            String nameTooltip;
+            if (blocked) nameTooltip = displayName + " (blocked — click to Unblock from Player Lookup)";
+            else if (outOfTheirRange) nameTooltip = displayName + " (your rank is outside their accept-invite range)";
+            else nameTooltip = displayName;
+            name.setToolTipText(nameTooltip);
 
             if (!rankKnown)
             {
@@ -4341,10 +4809,10 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
                 }
                 // Remote row with unknown rank — render "Waiting" in
                 // the same slot a real rank label would occupy. Muted
-                // grey (or blocked grey) so it's visually subordinate
+                // grey (or greyed-row grey) so it's visually subordinate
                 // to real rank labels and never gets confused for a
                 // real rank tier. Tooltip explains the state.
-                Color waitingColor = blocked ? BLOCKED_FG : new Color(0xaa, 0xaa, 0xaa);
+                Color waitingColor = greyed ? BLOCKED_FG : new Color(0xaa, 0xaa, 0xaa);
                 JLabel waiting = new JLabel("Waiting");
                 waiting.setFont(waiting.getFont().deriveFont(Font.BOLD, (float) fontBase));
                 waiting.setForeground(waitingColor);
@@ -4383,20 +4851,20 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
             chips.setBorder(BorderFactory.createEmptyBorder(0, 0, 0, 0));
 
             int chipFont = Math.max(10, fontBase - 3);
-            // Palette: region=white, style=yellow. Blocked rows force
-            // all chips to the inactive grey palette so the whole card
-            // reads as muted.
-            chips.add(makeChip(p.region, !blocked, Color.WHITE, chipFont));
+            // Palette: region=white, style=yellow. Greyed rows
+            // (Blocking or out-of-their-range) force all chips to the
+            // inactive grey palette so the whole card reads as muted.
+            chips.add(makeChip(p.region, !greyed, Color.WHITE, chipFont));
             Color styleColor = new Color(0xff, 0xc1, 0x07);
             if (p.styles.size() == Style.values().length)
             {
-                chips.add(makeChip("Any Style", !blocked, styleColor, chipFont));
+                chips.add(makeChip("Any Style", !greyed, styleColor, chipFont));
             }
             else
             {
                 for (Style s : Style.values())
                 {
-                    boolean advertised = !blocked && p.styles.contains(s);
+                    boolean advertised = !greyed && p.styles.contains(s);
                     chips.add(makeChip(s.label, advertised, styleColor, chipFont));
                 }
             }
@@ -4420,22 +4888,57 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
             int chipFont = Math.max(10, fontBase - 3);
             if (p.isMod)
             {
-                chips.add(makeChip("MOD", !blocked, new Color(0xff, 0x55, 0x55), chipFont));
+                chips.add(makeChip("MOD", !greyed, new Color(0xff, 0x55, 0x55), chipFont));
             }
             Color buildColor = new Color(0x4f, 0xc3, 0xf7);
             if (p.builds.size() == BuildType.values().length)
             {
-                chips.add(makeChip("Any Build", !blocked, buildColor, chipFont));
+                chips.add(makeChip("Any Build", !greyed, buildColor, chipFont));
             }
             else
             {
                 for (BuildType a : BuildType.values())
                 {
-                    boolean advertised = !blocked && p.builds.contains(a);
+                    boolean advertised = !greyed && p.builds.contains(a);
                     chips.add(makeChip(a.label, advertised, buildColor, chipFont));
                 }
             }
             return chips;
+        }
+
+        /** Bottom-row swap for out-of-their-range greyed rows:
+         *  "Accepts fights from &lt;min&gt; to &lt;max&gt; rating"
+         *  with both rank labels coloured per
+         *  {@link RankUtils#getRankColor(String)} (same colour
+         *  scheme as the panel's own rank-range slider min/max
+         *  labels — visual rhyme).
+         *
+         *  <p>HTML rendering rather than three side-by-side labels
+         *  because (a) it keeps the row tight (no internal layout
+         *  cascade per render) and (b) the surrounding "Accepts
+         *  fights from" / "to" / "rating" text needs to wrap
+         *  cleanly inside the ~200 px sidepanel — a FlowLayout of
+         *  separately-coloured labels would break to a new line
+         *  mid-phrase. */
+        private JComponent buildAcceptsRangeRow()
+        {
+            JPanel wrap = new JPanel(new FlowLayout(FlowLayout.LEFT, 0, 0));
+            wrap.setOpaque(false);
+            wrap.setBorder(BorderFactory.createEmptyBorder(0, 0, 0, 0));
+
+            int textFont = Math.max(10, fontBase - 3);
+            JLabel label = new JLabel(buildAcceptsRangeHtml(
+                p.minRankIdx, p.maxRankIdx, RANK_LABELS));
+            label.setFont(label.getFont().deriveFont(Font.BOLD, (float) textFont));
+            // Surrounding copy ("Accepts fights from", "to", "rating")
+            // stays in the muted-grey palette used by every greyed-row
+            // body element so only the rank labels themselves pop.
+            label.setForeground(BLOCKED_FG);
+            label.setToolTipText(p.name + "'s accept-invite rank range is "
+                + safeRankLabel(p.minRankIdx, RANK_LABELS)
+                + " to " + safeRankLabel(p.maxRankIdx, RANK_LABELS));
+            wrap.add(label);
+            return wrap;
         }
 
         private static JLabel makeChip(String text, boolean active, Color activeColor, int fontPt)
@@ -5084,7 +5587,7 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
             removeInvite(holder[0]);
             // Receiver flow: server creates the fight session and pushes
             // onFightProposed to both players — that listener swaps the
-            // panel into ConfirmFight (30s window). Find-a-new-match exits
+            // panel into ConfirmFight (30s window). Go-back-to-Lobby exits
             // the view at any point.
             service.acceptInvite(invite);
             renderRoster();

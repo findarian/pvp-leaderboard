@@ -13,8 +13,9 @@ import net.runelite.client.config.ConfigManager;
 
 /**
  * Persisted lobby gate preferences — region, advertised styles, advertised
- * builds, rank slider bounds, and a "user already finished gate setup" sticky
- * flag.
+ * builds, rank slider bounds, a "user already finished gate setup" sticky
+ * flag, and a "user explicitly left the lobby" opt-out flag (suppresses
+ * zero-config auto-join until a manual re-join).
  *
  * <p>The matchmaking panel reads through this on construction so a user who
  * has previously completed the gate is dropped straight into the lobby on
@@ -53,12 +54,17 @@ public class LobbyPreferences
     public static final String KEY_MIN_RANK_IDX = "lobbyMinRankIdx";
     public static final String KEY_MAX_RANK_IDX = "lobbyMaxRankIdx";
     public static final String KEY_HAS_JOINED = "lobbyHasJoined";
+    /** Sticky "user explicitly left the lobby" opt-out. When {@code true}
+     *  the panel suppresses zero-config auto-join until the user manually
+     *  re-joins via the gate's Go-to-lobby button. Set by Leave Lobby,
+     *  cleared by a manual Go-to-lobby. */
+    public static final String KEY_USER_LEFT = "lobbyUserLeft";
 
     /** Aggregated list so {@link #clear()} can wipe in one loop without
      *  drifting from the constants above. */
     private static final String[] ALL_KEYS = {
         KEY_REGION, KEY_STYLES, KEY_BUILDS,
-        KEY_MIN_RANK_IDX, KEY_MAX_RANK_IDX, KEY_HAS_JOINED,
+        KEY_MIN_RANK_IDX, KEY_MAX_RANK_IDX, KEY_HAS_JOINED, KEY_USER_LEFT,
     };
 
     /** {@code null} ⇒ in-memory mode. */
@@ -205,6 +211,23 @@ public class LobbyPreferences
     public void setHasJoined(boolean joined)
     {
         writeRaw(KEY_HAS_JOINED, Boolean.toString(joined));
+    }
+
+    // -------------------- User-left sticky opt-out --------------------
+
+    /** {@code true} once the user clicked Leave Lobby and hasn't manually
+     *  re-joined since. Defaults to {@code false} (fresh user / after a
+     *  {@link #clear()}) so a brand-new user is eligible for zero-config
+     *  auto-join. */
+    public boolean getUserLeftLobby()
+    {
+        String raw = readRaw(KEY_USER_LEFT);
+        return "true".equalsIgnoreCase(raw);
+    }
+
+    public void setUserLeftLobby(boolean left)
+    {
+        writeRaw(KEY_USER_LEFT, Boolean.toString(left));
     }
 
     // -------------------- Wipe --------------------

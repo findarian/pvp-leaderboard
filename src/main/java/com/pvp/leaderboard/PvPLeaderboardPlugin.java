@@ -308,6 +308,11 @@ public class PvPLeaderboardPlugin extends Plugin
 		// and any send-failure is swallowed so we still proceed to
 		// the hard socket teardown below.
 		try { webSocketLobbyService.leaveLobby(); } catch (Exception ignored) { /* hard shutdown */ }
+		// Tear down the lobby service's periodic rank-retry task so it
+		// doesn't keep firing on RuneLite's shared scheduler after the
+		// plugin is gone. Best-effort: never let teardown abort the
+		// rest of the shutdown sequence.
+		try { webSocketLobbyService.stop(); } catch (Exception ignored) { /* hard shutdown */ }
 		// Hard-close the socket and forbid future reconnects — the
 		// plugin is going away. WebSocketManager.shutdown() is
 		// idempotent + safe to call without ever having connected.

@@ -68,7 +68,7 @@ import java.util.concurrent.atomic.AtomicLong;
  */
 @Slf4j
 @Singleton
-public final class WebSocketLobbyService implements LobbyService
+public class WebSocketLobbyService implements LobbyService
 {
     private final WebSocketManager socket;
     private final SocketEventBus bus;
@@ -207,6 +207,29 @@ public final class WebSocketLobbyService implements LobbyService
     private volatile LobbyEventListener listener;
     private volatile boolean started = false;
 
+    /** Throttle bookkeeping for {@link #updateRankRange(int, int)}.
+     *  See the field docs for the throttle algorithm:
+     *  <ul>
+     *    <li>{@link #lastRangeUpdateAtMs} — wall-clock of the last
+     *        sent {@code lobby/update_range} (or {@code lobby/join}
+     *        which carries the same fields and resets the throttle so
+     *        we don't double-fire immediately after a fresh join).</li>
+     *    <li>{@link #pendingRangeMin} / {@link #pendingRangeMax} —
+     *        latest values the user has scrubbed to; sent on the
+     *        trailing-edge of the throttle when a queued send
+     *        finally fires. Read on the scheduler thread, written on
+     *        the EDT.</li>
+     *    <li>{@link #pendingRangeSendScheduled} — guards against
+     *        scheduling more than one trailing-edge send per cool-down
+     *        window. Cleared when the scheduled task actually fires.</li>
+     *  </ul>
+     *  All four are {@code volatile} since the EDT writes them and
+     *  the scheduler thread reads them. */
+    private volatile long lastRangeUpdateAtMs = 0L;
+    private volatile int pendingRangeMin = LobbyMember.UNKNOWN_RANK_IDX;
+    private volatile int pendingRangeMax = LobbyMember.UNKNOWN_RANK_IDX;
+    private volatile boolean pendingRangeSendScheduled = false;
+
     @Inject
     public WebSocketLobbyService(WebSocketManager socket, SocketEventBus bus,
                                  PvPDataService pvpDataService,
@@ -251,6 +274,7 @@ public final class WebSocketLobbyService implements LobbyService
         bus.register("lobby/fight_confirmed_by_peer", this::handleFightConfirmedByPeer);
         bus.register("lobby/match_found",             this::handleMatchFound);
         bus.register("lobby/session_expired",         this::handleSessionExpired);
+        bus.register("lobby/displaced",               this::handleDisplaced);
         bus.register("error/lobby",                   this::handleError);
         // Single connect listener — runs both reconnect-resilience
         // hooks in deterministic order: re-issue lobby/join first
@@ -292,13 +316,29 @@ public final class WebSocketLobbyService implements LobbyService
     }
 
     @Override
-    public void stop()
+    public synchronized void stop()
     {
-        // Singleton lifetime — the plugin shutdown handler closes the
-        // socket. No per-call teardown needed; the bus has no
-        // unregister API and re-using the service across panel
+        // Cancel the periodic rank-retry task scheduled in start().
+        // The injected ScheduledExecutorService is RuneLite's shared
+        // client-wide executor, which outlives this service — a
+        // leaked scheduleAtFixedRate task would keep firing
+        // retryUnresolvedRanks() for the lifetime of the client (and
+        // double up on a plugin re-toggle). Best-effort,
+        // non-interrupting cancel: the task body is short and
+        // self-contained so letting an in-flight run finish is
+        // harmless. Cleared to null so a repeated stop() is a no-op.
+        ScheduledFuture<?> handle = rankRetryHandle;
+        if (handle != null)
+        {
+            handle.cancel(false);
+            rankRetryHandle = null;
+        }
+        // Bus registrations are intentionally left in place — the bus
+        // has no unregister API and re-using the service across panel
         // open/close cycles is the desired behaviour (server-side
-        // membership persists for 30 min sliding TTL).
+        // membership persists for 30 min sliding TTL). The socket
+        // itself is torn down separately by the plugin shutdown
+        // handler.
     }
 
     // ---------------------------------------------------------------
@@ -333,6 +373,88 @@ public final class WebSocketLobbyService implements LobbyService
         d.addProperty("max_rank_idx", maxDisplayRankIdx);
         d.addProperty("sort_bucket", normBucket);
         socket.send("lobby/join", d);
+        // lobby/join carries min_rank_idx + max_rank_idx so it counts
+        // as a freshly-sent range update for throttling purposes — a
+        // user who joins then immediately tweaks the slider shouldn't
+        // double-fire a redundant update_range inside the cool-down
+        // window. The clock reset also covers the auto-rejoin path.
+        lastRangeUpdateAtMs = currentTimeMillis();
+        pendingRangeMin = minDisplayRankIdx;
+        pendingRangeMax = maxDisplayRankIdx;
+    }
+
+    @Override
+    public void updateRankRange(int minRankIdx, int maxRankIdx)
+    {
+        // Always record the latest values so a trailing-edge send
+        // (scheduled below) picks up the most-recent state regardless
+        // of how many intermediate calls land inside the cool-down.
+        pendingRangeMin = minRankIdx;
+        pendingRangeMax = maxRankIdx;
+        long now = currentTimeMillis();
+        long since = now - lastRangeUpdateAtMs;
+        if (since >= RANGE_UPDATE_MIN_INTERVAL_MS)
+        {
+            sendRangeUpdateNow(minRankIdx, maxRankIdx, now);
+            return;
+        }
+        // Inside the cool-down window — coalesce. Schedule a single
+        // trailing-edge fire at the end of the window (idempotent
+        // via {@link #pendingRangeSendScheduled}) so a drag with N
+        // commits collapses to two sends total: the leading edge and
+        // one trailing edge with the final value.
+        if (scheduler == null) return;
+        if (pendingRangeSendScheduled) return;
+        pendingRangeSendScheduled = true;
+        long delayMs = Math.max(0L, RANGE_UPDATE_MIN_INTERVAL_MS - since);
+        scheduler.schedule(this::flushPendingRangeUpdate, delayMs, TimeUnit.MILLISECONDS);
+    }
+
+    /** Trailing-edge fire scheduled by {@link #updateRankRange}. Reads
+     *  the latest pending values + sends them, then clears the
+     *  scheduled flag so the next leading-edge can re-arm. Idempotent
+     *  if no values changed since the leading edge — still sends so
+     *  the server has the user's authoritative-at-end-of-drag value
+     *  (cheap; one extra frame per drag burst). */
+    private void flushPendingRangeUpdate()
+    {
+        try
+        {
+            int min = pendingRangeMin;
+            int max = pendingRangeMax;
+            sendRangeUpdateNow(min, max, currentTimeMillis());
+        }
+        finally
+        {
+            pendingRangeSendScheduled = false;
+        }
+    }
+
+    private void sendRangeUpdateNow(int minRankIdx, int maxRankIdx, long nowMs)
+    {
+        lastRangeUpdateAtMs = nowMs;
+        JsonObject d = new JsonObject();
+        d.addProperty("min_rank_idx", minRankIdx);
+        d.addProperty("max_rank_idx", maxRankIdx);
+        socket.send("lobby/update_range", d);
+        // Also keep lastJoinArgs in sync so a reconnect-replay
+        // re-issues lobby/join with the freshest range — otherwise
+        // a socket drop after a drag-without-rejoin would silently
+        // restore the user's previous range on the server.
+        JoinArgs prev = lastJoinArgs;
+        if (prev != null)
+        {
+            lastJoinArgs = new JoinArgs(prev.region, prev.styles, prev.builds,
+                minRankIdx, maxRankIdx, prev.sortBucket);
+        }
+    }
+
+    /** Indirection over {@link System#currentTimeMillis()} so tests
+     *  can pin the clock without freezing the JVM's. Override by
+     *  package-private subclass in tests. */
+    long currentTimeMillis()
+    {
+        return System.currentTimeMillis();
     }
 
     @Override
@@ -797,7 +919,9 @@ public final class WebSocketLobbyService implements LobbyService
                 m.playerId, m.name, m.styles, m.builds,
                 /* currentRankIdx */ rankIdx,
                 /* peakRankIdx */ rankIdx,
-                m.region, m.isMod);
+                m.region, m.isMod,
+                /* minRankIdx */ m.minRankIdx,
+                /* maxRankIdx */ m.maxRankIdx);
             enriched.add(updated);
             nextCache.put(updated.playerId, updated);
         }
@@ -1098,6 +1222,12 @@ public final class WebSocketLobbyService implements LobbyService
         // partial backend deploy doesn't strand every fight; and if
         // BOTH are missing/zero, synthesise a sane 30s window keyed to
         // the local clock so the user still gets a usable popup.
+        //
+        // NOTE: the panel no longer trusts this absolute deadline for
+        // the confirm countdown — MatchmakingLobbyPanel.LocalFightState
+        // runs a fixed 30 s window off a monotonic clock so a wrong /
+        // skewed client wall clock can't cut the window short. This
+        // value is retained only as the server's advisory deadline.
         long expiresAt = optLong(data, "confirm_expires_at_epoch_ms");
         if (expiresAt <= 0L) expiresAt = optLong(data, "expires_at_epoch_ms");
         if (expiresAt <= 0L)
@@ -1162,6 +1292,38 @@ public final class WebSocketLobbyService implements LobbyService
         LobbyEventListener l = listener;
         if (l == null) return;
         SwingUtilities.invokeLater(() -> l.onFightSessionExpired(sid));
+    }
+
+    /** {@code lobby/displaced}: a different account linked to the same
+     *  canonical identity (a logged-in alt) connected and the server
+     *  removed THIS account's lobby membership — only one linked account
+     *  may occupy the lobby at a time (backend {@code evict_alt_lobby_rows}
+     *  at $connect). Two responsibilities:
+     *  <ol>
+     *    <li>Disarm the reconnect-replay by nulling {@link #lastJoinArgs}.
+     *    Otherwise, if the server also force-closed this socket, the
+     *    {@code WebSocketManager} reconnect would replay {@code lobby/join}
+     *    and bounce the alt straight back out — a join/displace ping-pong
+     *    between the two linked clients. The user must deliberately
+     *    re-enter via Go-to-lobby on this account.</li>
+     *    <li>Surface it to the panel via
+     *    {@link LobbyEventListener#onDisplacedByAlt} so the UI drops back
+     *    to the gate with an explanatory notice.</li>
+     *  </ol>
+     *  {@code active_name} (optional) is the display name of the account
+     *  that is now the active lobby occupant. */
+    private void handleDisplaced(JsonObject data)
+    {
+        String activeName = optString(data, "active_name");
+        log.info("WebSocketLobbyService: lobby/displaced - this account was removed from the"
+            + " lobby because a linked alt connected (active_name={}); disarming reconnect-replay",
+            activeName);
+        // Break the join/displace ping-pong: a reconnect must not re-join.
+        lastJoinArgs = null;
+        currentFightSessionId = null;
+        LobbyEventListener l = listener;
+        if (l == null) return;
+        SwingUtilities.invokeLater(() -> l.onDisplacedByAlt(activeName));
     }
 
     private void handleError(JsonObject data)
@@ -1249,7 +1411,31 @@ public final class WebSocketLobbyService implements LobbyService
         boolean isMod = m.has("is_mod") && m.get("is_mod").isJsonPrimitive()
             && m.get("is_mod").getAsJsonPrimitive().isBoolean()
             && m.get("is_mod").getAsBoolean();
-        return new LobbyMember(playerId, name, styles, builds, currentRankIdx, peakRankIdx, region, isMod);
+        // The member's own accept-invite slider bounds drive the
+        // out-of-their-range greyout. Both fields default to
+        // {@link LobbyMember#UNKNOWN_RANK_IDX} when the server omits
+        // them so the panel falls back to "show the row normally"
+        // rather than greying every row on a pre-deploy backend.
+        int minRankIdx = optRankIdx(m, "min_rank_idx");
+        int maxRankIdx = optRankIdx(m, "max_rank_idx");
+        return new LobbyMember(playerId, name, styles, builds, currentRankIdx, peakRankIdx,
+            region, isMod, minRankIdx, maxRankIdx);
+    }
+
+    /** Reads a rank-index field off a roster-row JSON object. Returns
+     *  {@link LobbyMember#UNKNOWN_RANK_IDX} when the field is missing,
+     *  null, non-numeric, or stamped with the server's own
+     *  "no value" sentinel (negative). The plugin treats either bound
+     *  being unknown as "range unknown" (see
+     *  {@link LobbyMember#minRankIdx}) so a partial payload never
+     *  greys every row. */
+    private static int optRankIdx(JsonObject o, String key)
+    {
+        if (o == null || !o.has(key) || o.get(key).isJsonNull()) return LobbyMember.UNKNOWN_RANK_IDX;
+        JsonElement el = o.get(key);
+        if (!el.isJsonPrimitive() || !el.getAsJsonPrimitive().isNumber()) return LobbyMember.UNKNOWN_RANK_IDX;
+        int v = el.getAsInt();
+        return v < 0 ? LobbyMember.UNKNOWN_RANK_IDX : v;
     }
 
     private static String optString(JsonObject o, String key)

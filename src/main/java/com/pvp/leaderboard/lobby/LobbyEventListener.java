@@ -100,4 +100,17 @@ public interface LobbyEventListener
     /** Cross-device delta inverse of {@link #onBlockAdded}. Panel removes
      *  {@code playerId} from its block set and re-renders the row. */
     default void onBlockRemoved(String playerId) {}
+
+    /** The local user was displaced from the lobby because another account
+     *  linked to the same canonical identity (a logged-in alt) joined.
+     *  The server has already removed THIS account's lobby membership —
+     *  only one linked account can occupy the lobby at a time — so the
+     *  panel drops back to the pre-lobby gate and shows an explanatory
+     *  notice. The panel must NOT auto-rejoin (that would bounce the alt
+     *  back out); the user re-enters deliberately via Go-to-lobby.
+     *
+     *  <p>{@code activeAccountName} is the display name of the account
+     *  that is now the active lobby occupant (may be null/empty when the
+     *  server omits it — the panel then shows a generic message). */
+    default void onDisplacedByAlt(String activeAccountName) {}
 }
