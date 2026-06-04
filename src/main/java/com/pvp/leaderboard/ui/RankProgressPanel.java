@@ -71,6 +71,16 @@ public class RankProgressPanel extends JPanel
 
     public void updateBucket(String bucket, String rankLabel, int division, double pct, int rankNumber)
     {
+        updateBucket(bucket, rankLabel, division, pct, rankNumber, null);
+    }
+
+    /**
+     * @param topPercent the player's "Top X.XX%" for this bucket (from the
+     *                   rank histogram), or {@code null} to omit the suffix.
+     *                   Renders {@code "Adamant 3 #731 Top X.XX%"}.
+     */
+    public void updateBucket(String bucket, String rankLabel, int division, double pct, int rankNumber, String topPercent)
+    {
         int idx = getBucketIndex(bucket);
         if (idx >= 0 && idx < progressBars.length)
         {
@@ -83,6 +93,10 @@ public class RankProgressPanel extends JPanel
                     if (rankNumber > 0)
                     {
                         displayRank += " #" + rankNumber;
+                    }
+                    if (topPercent != null && !topPercent.isEmpty())
+                    {
+                        displayRank += " " + topPercent;
                     }
                     rankLabels[idx].setText(displayRank);
                     rankLabels[idx].setForeground(rankColor);

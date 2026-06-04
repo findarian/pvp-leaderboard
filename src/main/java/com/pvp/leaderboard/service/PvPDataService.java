@@ -39,6 +39,11 @@ public class PvPDataService
 {
 	private static final String API_BASE_URL = "https://l5xya0wf0d.execute-api.us-east-1.amazonaws.com/prod";
     private static final String SHARD_BASE_URL = PvPLeaderboardConstants.PUBLIC_SITE_BASE_URL + "/rank_idx";
+    /** Per-bucket MMR→rank histogram published hourly by the infra side
+     *  ({@code OSRS-MMR/lambda_code/distribution_cache_writer.py} →
+     *  {@code rank_hist/<bucket>.json}). Powers the "What are the ranks"
+     *  Top-X%-per-tier view. */
+    private static final String RANK_HIST_BASE_URL = PvPLeaderboardConstants.PUBLIC_SITE_BASE_URL + "/rank_hist";
 
 	private final OkHttpClient okHttpClient;
 	private final Gson gson;
@@ -1166,6 +1171,57 @@ public class PvPDataService
 	{
         // Redirect to new logic
         return getShardRankByName(playerId, bucket).thenApply(sr -> sr != null ? sr.rank : -1);
+	}
+
+	/**
+	 * Fetch the per-bucket MMR→rank histogram used by the "What are the
+	 * ranks" view to derive a live "Top X%" for each tier.
+	 *
+	 * <p>Reads {@code rank_hist/<bucket>.json} from the static site (the
+	 * same CDN origin as {@code /rank_idx} shards) via the shared
+	 * {@link #getShard(String)} fetch, so it inherits the 60-minute
+	 * positive cache and 60-second failure backoff. The payload shape is
+	 * {@code {"bin_width", "total", "bins":[[floor,count,count_above],...]}}
+	 * — see {@code backend/core/rank_histogram.py}.
+	 *
+	 * @param bucket one of {@code overall|nh|veng|multi|dmm}; null/blank
+	 *               defaults to {@code overall}.
+	 * @return the parsed histogram, or {@code null} if it could not be
+	 *         fetched/parsed (callers render "No one currently here").
+	 */
+	public CompletableFuture<JsonObject> getRankHistogram(String bucket)
+	{
+		String bucketPath = (bucket == null || bucket.trim().isEmpty())
+			? "overall"
+			: bucket.trim().toLowerCase();
+		String url = RANK_HIST_BASE_URL + "/" + bucketPath + ".json";
+		return getShard(url).exceptionally(ex -> null);
+	}
+
+	/**
+	 * Fetch the cached Top Players leaderboard for a bucket — the exact same
+	 * static S3 artifact the website reads, so a single CDN object serves
+	 * both surfaces and is cached ~1 hour.
+	 *
+	 * <p>Overall lives at {@code /leaderboard.json}; per-bucket at
+	 * {@code /leaderboard_<bucket>.json} (see the website's
+	 * {@code BUCKET_S3_KEYS} + {@code leaderboard_cache_writer.py}). Fetched
+	 * via the shared {@link #getShard(String)} path so it inherits the
+	 * 60-minute positive cache (matches the hourly refresh) and 60-second
+	 * failure backoff. Payload shape:
+	 * {@code {"players":[{"account","player_names":[..],"mmr","rank","division","icon"}],"bucket"}}.
+	 *
+	 * @param bucket one of {@code overall|nh|veng|multi|dmm}; null/blank → {@code overall}.
+	 * @return the parsed leaderboard, or {@code null} if it couldn't be fetched/parsed.
+	 */
+	public CompletableFuture<JsonObject> getLeaderboard(String bucket)
+	{
+		String b = (bucket == null || bucket.trim().isEmpty())
+			? "overall"
+			: bucket.trim().toLowerCase();
+		String key = "overall".equals(b) ? "/leaderboard.json" : "/leaderboard_" + b + ".json";
+		String url = PvPLeaderboardConstants.PUBLIC_SITE_BASE_URL + key;
+		return getShard(url).exceptionally(ex -> null);
 	}
 
 	public String generateAcctSha(String uuid) throws Exception

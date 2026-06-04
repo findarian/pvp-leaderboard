@@ -37,6 +37,8 @@ public class DashboardPanel extends PluginPanel
     private JButton advancedToggle;
     private JButton rankTierToggle;
     private JScrollPane rankTierScrollPane;
+    private JButton topPlayersToggle;
+    private JScrollPane topPlayersScrollPane;
     private JPanel statsContainer;
 
     // Top-level navigation (Segment 1.5): Matchmaking + Player Lookup. Two
@@ -163,6 +165,13 @@ public class DashboardPanel extends PluginPanel
         rankTierToggle = new JButton("What are the ranks");
         rankTierToggle.setMaximumSize(new Dimension(Integer.MAX_VALUE, 25));
         rankTierToggle.setHorizontalAlignment(SwingConstants.CENTER);
+
+        // "Top players" toggle (replaces the old "Report Bugs" button) — built
+        // here so the community box can own it; the listener is wired below
+        // once statsContainer + the scroll panes exist.
+        topPlayersToggle = new JButton("Top players");
+        topPlayersToggle.setMaximumSize(new Dimension(Integer.MAX_VALUE, 25));
+        topPlayersToggle.setHorizontalAlignment(SwingConstants.CENTER);
 
         // 1. Community box — always pinned to the very top, never inside a tab.
         JPanel communityBox = createCommunityBox();
@@ -315,21 +324,36 @@ public class DashboardPanel extends PluginPanel
         });
 
         // --- Rank tier view (hidden by default, swapped in when toggle is clicked) ---
-        RankTierPanel rankTierPanel = new RankTierPanel();
+        RankTierPanel rankTierPanel = new RankTierPanel(pvpDataService);
         rankTierScrollPane = new JScrollPane(rankTierPanel);
         rankTierScrollPane.setAlignmentX(LEFT_ALIGNMENT);
         rankTierScrollPane.setBorder(BorderFactory.createTitledBorder("Rank Tiers"));
+        // Never scroll sideways — the panel tracks the viewport width
+        // (Scrollable) so the right-aligned "Top X%" column always sits
+        // flush against the inner edge instead of being clipped off-screen.
+        rankTierScrollPane.setHorizontalScrollBarPolicy(JScrollPane.HORIZONTAL_SCROLLBAR_NEVER);
         rankTierScrollPane.setVisible(false);
 
-        // Player Lookup card holds both the stats container and the rank-tier
-        // scroll pane. Only one is visible at a time; the rank-tier toggle (now
-        // living in the community box) flips between them and also forces the
-        // active tab to Player Lookup.
+        // --- Top players view (hidden by default; same swap pattern as ranks) ---
+        TopPlayersPanel topPlayersPanel = new TopPlayersPanel(pvpDataService);
+        topPlayersScrollPane = new JScrollPane(topPlayersPanel);
+        topPlayersScrollPane.setAlignmentX(LEFT_ALIGNMENT);
+        topPlayersScrollPane.setBorder(BorderFactory.createTitledBorder("Top Players"));
+        // Panel tracks viewport width (Scrollable) so rows never clip sideways;
+        // only the 100-row list scrolls vertically.
+        topPlayersScrollPane.setHorizontalScrollBarPolicy(JScrollPane.HORIZONTAL_SCROLLBAR_NEVER);
+        topPlayersScrollPane.setVisible(false);
+
+        // Player Lookup card holds the stats container plus the rank-tier and
+        // top-players scroll panes. Only one is visible at a time; the two
+        // community-box toggles flip between them and force the active tab to
+        // Player Lookup.
         JPanel lookupCard = new JPanel();
         lookupCard.setLayout(new BoxLayout(lookupCard, BoxLayout.Y_AXIS));
         lookupCard.setAlignmentX(LEFT_ALIGNMENT);
         lookupCard.add(statsContainer);
         lookupCard.add(rankTierScrollPane);
+        lookupCard.add(topPlayersScrollPane);
 
         // Matchmaking card hosts its own sub-tab nav + sub-card layout.
         JPanel matchmakingCard = createMatchmakingCard();
@@ -338,14 +362,29 @@ public class DashboardPanel extends PluginPanel
         viewContainer.add(lookupCard, CARD_LOOKUP);
         mainPanel.add(viewContainer);
 
+        // "What are the ranks" / "Top players" behave like top-level tabs: each
+        // click reveals its view inside the Player Lookup card AND becomes the
+        // single active underline (deactivating the other three nav buttons).
+        // There's no "Back to stats" — the user returns to stats by clicking
+        // Player Lookup (or any other nav button), exactly like switching tabs.
         rankTierToggle.addActionListener(e -> {
-            // Always pull focus into the Player Lookup tab so the toggle is
-            // useful regardless of which tab the user is on.
-            setActiveTab(CARD_LOOKUP);
-            boolean showingTiers = rankTierScrollPane.isVisible();
-            statsContainer.setVisible(showingTiers);
-            rankTierScrollPane.setVisible(!showingTiers);
-            rankTierToggle.setText(showingTiers ? "What are the ranks" : "Back to stats");
+            showCard(CARD_LOOKUP);
+            statsContainer.setVisible(false);
+            topPlayersScrollPane.setVisible(false);
+            rankTierScrollPane.setVisible(true);
+            setActiveNav(rankTierToggle);
+            rankTierPanel.onShown();
+            mainPanel.revalidate();
+            mainPanel.repaint();
+        });
+
+        topPlayersToggle.addActionListener(e -> {
+            showCard(CARD_LOOKUP);
+            statsContainer.setVisible(false);
+            rankTierScrollPane.setVisible(false);
+            topPlayersScrollPane.setVisible(true);
+            setActiveNav(topPlayersToggle);
+            topPlayersPanel.onShown();
             mainPanel.revalidate();
             mainPanel.repaint();
         });
@@ -372,11 +411,11 @@ public class DashboardPanel extends PluginPanel
         nav.setPreferredSize(new Dimension(220, 40));
 
         tabMatchmakingBtn = makeTabButton("Matchmaking", true);
-        tabMatchmakingBtn.addActionListener(e -> { revertRankTierIfShowing(); setActiveTab(CARD_MATCHMAKING); });
+        tabMatchmakingBtn.addActionListener(e -> { foldAltViewsToStats(); setActiveTab(CARD_MATCHMAKING); });
         nav.add(tabMatchmakingBtn);
 
         tabLookupBtn = makeTabButton("Player Lookup", false);
-        tabLookupBtn.addActionListener(e -> { revertRankTierIfShowing(); setActiveTab(CARD_LOOKUP); });
+        tabLookupBtn.addActionListener(e -> { foldAltViewsToStats(); setActiveTab(CARD_LOOKUP); });
         nav.add(tabLookupBtn);
 
         return nav;
@@ -426,7 +465,7 @@ public class DashboardPanel extends PluginPanel
     /** Single font size shared by every navigation button — top tabs
      *  ([Matchmaking] / [Player Lookup]) and Matchmaking sub-tabs
      *  ([Lobby] / [Tournaments]) — and by every community-box button
-     *  ([Discord], [Website], [Report Bugs], [What are the ranks]).
+     *  ([Discord], [Website], [Top players], [What are the ranks]).
      *  Matches {@code MatchmakingLobbyPanel.GATE_HEADER_PT} so the whole
      *  sidepanel reads as one consistent typographic block.
      *
@@ -440,30 +479,45 @@ public class DashboardPanel extends PluginPanel
      *  show without clipping descenders or wasting whitespace. */
     private static final int COMMUNITY_BTN_H = 34;
 
-    /** Switch the visible top-level card and re-style nav buttons. */
-    /** If the rank-tier explainer is currently showing, fold it back to the
-     *  stats view (same effect as clicking "Back to stats" on the toggle).
-     *  Called from the top-tab action listeners so switching tabs while the
-     *  tier view is up automatically takes the user back to stats — they
-     *  don't have to remember to click the toggle off first. Intentionally
-     *  not called from inside {@link #setActiveTab} because the toggle's own
-     *  listener calls setActiveTab(CARD_LOOKUP) and would double-flip. */
-    private void revertRankTierIfShowing()
+    /** Fold any Player-Lookup "alt" view (Top players / What are the ranks)
+     *  back to the stats view. Called when activating a top-level tab or
+     *  opening a player profile so the lookup card is always on stats unless
+     *  the user explicitly clicked one of the alt-view nav buttons. Does NOT
+     *  touch the active-underline — the caller sets that next. */
+    private void foldAltViewsToStats()
     {
-        if (rankTierScrollPane == null || statsContainer == null || rankTierToggle == null) return;
-        if (!rankTierScrollPane.isVisible()) return;
+        if (statsContainer == null) return;
+        if (rankTierScrollPane != null) rankTierScrollPane.setVisible(false);
+        if (topPlayersScrollPane != null) topPlayersScrollPane.setVisible(false);
         statsContainer.setVisible(true);
-        rankTierScrollPane.setVisible(false);
-        rankTierToggle.setText("What are the ranks");
     }
 
-    private void setActiveTab(String key)
+    /** Switch the visible top-level card only (no nav re-styling). */
+    private void showCard(String key)
     {
         if (viewCards != null && viewContainer != null) {
             viewCards.show(viewContainer, key);
         }
-        applyTabActiveStyle(tabMatchmakingBtn, CARD_MATCHMAKING.equals(key));
-        applyTabActiveStyle(tabLookupBtn, CARD_LOOKUP.equals(key));
+    }
+
+    /** Single source of truth for the green active underline: stamps exactly
+     *  one of the four nav buttons (Matchmaking, Player Lookup, Top players,
+     *  What are the ranks) active and the rest inactive — so the accent always
+     *  tracks whatever the user clicked last. */
+    private void setActiveNav(JButton active)
+    {
+        applyTabActiveStyle(tabMatchmakingBtn, active == tabMatchmakingBtn);
+        applyTabActiveStyle(tabLookupBtn, active == tabLookupBtn);
+        applyTabActiveStyle(rankTierToggle, active == rankTierToggle);
+        applyTabActiveStyle(topPlayersToggle, active == topPlayersToggle);
+    }
+
+    /** Switch the visible top-level card and move the active underline to the
+     *  matching top-level tab (Matchmaking or Player Lookup). */
+    private void setActiveTab(String key)
+    {
+        showCard(key);
+        setActiveNav(CARD_MATCHMAKING.equals(key) ? tabMatchmakingBtn : tabLookupBtn);
     }
 
     /**
@@ -619,16 +673,20 @@ public class DashboardPanel extends PluginPanel
         row.add(websiteBtn);
         box.add(row);
 
+        // "Top players" lives here (replaces the old "Report Bugs" button) so
+        // it's reachable from any tab. Styled to match the rank-tier toggle;
+        // the action listener is wired in createMainPanel once the scroll panes
+        // exist.
         JPanel row2 = new JPanel(new GridLayout(1, 1, 0, 0));
         row2.setMaximumSize(new Dimension(Integer.MAX_VALUE, COMMUNITY_BTN_H));
-        JButton reportBugsBtn = makeCommunityBtn("Report Bugs", "Report bugs on Discord");
-        reportBugsBtn.addActionListener(e -> {
-            try { LinkBrowser.browse("https://discord.gg/TmFzcbW3Rp"); } catch (Exception ignore) {}
-        });
-        row2.add(reportBugsBtn);
+        topPlayersToggle.setFont(topPlayersToggle.getFont().deriveFont(Font.BOLD, NAV_FONT_PT));
+        topPlayersToggle.setToolTipText("Show the Top 100 players for the selected bucket");
+        topPlayersToggle.setMaximumSize(new Dimension(Integer.MAX_VALUE, COMMUNITY_BTN_H));
+        topPlayersToggle.setPreferredSize(null);
+        row2.add(topPlayersToggle);
         box.add(row2);
 
-        // "What are the ranks" lives here (below Report Bugs) so it's reachable
+        // "What are the ranks" lives here (below Top players) so it's reachable
         // from any active tab. The action listener is wired in createMainPanel
         // once statsContainer + rankTierScrollPane exist.
         JPanel row3 = new JPanel(new GridLayout(1, 1, 0, 0));
@@ -869,6 +927,7 @@ public class DashboardPanel extends PluginPanel
     {
         Runnable open = () ->
         {
+            foldAltViewsToStats();
             setActiveTab(CARD_LOOKUP);
             loadMatchHistory(playerId);
         };
@@ -1045,9 +1104,10 @@ public class DashboardPanel extends PluginPanel
         String rankLabel = "—";
         int division = 0;
         double pct = 0.0;
+        double mmr = Double.NaN;
 
         if (bucketObj.has("mmr")) {
-            double mmr = bucketObj.get("mmr").getAsDouble();
+            mmr = bucketObj.get("mmr").getAsDouble();
             RankInfo ri = RankUtils.rankLabelAndProgressFromMMR(mmr);
             if (ri != null) { rankLabel = ri.rank; division = ri.division; pct = ri.progress; }
         }
@@ -1064,17 +1124,24 @@ public class DashboardPanel extends PluginPanel
         final String fRank = rankLabel;
         final int fDiv = division;
         final double fPct = pct;
+        final double fMmr = mmr;
 
         rankProgressPanel.updateBucket(bucketKey, fRank, fDiv, fPct, -1);
 
         if (!"—".equals(fRank)) {
+            final String[] topHolder = new String[1];
             new SwingWorker<Integer, Void>() {
-                @Override protected Integer doInBackground() { return getRankNumberFromLeaderboard(playerName, bucketKey); }
+                @Override protected Integer doInBackground() {
+                    // Background thread: compute the histogram percentile + rank
+                    // number together so the rating row updates once with both.
+                    topHolder[0] = computeTopPercent(bucketKey, fMmr);
+                    return getRankNumberFromLeaderboard(playerName, bucketKey);
+                }
                 @Override protected void done() {
                      try {
                          if (gen != loadGeneration) return;
                          int rank = get();
-                         if (rank > 0) rankProgressPanel.updateBucket(bucketKey, fRank, fDiv, fPct, rank);
+                         rankProgressPanel.updateBucket(bucketKey, fRank, fDiv, fPct, rank > 0 ? rank : -1, topHolder[0]);
                     } catch (Exception ignore) {
                     }
                 }
@@ -1122,16 +1189,19 @@ public class DashboardPanel extends PluginPanel
                 int finalDiv = latest.has("player_division") ? latest.get("player_division").getAsInt() : (est != null ? est.division : 0);
                 double pct = (est != null ? est.progress : 0.0);
 
+                final double finalMmr = mmr;
+                final String[] topHolder = new String[1];
                 new SwingWorker<Integer, Void>()
                 {
-                    @Override protected Integer doInBackground() { return getRankNumberFromLeaderboard(playerName, bucket); }
+                    @Override protected Integer doInBackground() {
+                        topHolder[0] = computeTopPercent(bucket, finalMmr);
+                        return getRankNumberFromLeaderboard(playerName, bucket);
+                    }
                     @Override protected void done() {
                         try {
                             if (gen != loadGeneration) return;
                             int rankNumber = get();
-                            if (rankNumber > 0) {
-                                rankProgressPanel.updateBucket(bucket, finalRank, finalDiv, pct, rankNumber);
-                            }
+                            rankProgressPanel.updateBucket(bucket, finalRank, finalDiv, pct, rankNumber > 0 ? rankNumber : -1, topHolder[0]);
                         } catch (Exception ignore) {
                         }
                     }
@@ -1142,6 +1212,32 @@ public class DashboardPanel extends PluginPanel
 
     // --- Helpers ---
     
+    /**
+     * The player's "Top X.XX%" for a bucket, derived from the cached rank
+     * histogram ({@code rank_hist/<bucket>.json}). Runs on a background
+     * thread (it blocks briefly on the cached future), so it must NOT be
+     * called from the EDT. Reuses {@link PvPDataService#getRankHistogram}
+     * which is backed by the shared 60-minute shard cache — so the histogram
+     * for each bucket is fetched at most once per hour and shared with the
+     * "What are the ranks" view, never re-fetched per lookup. Returns
+     * {@code null} when it can't be determined so the caller omits the suffix.
+     */
+    private String computeTopPercent(String bucket, double mmr)
+    {
+        if (pvpDataService == null || !Double.isFinite(mmr)) return null;
+        try {
+            java.util.concurrent.CompletableFuture<JsonObject> f = pvpDataService.getRankHistogram(bucket);
+            if (f == null) return null;
+            JsonObject hist = f.get(5, java.util.concurrent.TimeUnit.SECONDS);
+            if (hist == null) return null;
+            long total = RankUtils.histogramTotal(hist);
+            long atOrAbove = RankUtils.cumulativeCountAtOrAbove(hist, mmr);
+            return RankUtils.formatTopPercentPrecise(atOrAbove, total);
+        } catch (Exception ignore) {
+            return null;
+        }
+    }
+
     public int getRankNumberFromLeaderboard(String playerName, String bucket)
     {
         try {

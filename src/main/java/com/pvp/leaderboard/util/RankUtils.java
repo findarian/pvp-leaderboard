@@ -1,9 +1,12 @@
 package com.pvp.leaderboard.util;
 
+import com.google.gson.JsonArray;
+import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.pvp.leaderboard.service.RankInfo;
 import java.awt.Color;
 import java.util.HashMap;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Arrays;
 
@@ -318,5 +321,141 @@ public class RankUtils
         }
 
         return baseOrder * 10 + (4 - division);
+    }
+
+    /**
+     * Total population recorded in a rank histogram artifact
+     * ({@code rank_hist/<bucket>.json}, produced by the infra-side
+     * {@code backend/core/rank_histogram.py}). Returns {@code 0} for a
+     * {@code null}, empty, or malformed histogram so callers can render
+     * "No one currently here" without special-casing failures.
+     */
+    public static long histogramTotal(JsonObject hist)
+    {
+        if (hist == null || !hist.has("total") || hist.get("total").isJsonNull())
+        {
+            return 0L;
+        }
+        try
+        {
+            return Math.max(0L, hist.get("total").getAsLong());
+        }
+        catch (RuntimeException e)
+        {
+            return 0L;
+        }
+    }
+
+    /**
+     * Number of players whose MMR is at or above {@code mmrThreshold},
+     * read from the cumulative histogram's {@code bins} array. Each bin is
+     * {@code [floor, count, count_above]} sorted ascending by floor, where
+     * {@code count_above} is the population of all strictly-higher bins.
+     *
+     * <p>Because every rank cutoff in {@link #THRESHOLDS} is a multiple of
+     * the 10-MMR bin width, a threshold always lands on a bin boundary —
+     * so the first bin whose floor is {@code >= mmrThreshold} gives an
+     * exact at-or-above count of {@code count + count_above}. Malformed
+     * rows and missing/empty histograms degrade to {@code 0}.
+     */
+    public static long cumulativeCountAtOrAbove(JsonObject hist, double mmrThreshold)
+    {
+        if (hist == null || !hist.has("bins") || !hist.get("bins").isJsonArray())
+        {
+            return 0L;
+        }
+        JsonArray bins = hist.getAsJsonArray("bins");
+        for (JsonElement el : bins)
+        {
+            if (el == null || !el.isJsonArray())
+            {
+                continue;
+            }
+            JsonArray bin = el.getAsJsonArray();
+            if (bin.size() < 3)
+            {
+                continue;
+            }
+            try
+            {
+                double floor = bin.get(0).getAsDouble();
+                if (floor >= mmrThreshold)
+                {
+                    long count = bin.get(1).getAsLong();
+                    long above = bin.get(2).getAsLong();
+                    return Math.max(0L, count + above);
+                }
+            }
+            catch (RuntimeException e)
+            {
+                // Skip a corrupt row rather than failing the whole lookup.
+            }
+        }
+        return 0L;
+    }
+
+    /**
+     * Human-readable "Top X%" label for a tier, given how many players are
+     * at or above that tier and the total population. Returns
+     * {@code "No one currently here"} when the tier is empty (or the
+     * population is unknown), matching the "What are the ranks" design.
+     *
+     * <p>Precision scales with the magnitude so the exclusive top tiers stay
+     * legible: whole numbers at/above 10%, one decimal in {@code [1%, 10%)},
+     * two decimals below 1% (e.g. {@code "Top 0.01%"}), and {@code "Top
+     * <0.01%"} for a share too small to show at two decimals.
+     */
+    public static String formatTopPercent(long countAtOrAbove, long total)
+    {
+        if (total <= 0L || countAtOrAbove <= 0L)
+        {
+            return "No one currently here";
+        }
+        double pct = (double) countAtOrAbove / (double) total * 100.0;
+        if (pct >= 10.0)
+        {
+            return "Top " + String.format(Locale.US, "%.0f%%", pct);
+        }
+        if (pct >= 1.0)
+        {
+            return "Top " + String.format(Locale.US, "%.1f%%", pct);
+        }
+        String twoDp = String.format(Locale.US, "%.2f", pct);
+        if ("0.00".equals(twoDp))
+        {
+            return "Top <0.01%";
+        }
+        return "Top " + twoDp + "%";
+    }
+
+    /**
+     * Fixed two-decimal "Top X.XX%" used by the Player Lookup ratings, where
+     * the user wants a consistent precision per rating (unlike
+     * {@link #formatTopPercent}'s magnitude-scaled precision used by the
+     * rank-tier explainer). Returns {@code null} when the share can't be
+     * determined (no/zero total, or the player isn't counted) so the caller
+     * can simply omit the suffix rather than print a misleading value. A
+     * non-zero share that rounds below 0.01% renders {@code "Top <0.01%"}.
+     *
+     * @param countAtOrAbove players at or above the player's MMR (inclusive)
+     * @param total          bucket population from the histogram
+     */
+    public static String formatTopPercentPrecise(long countAtOrAbove, long total)
+    {
+        if (total <= 0L || countAtOrAbove <= 0L)
+        {
+            return null;
+        }
+        double pct = (double) countAtOrAbove / (double) total * 100.0;
+        if (pct > 100.0)
+        {
+            pct = 100.0;
+        }
+        String twoDp = String.format(Locale.US, "%.2f", pct);
+        if ("0.00".equals(twoDp))
+        {
+            return "Top <0.01%";
+        }
+        return "Top " + twoDp + "%";
     }
 }
