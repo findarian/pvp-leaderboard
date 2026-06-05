@@ -16,7 +16,6 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * "Top players" view — a scrollable Top 100 leaderboard mirroring the website,
@@ -63,7 +62,6 @@ public class TopPlayersPanel extends JPanel implements Scrollable
     private JPanel bucketBar;
     private final JPanel listPanel = new JPanel();
     private final JLabel statusLabel = new JLabel();
-    private final Map<String, JsonObject> leaderboardCache = new ConcurrentHashMap<>();
 
     private volatile String selectedBucket = DEFAULT_BUCKET;
 
@@ -132,38 +130,38 @@ public class TopPlayersPanel extends JPanel implements Scrollable
         selectedBucket = bucketKey;
         styleBucketButtons(bucketKey);
 
-        JsonObject cached = leaderboardCache.get(bucketKey);
-        if (cached != null)
-        {
-            renderRows(parseTopPlayers(cached, TOP_N));
-            return;
-        }
-
         if (pvpDataService == null)
         {
             showStatus("Unavailable");
             return;
         }
 
-        showStatus("Loading\u2026");
+        // Single source of truth for caching: PvPDataService.getLeaderboard
+        // is backed by the shared 60-minute shard cache (same hourly refresh
+        // the website's CDN object uses). We deliberately keep NO long-lived
+        // copy here — a per-panel cache would shadow that TTL and serve stale
+        // rows for the whole session. Each tab visit / bucket toggle re-asks;
+        // within the hour it's a cache hit (no network), after the hour it
+        // refetches.
         CompletableFuture<JsonObject> future = pvpDataService.getLeaderboard(bucketKey);
         if (future == null)
         {
             showStatus("Unavailable");
             return;
         }
+
+        // Already cached (future completed) → render immediately, no flash.
+        JsonObject ready = future.getNow(null);
+        if (ready != null)
+        {
+            renderLeaderboard(bucketKey, ready);
+            return;
+        }
+
+        showStatus("Loading\u2026");
         future.thenAccept(data -> SwingUtilities.invokeLater(() ->
         {
-            if (!bucketKey.equals(selectedBucket)) return;
-            if (data != null && data.has("players"))
-            {
-                leaderboardCache.put(bucketKey, data);
-                renderRows(parseTopPlayers(data, TOP_N));
-            }
-            else
-            {
-                showStatus("Unavailable");
-            }
+            if (bucketKey.equals(selectedBucket)) renderLeaderboard(bucketKey, data);
         })).exceptionally(ex ->
         {
             SwingUtilities.invokeLater(() ->
@@ -172,6 +170,19 @@ public class TopPlayersPanel extends JPanel implements Scrollable
             });
             return null;
         });
+    }
+
+    private void renderLeaderboard(String bucketKey, JsonObject data)
+    {
+        if (!bucketKey.equals(selectedBucket)) return;
+        if (data != null && data.has("players"))
+        {
+            renderRows(parseTopPlayers(data, TOP_N));
+        }
+        else
+        {
+            showStatus("Unavailable");
+        }
     }
 
     private void showStatus(String text)

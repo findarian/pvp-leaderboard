@@ -76,6 +76,17 @@ public class PvPDataService
     // Negative cache for specific players/accounts to avoid re-checking shards
 	private final ConcurrentHashMap<String, Long> missingPlayerUntilMs = new ConcurrentHashMap<>();
 
+	// Top Players leaderboard caching — kept SEPARATE from the rank_idx shard
+	// cache above on purpose. The leaderboard is a different artifact: the
+	// pregenerated top-550 list (/leaderboard[_<bucket>].json) the website
+	// reads, refreshed hourly by the infra leaderboard_cache_writer.py — NOT a
+	// name→rank shard. Sharing shardCache would let shard churn (its 512-entry
+	// LRU) evict the leaderboard (and vice versa) and conflate two unrelated
+	// resources. Only ~5 buckets, so a plain map (no LRU) is plenty.
+	private static final long LEADERBOARD_CACHE_EXPIRY_MS = 60L * 60L * 1000L; // 60m, mirrors the hourly refresh
+	private final ConcurrentHashMap<String, ShardEntry> leaderboardCache = new ConcurrentHashMap<>();
+	private final ConcurrentHashMap<String, Long> leaderboardFailUntil = new ConcurrentHashMap<>();
+
     /**
      * Clears the shard negative cache for a player. Call this when API confirms player exists.
      */
@@ -1061,28 +1072,44 @@ public class PvPDataService
 	 */
 	public CompletableFuture<JsonObject> getShard(String url, boolean bypassCache)
 	{
+		return fetchCachedJson(url, shardCache, shardFailUntil, SHARD_CACHE_EXPIRY_MS, bypassCache);
+	}
+
+	/**
+	 * Generic cached-JSON GET shared by the rank_idx shard reader
+	 * ({@link #getShard(String, boolean)}) and the leaderboard reader
+	 * ({@link #getLeaderboard(String)}). Each caller passes its OWN
+	 * {@code cache} + {@code failUntil} maps and TTL so the two artifacts
+	 * never evict or shadow one another. Positive cache hits short-circuit
+	 * before any HTTP work; the failure-backoff is honoured even on
+	 * {@code bypassCache} (it guards the CDN against a 5xx stampede rather
+	 * than serving fresh data).
+	 */
+	private CompletableFuture<JsonObject> fetchCachedJson(String url,
+		Map<String, ShardEntry> cache, ConcurrentHashMap<String, Long> failUntil,
+		long ttlMs, boolean bypassCache)
+	{
 		CompletableFuture<JsonObject> future = new CompletableFuture<>();
-        
+
         long now = System.currentTimeMillis();
-        
+
         // 1. Check Memory Cache — bypassed when bypassCache=true so an
-        // explicit refresh picks up the latest DynamoDB-stream write
-        // (≈30 s propagation) instead of serving a payload that might
-        // be up to 60 minutes stale.
+        // explicit refresh picks up the latest write instead of serving a
+        // payload that might be up to ttlMs stale.
         if (!bypassCache) {
-            ShardEntry cached = shardCache.get(url);
-            if (cached != null && (now - cached.getTimestamp() < SHARD_CACHE_EXPIRY_MS)) {
+            ShardEntry cached = cache.get(url);
+            if (cached != null && (now - cached.getTimestamp() < ttlMs)) {
                 future.complete(cached.getPayload());
                 return future;
             }
         }
-        
+
         // 2. Check Negative Cache (Fail Until). Still honoured even
         // on bypass — this is a protective backoff against the CDN
         // returning 5xx, not a freshness cache, and an explicit
         // refresh shouldn't be a thundering-herd vector.
-        Long failUntil = shardFailUntil.get(url);
-        if (failUntil != null && now < failUntil) {
+        Long failAt = failUntil.get(url);
+        if (failAt != null && now < failAt) {
             future.complete(null);
             return future;
         }
@@ -1095,7 +1122,7 @@ public class PvPDataService
 			@Override
 			public void onFailure(Call call, IOException e)
 			{
-                shardFailUntil.put(url, System.currentTimeMillis() + SHARD_FAIL_BACKOFF_MS);
+                failUntil.put(url, System.currentTimeMillis() + SHARD_FAIL_BACKOFF_MS);
 				future.completeExceptionally(e);
 			}
 
@@ -1105,7 +1132,7 @@ public class PvPDataService
 				try (Response res = response)
 				{
 					if (!res.isSuccessful()) {
-                        shardFailUntil.put(url, System.currentTimeMillis() + SHARD_FAIL_BACKOFF_MS);
+                        failUntil.put(url, System.currentTimeMillis() + SHARD_FAIL_BACKOFF_MS);
 						future.complete(null);
 						return;
 					}
@@ -1122,7 +1149,7 @@ public class PvPDataService
                     } catch (IOException cacheEx) {
                         // Windows cache file locking issue - request succeeded but cache failed
                         // Try to serve stale cache if available
-                        ShardEntry stale = shardCache.get(url);
+                        ShardEntry stale = cache.get(url);
                         if (stale != null) {
                             future.complete(stale.getPayload());
                             return;
@@ -1132,9 +1159,8 @@ public class PvPDataService
                     }
                     JsonObject json = gson.fromJson(bodyStr, JsonObject.class);
                     
-                    // Cache Success (60s)
-                    shardCache.put(url, new ShardEntry(json, System.currentTimeMillis()));
-                    shardFailUntil.remove(url);
+                    cache.put(url, new ShardEntry(json, System.currentTimeMillis()));
+                    failUntil.remove(url);
                     
                     future.complete(json);
 				} catch (Exception e) {
@@ -1203,12 +1229,16 @@ public class PvPDataService
 	 * static S3 artifact the website reads, so a single CDN object serves
 	 * both surfaces and is cached ~1 hour.
 	 *
-	 * <p>Overall lives at {@code /leaderboard.json}; per-bucket at
-	 * {@code /leaderboard_<bucket>.json} (see the website's
-	 * {@code BUCKET_S3_KEYS} + {@code leaderboard_cache_writer.py}). Fetched
-	 * via the shared {@link #getShard(String)} path so it inherits the
-	 * 60-minute positive cache (matches the hourly refresh) and 60-second
-	 * failure backoff. Payload shape:
+	 * <p>This is the exact pregenerated top-550 S3 artifact the website's
+	 * {@code fetchLeaderboard()} reads — overall at {@code /leaderboard.json},
+	 * per-bucket at {@code /leaderboard_<bucket>.json} (see the website's
+	 * {@code BUCKET_S3_KEYS} + the infra {@code leaderboard_cache_writer.py}).
+	 * It is fetched on its OWN {@link #leaderboardCache} (NOT the rank_idx
+	 * shard cache — a leaderboard is a ranked list, not a name→rank shard),
+	 * with a 60-minute positive cache that mirrors the file's hourly refresh
+	 * and a 60-second failure backoff. The caller (TopPlayersPanel) parses,
+	 * de-dupes by account, sorts by MMR and displays only the top 100 — same
+	 * pipeline as the site. Payload shape:
 	 * {@code {"players":[{"account","player_names":[..],"mmr","rank","division","icon"}],"bucket"}}.
 	 *
 	 * @param bucket one of {@code overall|nh|veng|multi|dmm}; null/blank → {@code overall}.
@@ -1221,7 +1251,8 @@ public class PvPDataService
 			: bucket.trim().toLowerCase();
 		String key = "overall".equals(b) ? "/leaderboard.json" : "/leaderboard_" + b + ".json";
 		String url = PvPLeaderboardConstants.PUBLIC_SITE_BASE_URL + key;
-		return getShard(url).exceptionally(ex -> null);
+		return fetchCachedJson(url, leaderboardCache, leaderboardFailUntil, LEADERBOARD_CACHE_EXPIRY_MS, false)
+			.exceptionally(ex -> null);
 	}
 
 	public String generateAcctSha(String uuid) throws Exception
