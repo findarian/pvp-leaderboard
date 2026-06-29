@@ -920,6 +920,7 @@ public class WebSocketLobbyService implements LobbyService
                 /* currentRankIdx */ rankIdx,
                 /* peakRankIdx */ rankIdx,
                 m.region, m.isMod,
+                /* isSuspended */ m.isSuspended,
                 /* minRankIdx */ m.minRankIdx,
                 /* maxRankIdx */ m.maxRankIdx);
             enriched.add(updated);
@@ -1411,6 +1412,13 @@ public class WebSocketLobbyService implements LobbyService
         boolean isMod = m.has("is_mod") && m.get("is_mod").isJsonPrimitive()
             && m.get("is_mod").getAsJsonPrimitive().isBoolean()
             && m.get("is_mod").getAsBoolean();
+        // Operator matchmaking-suspend stamp — same strict-boolean-primitive
+        // contract as is_mod: a string "true" / numeric 1 must NOT coerce, so
+        // a malformed/spoofed wire value can't suspend a member. Absent field
+        // defaults to false (pre-deploy backend).
+        boolean isSuspended = m.has("is_suspended") && m.get("is_suspended").isJsonPrimitive()
+            && m.get("is_suspended").getAsJsonPrimitive().isBoolean()
+            && m.get("is_suspended").getAsBoolean();
         // The member's own accept-invite slider bounds drive the
         // out-of-their-range greyout. Both fields default to
         // {@link LobbyMember#UNKNOWN_RANK_IDX} when the server omits
@@ -1419,7 +1427,7 @@ public class WebSocketLobbyService implements LobbyService
         int minRankIdx = optRankIdx(m, "min_rank_idx");
         int maxRankIdx = optRankIdx(m, "max_rank_idx");
         return new LobbyMember(playerId, name, styles, builds, currentRankIdx, peakRankIdx,
-            region, isMod, minRankIdx, maxRankIdx);
+            region, isMod, isSuspended, minRankIdx, maxRankIdx);
     }
 
     /** Reads a rank-index field off a roster-row JSON object. Returns

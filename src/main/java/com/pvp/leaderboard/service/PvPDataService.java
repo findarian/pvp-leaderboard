@@ -117,7 +117,7 @@ public class PvPDataService
     // private volatile boolean dmmWorldsFetchInProgress = false;
 
 	@Inject
-	public PvPDataService(OkHttpClient okHttpClient, Gson gson, CognitoAuthService authService, PvPLeaderboardConfig config, ClientIdentityService clientIdentityService)
+	public PvPDataService(OkHttpClient okHttpClient, Gson gson, PvPLeaderboardConfig config, ClientIdentityService clientIdentityService)
 	{
 		this.okHttpClient = okHttpClient;
 		this.gson = gson;
@@ -174,7 +174,7 @@ public class PvPDataService
 		}
 		
 		// Add client UUID header for API authentication/tracking
-		String clientUuid = clientIdentityService.getClientUniqueId();
+		String clientUuid = clientIdentityService != null ? clientIdentityService.getClientUniqueId() : null;
 		if (clientUuid != null && !clientUuid.isEmpty())
 		{
 			requestBuilder.addHeader("X-Client-Unique-Id", clientUuid);
@@ -308,7 +308,7 @@ public class PvPDataService
 		}
 
 		// Add client UUID header for API authentication/tracking
-		String clientUuid = clientIdentityService.getClientUniqueId();
+		String clientUuid = clientIdentityService != null ? clientIdentityService.getClientUniqueId() : null;
 		if (clientUuid != null && !clientUuid.isEmpty()) {
 			requestBuilder.addHeader("X-Client-Unique-Id", clientUuid);
 		}
@@ -399,7 +399,7 @@ public class PvPDataService
 	public String getSelfAcctSha()
 	{
 		try {
-			String uuid = clientIdentityService.getClientUniqueId();
+			String uuid = clientIdentityService != null ? clientIdentityService.getClientUniqueId() : null;
 			if (uuid != null && !uuid.isEmpty()) {
 				return generateAcctSha(uuid);
 			}
@@ -526,7 +526,7 @@ public class PvPDataService
 		Request.Builder requestBuilder = new Request.Builder().url(url).get();
 		
 		// Add client UUID header for API authentication/tracking
-		String clientUuid = clientIdentityService.getClientUniqueId();
+		String clientUuid = clientIdentityService != null ? clientIdentityService.getClientUniqueId() : null;
 		if (clientUuid != null && !clientUuid.isEmpty())
 		{
 			requestBuilder.addHeader("X-Client-Unique-Id", clientUuid);
@@ -1190,13 +1190,6 @@ public class PvPDataService
             if (sr != null) return sr.rank;
             return -1;
         });
-	}
-
-    // Helper for deprecated usage if any
-	public CompletableFuture<Integer> getRankIndex(String playerId, String bucket)
-	{
-        // Redirect to new logic
-        return getShardRankByName(playerId, bucket).thenApply(sr -> sr != null ? sr.rank : -1);
 	}
 
 	/**

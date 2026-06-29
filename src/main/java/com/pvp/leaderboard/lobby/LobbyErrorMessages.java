@@ -54,6 +54,8 @@ public final class LobbyErrorMessages
             + "or cancel it from the lobby.");
         m.put("INVITE_EXPIRED",
             "That invite expired before you could accept it.");
+        m.put("MATCHMAKING_SUSPENDED",
+            "That player is suspended from matchmaking right now.");
         m.put("FIGHT_SESSION_EXPIRED",
             "The 30-second confirm window expired. Send a new invite to retry.");
         m.put("SELF_INVITE",

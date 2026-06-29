@@ -1,7 +1,7 @@
 package com.pvp.leaderboard.ui;
 
 import com.pvp.leaderboard.PvPLeaderboardConstants;
-import com.pvp.leaderboard.service.CognitoAuthService;
+import com.pvp.leaderboard.service.DiscordAuthService;
 import javax.swing.*;
 import java.awt.*;
 import java.net.URLEncoder;
@@ -11,8 +11,11 @@ import net.runelite.client.util.LinkBrowser;
 public class LoginPanel extends JPanel
 {
     private static final int MAX_PLUGIN_SEARCHES_PER_MINUTE = 10;
+
+    /** Discord brand "blurple" (#5865F2) — matches flipping-copilot's button. */
+    private static final Color DISCORD_BLURPLE = new Color(88, 101, 242);
     
-    private final CognitoAuthService cognitoAuthService;
+    private final DiscordAuthService discordAuthService;
     private final Consumer<String> onPluginSearch;
     private final Runnable onLoginStateChanged;
 
@@ -26,9 +29,9 @@ public class LoginPanel extends JPanel
     // Rate limiting for plugin search (10 per minute)
     private final java.util.Deque<Long> pluginSearchTimestamps = new java.util.ArrayDeque<>();
 
-    public LoginPanel(CognitoAuthService cognitoAuthService, Consumer<String> onPluginSearch, Runnable onLoginStateChanged)
+    public LoginPanel(DiscordAuthService discordAuthService, Consumer<String> onPluginSearch, Runnable onLoginStateChanged)
     {
-        this.cognitoAuthService = cognitoAuthService;
+        this.discordAuthService = discordAuthService;
         this.onPluginSearch = onPluginSearch;
         this.onLoginStateChanged = onLoginStateChanged;
 
@@ -84,9 +87,14 @@ public class LoginPanel extends JPanel
         btnPanel.add(pluginSearchBtn);
         add(btnPanel);
 
-        loginButton = new JButton("Login to view more stats");
+        loginButton = new JButton("Login with Discord");
         loginButton.setMaximumSize(new Dimension(Integer.MAX_VALUE, 25));
         loginButton.setAlignmentX(Component.LEFT_ALIGNMENT);
+        // Discord blurple (#5865F2), matching flipping-copilot's login button.
+        loginButton.setBackground(DISCORD_BLURPLE);
+        loginButton.setForeground(Color.WHITE);
+        loginButton.setOpaque(true);
+        loginButton.setFocusPainted(false);
         loginButton.addActionListener(e -> handleLogin());
     }
 
@@ -192,7 +200,15 @@ public class LoginPanel extends JPanel
 
     private void handleLogin()
     {
-        if (loginInProgress) { return; }
+        if (loginInProgress)
+        {
+            // The button doubles as "Cancel login" while a handshake is in
+            // flight (the OAuth redirect now lands on a hosted page, so login
+            // takes a browser round-trip + polling).
+            try { discordAuthService.cancelLogin(); } catch (Exception ignore) {}
+            setLoginBusy(false);
+            return;
+        }
         if (isLoggedIn)
         {
             // Logout
@@ -202,12 +218,12 @@ public class LoginPanel extends JPanel
             return;
         }
         
-        // Use Cognito OAuth flow
+        // Use Discord OAuth flow
         try
         {
             setLoginBusy(true);
-            cognitoAuthService.login().thenAccept(success -> {
-                if (success && cognitoAuthService.isLoggedIn() && cognitoAuthService.getStoredIdToken() != null)
+            discordAuthService.login().thenAccept(success -> {
+                if (success && discordAuthService.isLoggedIn())
                 {
                     SwingUtilities.invokeLater(() -> {
                         setLoginBusy(false);
@@ -241,8 +257,9 @@ public class LoginPanel extends JPanel
         {
             if (loginButton != null)
             {
-                loginButton.setEnabled(!busy);
-                loginButton.setText(busy ? "Logging in..." : (isLoggedIn ? "Logout" : "Login to view more stats"));
+                // Stay enabled while busy so the user can cancel the handshake.
+                loginButton.setEnabled(true);
+                loginButton.setText(busy ? "Cancel login" : (isLoggedIn ? "Logout" : "Login with Discord"));
             }
             if (searchField != null) searchField.setEnabled(!busy);
         }
@@ -254,7 +271,7 @@ public class LoginPanel extends JPanel
         this.isLoggedIn = loggedIn;
         if (loginButton != null)
         {
-            loginButton.setText(loggedIn ? "Logout" : "Login to view more stats");
+            loginButton.setText(loggedIn ? "Logout" : "Login with Discord");
         }
     }
     
@@ -274,8 +291,8 @@ public class LoginPanel extends JPanel
     }
 
     private void clearTokens() {
-        cognitoAuthService.logout();
+        discordAuthService.logout();
         isLoggedIn = false;
-        if (loginButton != null) loginButton.setText("Login to view stats in runelite");
+        if (loginButton != null) loginButton.setText("Login with Discord");
     }
 }

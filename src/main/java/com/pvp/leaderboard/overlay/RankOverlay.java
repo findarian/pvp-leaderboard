@@ -1,5 +1,6 @@
 package com.pvp.leaderboard.overlay;
 
+import com.pvp.leaderboard.cache.MembershipCache;
 import com.pvp.leaderboard.cache.WhitelistPlayerCache;
 import com.pvp.leaderboard.config.PvPLeaderboardConfig;
 import com.pvp.leaderboard.game.PlayerRankEvent;
@@ -28,6 +29,11 @@ public class RankOverlay extends Overlay
     private final PvPLeaderboardConfig config;
     private final PvPDataService pvpDataService;
     private final WhitelistPlayerCache whitelistPlayerCache;
+    /** Opt-in membership set from the snapshot/delta feed (names only). The
+     *  overlay gates rendering on this; rank itself comes from the name-keyed
+     *  shards (see {@link #fetchSceneShardRankIfNeeded}). Replaces the
+     *  whitelist.json membership blob (see PLAN_PRESENCE_FRESHNESS.md). */
+    private final MembershipCache membershipCache;
 
     // Displayed ranks cache (for self)
     private final ConcurrentHashMap<String, String> displayedRanks = new ConcurrentHashMap<>();
@@ -87,12 +93,13 @@ public class RankOverlay extends Overlay
     
     @Inject
     public RankOverlay(Client client, PvPLeaderboardConfig config, PvPDataService pvpDataService, 
-                       WhitelistPlayerCache whitelistPlayerCache)
+                       WhitelistPlayerCache whitelistPlayerCache, MembershipCache membershipCache)
     {
         this.client = client;
         this.config = config;
         this.pvpDataService = pvpDataService;
         this.whitelistPlayerCache = whitelistPlayerCache;
+        this.membershipCache = membershipCache;
         // Always use DYNAMIC for snap-to-player rendering
         // Use UNDER_WIDGETS layer (same as player indicators) so it appears above prayers
         // Use PRIORITY_LOW so it renders behind player indicator names
@@ -518,8 +525,10 @@ public class RankOverlay extends Overlay
         // Render MMR change notification
         renderMmrChangeNotification(graphics, localPlayer);
         
-        // Render whitelist player ranks (if enabled and has data)
-        if (config.enableWhitelistRanks() && whitelistPlayerCache.size() > 0)
+        // Render opted-in player ranks (if enabled and the membership feed
+        // has loaded). Membership now comes from the snapshot/delta feed
+        // (MembershipCache); rank is resolved per name via shards below.
+        if (config.enableWhitelistRanks() && membershipCache.size() > 0)
         {
             renderWhitelistPlayers(graphics, localPlayer, currentBucket, heightOffset);
         }
@@ -559,8 +568,8 @@ public class RankOverlay extends Overlay
             String playerName = player.getName();
             if (playerName == null || playerName.equals(localName)) continue;
             
-            // Only show ranks for whitelisted players (opt-in system)
-            if (!whitelistPlayerCache.isWhitelisted(playerName)) continue;
+            // Only show ranks for opted-in players (membership feed).
+            if (!membershipCache.isMember(playerName)) continue;
             
             String displayRank = null;
             String nameKey = NameUtils.canonicalKey(playerName);

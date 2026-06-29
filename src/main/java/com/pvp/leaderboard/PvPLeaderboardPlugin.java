@@ -8,7 +8,8 @@ import com.pvp.leaderboard.overlay.LobbyInviteNotificationOverlay;
 import com.pvp.leaderboard.overlay.MatchFoundNotificationOverlay;
 import com.pvp.leaderboard.overlay.RankOverlay;
 import com.pvp.leaderboard.service.ClientIdentityService;
-import com.pvp.leaderboard.service.CognitoAuthService;
+import com.pvp.leaderboard.service.DiscordAuthService;
+import com.pvp.leaderboard.service.MembershipService;
 import com.pvp.leaderboard.service.PvPDataService;
 import com.pvp.leaderboard.service.WhitelistService;
 import com.pvp.leaderboard.ui.DashboardPanel;
@@ -69,7 +70,7 @@ public class PvPLeaderboardPlugin extends Plugin
 	private PvPDataService pvpDataService;
 
 	@Inject
-	private CognitoAuthService cognitoAuthService;
+	private DiscordAuthService discordAuthService;
 
 	@Inject
 	private ClientIdentityService clientIdentityService;
@@ -82,6 +83,9 @@ public class PvPLeaderboardPlugin extends Plugin
 
 	@Inject
 	private WhitelistService whitelistService;
+
+	@Inject
+	private MembershipService membershipService;
 
 	@Inject
 	private com.pvp.leaderboard.service.socket.WebSocketManager webSocketManager;
@@ -172,7 +176,7 @@ public class PvPLeaderboardPlugin extends Plugin
 		// suppliers resolve at refresh time, not now, so it's fine that
 		// the local player isn't loaded yet.
 		lobbyJoinGate.configure(this::getLocalPlayerName, this::getClientUniqueId);
-		dashboardPanel = new DashboardPanel(this, pvpDataService, cognitoAuthService,
+		dashboardPanel = new DashboardPanel(this, pvpDataService, discordAuthService,
 			webSocketLobbyService, lobbyJoinGate, lobbyPreferences);
 
 		navButton = NavigationButton.builder()
@@ -260,6 +264,10 @@ public class PvPLeaderboardPlugin extends Plugin
 				log.debug("[Plugin] Already logged in on startUp, resuming heartbeat for: {}", self);
 				whitelistService.onLogin(self);
 			}
+			// Resume the rank-overlay membership feed (names-only snapshot +
+			// delta). Self-gates on enableWhitelistRanks(); independent of
+			// showRankToOthers (that only governs whether OTHERS see us).
+			membershipService.onLogin();
 			// Resume the socket too — the player is past $connect's
 			// prerequisites (UUID stamped, MMR snapshot taken) so the
 			// server already has its trusted dict for SMURF_GUARD.
@@ -298,6 +306,7 @@ public class PvPLeaderboardPlugin extends Plugin
 		}
 		clientToolbar.removeNavigation(navButton);
 		whitelistService.onLogout();
+		membershipService.onLogout();
 		// Send `lobby/leave` BEFORE closing the socket so the server can
 		// remove our OSRS-LobbyMembers row + broadcast a fresh roster
 		// to peers. AWS API Gateway $disconnect doesn't currently
@@ -343,6 +352,30 @@ public class PvPLeaderboardPlugin extends Plugin
 				if (rankOverlay != null)
 				{
 					rankOverlay.scheduleSelfRankRefresh(0L);
+				}
+			}
+
+			// "Show your rank to others" toggled: the opt-out flag is
+			// captured server-side at $connect (like is_mod), so reconnect
+			// the socket to re-send the show_rank flag promptly instead of
+			// waiting for the next natural reconnect.
+			if ("showRankToOthers".equals(event.getKey()))
+			{
+				webSocketManager.reconnectForConfigChange();
+			}
+
+			// "Display other players ranks" toggled: start/stop the
+			// membership feed sync (it self-gates, but stop releases the
+			// 10-min poll immediately when disabled).
+			if ("enableWhitelistRanks".equals(event.getKey()))
+			{
+				if (config.enableWhitelistRanks())
+				{
+					membershipService.onLogin();
+				}
+				else
+				{
+					membershipService.onLogout();
 				}
 			}
 		}
@@ -423,6 +456,7 @@ public class PvPLeaderboardPlugin extends Plugin
 				if (dashboardPanel != null) dashboardPanel.refreshLobbyLoginView();
 				// Stop heartbeats
 				whitelistService.onLogout();
+				membershipService.onLogout();
 				pendingHeartbeatStart = false;
 				// Send `lobby/leave` BEFORE the socket close so the
 				// server removes our OSRS-LobbyMembers row + broadcasts
@@ -532,6 +566,10 @@ public class PvPLeaderboardPlugin extends Plugin
 								whitelistService.onLogin(self);
 								pendingHeartbeatStart = false;
 							}
+
+							// Start the rank-overlay membership feed (idempotent;
+							// self-gates on enableWhitelistRanks()).
+							membershipService.onLogin();
 
 							// Kick the anti-smurf gate now that the local
 							// player name resolves. We delay this 10 ticks

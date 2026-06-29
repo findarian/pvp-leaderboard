@@ -34,8 +34,8 @@ public class PvPDataServiceTest {
                 .addInterceptor(testInterceptor)
                 .build();
         config = new MockConfig();
-        // authService and clientIdentityService are unused in tests, passing null
-        dataService = new PvPDataService(okHttpClient, gson, null, config, null);
+        // clientIdentityService is unused in tests, passing null
+        dataService = new PvPDataService(okHttpClient, gson, config, null);
     }
 
     @Test
@@ -72,20 +72,23 @@ public class PvPDataServiceTest {
 
     @Test
     public void testGetPlayerTier_Success() throws ExecutionException, InterruptedException, IOException {
-        // Prepare fake response
-        JsonObject fakeTierJson = new JsonObject();
-        fakeTierJson.addProperty("player_id", FAKE_PLAYER_ID);
-        fakeTierJson.addProperty("tier", "Diamond I");
-        fakeTierJson.addProperty("bucket", "nh");
+        // getPlayerTier delegates to getTierFromProfile, which reads the
+        // /user contract: "rank" (tier name) + "division" (1-3), combined
+        // as e.g. "Dragon 3". There is NO flat "tier" field on /user — that
+        // only exists in the S3 shard payloads (see extractTierFromUserResponse).
+        JsonObject fakeUserJson = new JsonObject();
+        fakeUserJson.addProperty("player_id", FAKE_PLAYER_ID);
+        fakeUserJson.addProperty("rank", "Dragon");
+        fakeUserJson.addProperty("division", 3);
 
-        testInterceptor.setNextResponse(200, gson.toJson(fakeTierJson));
+        testInterceptor.setNextResponse(200, gson.toJson(fakeUserJson));
 
         // Execute
         CompletableFuture<String> future = dataService.getPlayerTier(FAKE_PLAYER_ID, "nh");
         String tier = future.get();
 
-        // Verify
-        assertEquals("Diamond I", tier);
+        // Verify rank + division are combined per the /user contract.
+        assertEquals("Dragon 3", tier);
     }
 
     @Test
@@ -98,20 +101,6 @@ public class PvPDataServiceTest {
 
         // Verify
         assertNull(tier);
-    }
-
-    @Test
-    public void testGetRankIndex_Success() throws ExecutionException, InterruptedException, IOException {
-        JsonObject fakeRankJson = new JsonObject();
-        fakeRankJson.addProperty("rank", 42);
-
-        testInterceptor.setNextResponse(200, gson.toJson(fakeRankJson));
-
-        // Execute
-        CompletableFuture<Integer> future = dataService.getRankIndex(FAKE_PLAYER_ID, "nh");
-        Integer rank = future.get();
-
-        assertEquals(42, rank.intValue());
     }
 
     @Test

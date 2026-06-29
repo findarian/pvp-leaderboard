@@ -36,7 +36,7 @@ import java.util.Set;
 public final class SocketProtocol
 {
     /**
-     * The 9 lobby cmds the plugin is allowed to send. Anything outside
+     * The 10 lobby cmds the plugin is allowed to send. Anything outside
      * this set throws from {@link #encode(Gson, String, JsonObject)}.
      *
      * <p>Tournament cmds ({@code tournament/list},
@@ -62,6 +62,11 @@ public final class SocketProtocol
         s.add("lobby/confirm");
         s.add("lobby/block");
         s.add("lobby/unblock");
+        // Rank-slider live-delta cmd (WebSocketLobbyService.sendRangeUpdateNow).
+        // Added 2026-06-27: it was being dropped here (and in the backend
+        // ALLOWED_COMMANDS env), so live range changes never reached peers
+        // until a rejoin. Mirrors backend/core/socket_protocol.py default.
+        s.add("lobby/update_range");
         ALLOWED_OUTGOING = Collections.unmodifiableSet(s);
     }
 

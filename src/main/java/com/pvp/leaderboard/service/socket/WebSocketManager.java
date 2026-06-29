@@ -109,6 +109,7 @@ public final class WebSocketManager
     private final SocketEventBus eventBus;
     private final ScheduledExecutorService scheduler;
     private final Gson gson;
+    private final com.pvp.leaderboard.config.PvPLeaderboardConfig config;
 
     /** Lazily-built pinging client; reuses the shared client's connection
      *  pool / dispatcher via {@code newBuilder()} so we don't double up
@@ -167,12 +168,14 @@ public final class WebSocketManager
     public WebSocketManager(OkHttpClient sharedHttpClient,
                             SocketEventBus eventBus,
                             ScheduledExecutorService scheduler,
-                            Gson gson)
+                            Gson gson,
+                            com.pvp.leaderboard.config.PvPLeaderboardConfig config)
     {
         this.sharedHttpClient = sharedHttpClient;
         this.eventBus = eventBus;
         this.scheduler = scheduler;
         this.gson = gson;
+        this.config = config;
     }
 
     /**
@@ -273,6 +276,31 @@ public final class WebSocketManager
         activeUuid = uuid;
         activeName = normName;
         cancelPendingReconnect();
+        openSocketLocked();
+    }
+
+    /**
+     * Tears down and re-opens the socket with the SAME {@code (uuid, name)}
+     * so $connect-captured query flags (currently {@code show_rank}) are
+     * re-sent. Used when the "Show your rank to others" config toggles — the
+     * opt-out is snapshotted server-side at $connect (like {@code is_mod}), so
+     * a live reconnect is the way to apply it promptly instead of waiting for
+     * the next natural reconnect. No-op when not currently connected (the next
+     * {@link #connect} will pick up the flag anyway).
+     */
+    public synchronized void reconnectForConfigChange()
+    {
+        if (activeUuid == null || activeSocket == null)
+        {
+            return;
+        }
+        intentionalDisconnect = true;
+        try { activeSocket.close(CLOSE_NORMAL, "config_change"); }
+        catch (Exception ignored) { /* best-effort */ }
+        activeSocket = null;
+        intentionalDisconnect = false;
+        cancelPendingReconnect();
+        currentBackoffMs = BACKOFF_INITIAL_MS;
         openSocketLocked();
     }
 
@@ -428,6 +456,16 @@ public final class WebSocketManager
             // urlencode pass is sufficient — no double-encode risk.
             url.append("&name=").append(java.net.URLEncoder.encode(
                 activeName, java.nio.charset.StandardCharsets.UTF_8));
+        }
+        // Rank-overlay opt-out (p15-membership-feed): when the user turns
+        // "Show your rank to others" OFF we append show_rank=0 so the backend
+        // marks this profile opted-out in OSRS-PluginUsers (drops it from the
+        // membership feed). Default (opted-in) omits the param — the server
+        // treats absence as opted-in. Captured at $connect like is_mod, so a
+        // mid-session toggle applies on reconnect (see reconnectForConfigChange).
+        if (!config.showRankToOthers())
+        {
+            url.append("&show_rank=0");
         }
         Request req = new Request.Builder()
             .url(url.toString())

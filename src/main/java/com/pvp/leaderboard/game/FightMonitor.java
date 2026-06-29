@@ -5,7 +5,6 @@ import com.pvp.leaderboard.config.PvPLeaderboardConfig;
 import com.pvp.leaderboard.lobby.UserProfileLobbyJoinGate;
 import com.pvp.leaderboard.overlay.RankOverlay;
 import com.pvp.leaderboard.service.ClientIdentityService;
-import com.pvp.leaderboard.service.CognitoAuthService;
 import com.pvp.leaderboard.service.MatchResult;
 import com.pvp.leaderboard.service.MatchResultService;
 import com.pvp.leaderboard.service.PvPDataService;
@@ -39,7 +38,6 @@ public class FightMonitor
     private final ScheduledExecutorService scheduler;
     private final MatchResultService matchResultService;
     private final PvPDataService pvpDataService;
-    private final CognitoAuthService cognitoAuthService;
     private final ClientIdentityService clientIdentityService;
     private final UserProfileLobbyJoinGate lobbyJoinGate;
 
@@ -114,7 +112,6 @@ public class FightMonitor
         ScheduledExecutorService scheduler,
         MatchResultService matchResultService,
         PvPDataService pvpDataService,
-        CognitoAuthService cognitoAuthService,
         ClientIdentityService clientIdentityService,
         UserProfileLobbyJoinGate lobbyJoinGate)
     {
@@ -124,7 +121,6 @@ public class FightMonitor
         this.scheduler = scheduler;
         this.matchResultService = matchResultService;
         this.pvpDataService = pvpDataService;
-        this.cognitoAuthService = cognitoAuthService;
         this.clientIdentityService = clientIdentityService;
         this.lobbyJoinGate = lobbyJoinGate;
     }
@@ -730,7 +726,6 @@ public class FightMonitor
         final int world = client.getWorld();
         final long now = System.currentTimeMillis() / 1000;
         final String selfName = getLocalPlayerName();
-        final String idTokenSafe = cognitoAuthService.getStoredIdToken();
 
         // Ensure valid timestamps - never send 0
         // If start wasn't captured, set it to 60 seconds before end
@@ -829,7 +824,7 @@ public class FightMonitor
         // Async Submission — chain MMR fetch off the 202 response
         final String finalApiRefreshBucket = apiRefreshBucket;
         final boolean finalShowBucketInMmr = showBucketInMmr;
-        submitMatchAndFetchMmr(result, finalEndTs, selfName, resolvedOpponent, world, finalStartTs, startSb, currentSpellbook, wasMulti, idTokenSafe, dmgOut, finalApiRefreshBucket, finalShowBucketInMmr);
+        submitMatchAndFetchMmr(result, finalEndTs, selfName, resolvedOpponent, world, finalStartTs, startSb, currentSpellbook, wasMulti, dmgOut, finalApiRefreshBucket, finalShowBucketInMmr);
 
         // Tier refreshes for overlay (don't depend on match being processed)
         scheduleTierRefreshes(resolvedOpponent, apiRefreshBucket);
@@ -840,7 +835,7 @@ public class FightMonitor
 
     private CompletableFuture<Boolean> submitMatchResult(String result, long fightEndTime, String playerId, String opponentId, int world,
                                    long fightStartTs, int fightStartSpellbookLocal, int fightEndSpellbookLocal,
-                                   boolean wasInMultiLocal, String idTokenLocal, long damageToOpponentLocal)
+                                   boolean wasInMultiLocal, long damageToOpponentLocal)
     {
         MatchResult match = MatchResult.builder()
                 .playerId(playerId)
@@ -852,13 +847,12 @@ public class FightMonitor
                 .fightStartSpellbook(getSpellbookName(fightStartSpellbookLocal))
                 .fightEndSpellbook(getSpellbookName(fightEndSpellbookLocal))
                 .wasInMulti(wasInMultiLocal)
-                .idToken(idTokenLocal)
                 .damageToOpponent(damageToOpponentLocal)
                 .clientUniqueId(clientIdentityService.getClientUniqueId())
                 .build();
 
-        log.debug("[MatchSubmit] Submitting: player={} opponent={} result={} world={} startTs={} endTs={} dmgOut={} multi={} hasToken={}",
-                playerId, opponentId, result, world, fightStartTs, fightEndTime, damageToOpponentLocal, wasInMultiLocal, (idTokenLocal != null && !idTokenLocal.isEmpty()));
+        log.debug("[MatchSubmit] Submitting: player={} opponent={} result={} world={} startTs={} endTs={} dmgOut={} multi={}",
+                playerId, opponentId, result, world, fightStartTs, fightEndTime, damageToOpponentLocal, wasInMultiLocal);
 
         return matchResultService.submitMatchResult(match).thenApply(success -> {
             if (success) {
@@ -877,12 +871,12 @@ public class FightMonitor
      */
     private void submitMatchAndFetchMmr(String result, long endTs, String selfName, String opponent, int world,
                                          long startTs, int startSb, int endSb, boolean wasMulti,
-                                         String idToken, long dmgOut, String displayBucket, boolean showBucketInMmr) {
+                                         long dmgOut, String displayBucket, boolean showBucketInMmr) {
         log.debug("[PostFight] Submitting match and chaining MMR fetch for opponent={}", opponent);
 
         CompletableFuture<Boolean> submissionFuture = CompletableFuture.supplyAsync(() -> {
             try {
-                return submitMatchResult(result, endTs, selfName, opponent, world, startTs, startSb, endSb, wasMulti, idToken, dmgOut);
+                return submitMatchResult(result, endTs, selfName, opponent, world, startTs, startSb, endSb, wasMulti, dmgOut);
             } catch (Exception e) {
                 log.debug("[MatchSubmit] EXCEPTION in async submission: {}", e.getMessage(), e);
                 return CompletableFuture.completedFuture(false);

@@ -5,7 +5,7 @@ import com.google.gson.JsonObject;
 import com.pvp.leaderboard.PvPLeaderboardConstants;
 import com.pvp.leaderboard.PvPLeaderboardPlugin;
 import com.pvp.leaderboard.service.BlockedPlayersService;
-import com.pvp.leaderboard.service.CognitoAuthService;
+import com.pvp.leaderboard.service.DiscordAuthService;
 import com.pvp.leaderboard.service.PvPDataService;
 import com.pvp.leaderboard.service.RankInfo;
 import com.pvp.leaderboard.service.ShardRank;
@@ -21,7 +21,7 @@ public class DashboardPanel extends PluginPanel
 {
     private final PvPLeaderboardPlugin plugin;
     private final PvPDataService pvpDataService;
-    private final CognitoAuthService cognitoAuthService;
+    private final DiscordAuthService discordAuthService;
 
     // Sub-panels
     private LoginPanel loginPanel;
@@ -107,10 +107,10 @@ public class DashboardPanel extends PluginPanel
      *  so the panel still builds (server-side {@code SMURF_GUARD v2}
      *  remains the authoritative check). */
     public DashboardPanel(PvPLeaderboardPlugin plugin, PvPDataService pvpDataService,
-                          CognitoAuthService cognitoAuthService,
+                          DiscordAuthService discordAuthService,
                           com.pvp.leaderboard.lobby.LobbyService lobbyService)
     {
-        this(plugin, pvpDataService, cognitoAuthService, lobbyService,
+        this(plugin, pvpDataService, discordAuthService, lobbyService,
             new com.pvp.leaderboard.lobby.NoOpLobbyJoinGate(),
             com.pvp.leaderboard.lobby.LobbyPreferences.inMemory());
     }
@@ -119,23 +119,23 @@ public class DashboardPanel extends PluginPanel
      *  wiring; substitutes an in-memory {@link com.pvp.leaderboard.lobby.LobbyPreferences}
      *  so the panel still builds without a {@code ConfigManager}. */
     public DashboardPanel(PvPLeaderboardPlugin plugin, PvPDataService pvpDataService,
-                          CognitoAuthService cognitoAuthService,
+                          DiscordAuthService discordAuthService,
                           com.pvp.leaderboard.lobby.LobbyService lobbyService,
                           com.pvp.leaderboard.lobby.LobbyJoinGate joinGate)
     {
-        this(plugin, pvpDataService, cognitoAuthService, lobbyService, joinGate,
+        this(plugin, pvpDataService, discordAuthService, lobbyService, joinGate,
             com.pvp.leaderboard.lobby.LobbyPreferences.inMemory());
     }
 
     public DashboardPanel(PvPLeaderboardPlugin plugin, PvPDataService pvpDataService,
-                          CognitoAuthService cognitoAuthService,
+                          DiscordAuthService discordAuthService,
                           com.pvp.leaderboard.lobby.LobbyService lobbyService,
                           com.pvp.leaderboard.lobby.LobbyJoinGate joinGate,
                           com.pvp.leaderboard.lobby.LobbyPreferences lobbyPreferences)
     {
         this.plugin = plugin;
         this.pvpDataService = pvpDataService;
-        this.cognitoAuthService = cognitoAuthService;
+        this.discordAuthService = discordAuthService;
         this.joinGate = joinGate != null
             ? joinGate
             : new com.pvp.leaderboard.lobby.NoOpLobbyJoinGate();
@@ -173,6 +173,12 @@ public class DashboardPanel extends PluginPanel
         topPlayersToggle.setMaximumSize(new Dimension(Integer.MAX_VALUE, 25));
         topPlayersToggle.setHorizontalAlignment(SwingConstants.CENTER);
 
+        // Login panel built up front too: the community box hoists its
+        // "Login with Discord" button (getLoginButton()) so login is reachable
+        // from any tab, while the search field stays in the Player Lookup card.
+        loginPanel = new LoginPanel(discordAuthService, this::loadMatchHistory, this::onLoginStateChanged);
+        loginPanel.setAlignmentX(LEFT_ALIGNMENT);
+
         // 1. Community box — always pinned to the very top, never inside a tab.
         JPanel communityBox = createCommunityBox();
         communityBox.setAlignmentX(LEFT_ALIGNMENT);
@@ -198,17 +204,10 @@ public class DashboardPanel extends PluginPanel
         statsContainer.setLayout(new BoxLayout(statsContainer, BoxLayout.Y_AXIS));
         statsContainer.setAlignmentX(LEFT_ALIGNMENT);
 
-        // 3. Search box
-        loginPanel = new LoginPanel(cognitoAuthService, this::loadMatchHistory, this::onLoginStateChanged);
-        loginPanel.setAlignmentX(LEFT_ALIGNMENT);
+        // 3. Search box (the loginPanel was built up front). Its
+        // "Login with Discord" button is NOT added here — it lives in the
+        // community box so login is reachable from any tab, not just Lookup.
         statsContainer.add(loginPanel);
-        statsContainer.add(Box.createVerticalStrut(4));
-
-        // 4. Login button (separate from search box)
-        JButton loginBtn = loginPanel.getLoginButton();
-        loginBtn.setAlignmentX(LEFT_ALIGNMENT);
-        loginBtn.setMaximumSize(new Dimension(Integer.MAX_VALUE, 25));
-        statsContainer.add(loginBtn);
         statsContainer.add(Box.createVerticalStrut(16));
 
         // 5. Block Player toggle — lives directly above the player name label
@@ -650,9 +649,10 @@ public class DashboardPanel extends PluginPanel
         Font titleFont = box.getFont().deriveFont(Font.BOLD, NAV_FONT_PT);
         titled.setTitleFont(titleFont);
         box.setBorder(titled);
-        // Sized for: title (~28px) + 3 button rows × COMMUNITY_BTN_H (38) + 3
-        // small inter-row gaps + bottom slack.
-        int boxH = 28 + 3 * COMMUNITY_BTN_H + 12;
+        // Sized for: title (~28px) + 4 button rows × COMMUNITY_BTN_H + small
+        // inter-row gaps + bottom slack. The 4th row is "Login with Discord",
+        // hoisted out of the Player Lookup card so it's reachable from any tab.
+        int boxH = 28 + 4 * COMMUNITY_BTN_H + 12;
         box.setMaximumSize(new Dimension(220, boxH));
         box.setPreferredSize(new Dimension(220, boxH));
 
@@ -701,6 +701,22 @@ public class DashboardPanel extends PluginPanel
         row3.add(rankTierToggle);
         box.add(row3);
 
+        // "Login with Discord" lives here (below "What are the ranks") so login
+        // is reachable from any tab — users no longer have to open Player Lookup
+        // to log in. The button instance is owned by loginPanel; we only hoist
+        // it here for placement (the search field stays in the Lookup card).
+        // Styled to match the sibling community toggles.
+        JPanel row4 = new JPanel(new GridLayout(1, 1, 0, 0));
+        row4.setMaximumSize(new Dimension(Integer.MAX_VALUE, COMMUNITY_BTN_H));
+        JButton loginBtn = loginPanel.getLoginButton();
+        loginBtn.setFont(loginBtn.getFont().deriveFont(Font.BOLD, NAV_FONT_PT));
+        loginBtn.setMaximumSize(new Dimension(Integer.MAX_VALUE, COMMUNITY_BTN_H));
+        loginBtn.setPreferredSize(null);
+        loginBtn.setFocusPainted(false);
+        loginBtn.setHorizontalAlignment(SwingConstants.CENTER);
+        row4.add(loginBtn);
+        box.add(row4);
+
         return box;
     }
 
@@ -732,7 +748,7 @@ public class DashboardPanel extends PluginPanel
     }
     
     private void onLoginStateChanged() {
-        boolean loggedIn = cognitoAuthService.isLoggedIn();
+        boolean loggedIn = discordAuthService.isLoggedIn();
         extraStatsPanel.setVisible(loggedIn);
 
         // Site auth gates extraStatsPanel + match-history reload below.

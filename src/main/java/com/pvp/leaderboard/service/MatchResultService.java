@@ -89,39 +89,12 @@ public class MatchResultService
             
             log.debug("[MatchAPI] Request body: {}", bodyJson);
 
-            if (match.getIdToken() != null && !match.getIdToken().isEmpty())
-            {
-                log.debug("[MatchAPI] Using authenticated path (has idToken)");
-                submitAuthenticatedFightAsync(bodyJson, match.getIdToken(), match.getClientUniqueId()).whenComplete((ok, ex) -> {
-                    if (ex != null)
-                    {
-                        log.debug("[MatchAPI] Authenticated path exception: {}, falling back to unauth", ex.getMessage());
-                        submitUnauthenticatedFightAsync(bodyJson, match.getClientUniqueId()).whenComplete((ok2, ex2) -> {
-                            if (ex2 != null) overall.complete(false); else overall.complete(ok2);
-                        });
-                        return;
-                    }
-                    if (Boolean.TRUE.equals(ok))
-                    {
-                        log.debug("[MatchAPI] Authenticated path SUCCESS");
-                        overall.complete(true);
-                    }
-                    else
-                    {
-                        log.debug("[MatchAPI] Authenticated path failed, falling back to unauth");
-                        submitUnauthenticatedFightAsync(bodyJson, match.getClientUniqueId()).whenComplete((ok2, ex2) -> {
-                            if (ex2 != null) overall.complete(false); else overall.complete(ok2);
-                        });
-                    }
-                });
-            }
-            else
-            {
-                log.debug("[MatchAPI] Using unauthenticated path (no idToken)");
-                submitUnauthenticatedFightAsync(bodyJson, match.getClientUniqueId()).whenComplete((ok, ex) -> {
-                    if (ex != null) overall.complete(false); else overall.complete(ok);
-                });
-            }
+            // HMAC-signed submission is the sole path. The plugin holds no
+            // user token (Discord login does not mint one for the client),
+            // so every match is authenticated by the shared client secret.
+            submitSignedFightAsync(bodyJson, match.getClientUniqueId()).whenComplete((ok, ex) -> {
+                if (ex != null) overall.complete(false); else overall.complete(ok);
+            });
         }
         catch (Exception e)
         {
@@ -131,59 +104,7 @@ public class MatchResultService
         return overall;
     }
 
-    private CompletableFuture<Boolean> submitAuthenticatedFightAsync(String body, String idToken, String clientUniqueId)
-    {
-        CompletableFuture<Boolean> future = new CompletableFuture<>();
-
-        Request request = new Request.Builder()
-            .url(API_URL)
-            .post(RequestBody.create(JSON, body))
-            .addHeader("Authorization", "Bearer " + idToken)
-            .addHeader("X-Client-Unique-Id", clientUniqueId)
-            .build();
-
-        log.debug("[MatchAPI] Auth request to: {}", API_URL);
-        final long reqStart = System.nanoTime();
-
-        httpClient.newCall(request).enqueue(new Callback()
-        {
-            @Override
-            public void onFailure(Call call, IOException e)
-            {
-                long ms = (System.nanoTime() - reqStart) / 1_000_000;
-                log.debug("[MatchAPI] Auth request NETWORK FAILURE after {}ms: {}", ms, e.getMessage());
-                future.complete(false);
-            }
-
-            @Override
-            public void onResponse(Call call, Response response) throws IOException
-            {
-                long ms = (System.nanoTime() - reqStart) / 1_000_000;
-                try (Response res = response)
-                {
-                    int code = res.code();
-                    String reqId = null; try { reqId = res.header("x-amzn-RequestId"); } catch (Exception ignore) {}
-                    
-                    if (code >= 200 && code < 300)
-                    {
-                        log.debug("[MatchAPI] Auth response SUCCESS in {}ms: code={} requestId={}", ms, code, reqId);
-                        future.complete(true);
-                    }
-                    else
-                    {
-                        String errBody = null;
-                        try { okhttp3.ResponseBody err = res.body(); errBody = err != null ? err.string() : null; } catch (Exception ignore) {}
-                        log.debug("[MatchAPI] Auth response FAILED in {}ms: code={} requestId={} body={}", ms, code, reqId, errBody);
-                        future.complete(false);
-                    }
-                }
-            }
-        });
-
-        return future;
-    }
-
-    private CompletableFuture<Boolean> submitUnauthenticatedFightAsync(String body, String clientUniqueId)
+    private CompletableFuture<Boolean> submitSignedFightAsync(String body, String clientUniqueId)
     {
         CompletableFuture<Boolean> future = new CompletableFuture<>();
         long timestamp = System.currentTimeMillis() / 1000;

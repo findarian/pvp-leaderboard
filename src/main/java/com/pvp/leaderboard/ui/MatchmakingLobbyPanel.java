@@ -2841,6 +2841,36 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         return "Fight";
     }
 
+    /** Source-of-truth for the whole-row muted ("greyed") treatment, kept
+     *  pure so it's unit-tested without standing up the Swing panel
+     *  ({@link MatchmakingLobbyPanelSuspendStampTest}). A row reads as
+     *  inactive when ANY of these hold:
+     *  <ul>
+     *    <li>{@code blocked} — the local user blocked this player_id.</li>
+     *    <li>{@code outOfTheirRange} — the viewer's rank sits outside the
+     *        member's accept-invite slider band.</li>
+     *    <li>{@code suspended} — operator matchmaking-suspend stamp
+     *        ({@code is_suspended} from {@code lobby/roster}); the server
+     *        rejects invite/accept with {@code MATCHMAKING_SUSPENDED}.</li>
+     *  </ul>
+     *  The three source flags stay separate for chip text + click
+     *  semantics; this union only drives the muted body palette. */
+    static boolean rowGreyed(boolean blocked, boolean outOfTheirRange, boolean suspended)
+    {
+        return blocked || outOfTheirRange || suspended;
+    }
+
+    /** Source-of-truth for whether the row's [Fight] chip is a greyed
+     *  no-op. Disabled when the row is {@link #rowGreyed greyed} for any
+     *  reason OR when the member's advertised style/build doesn't overlap
+     *  the viewer's gate picks ({@code !fightEnabled}). Pure so it's unit
+     *  tested without Swing ({@link MatchmakingLobbyPanelSuspendStampTest}). */
+    static boolean fightChipDisabled(boolean blocked, boolean outOfTheirRange,
+                                     boolean suspended, boolean fightEnabled)
+    {
+        return rowGreyed(blocked, outOfTheirRange, suspended) || !fightEnabled;
+    }
+
     /** Composes the synthetic {@link LobbyMember} backing the
      *  self-preview row. Lifted out of {@link #renderSelfPreview} so
      *  the [MOD] chip wire-through can be unit-tested without
@@ -4466,11 +4496,19 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
          *  in chip text + tooltip + click handler; both flags fold
          *  into {@link #greyed} for the body greying. */
         private final boolean outOfTheirRange;
+        /** Operator matchmaking-suspend stamp ({@link LobbyMember#isSuspended},
+         *  from {@code lobby/roster}'s {@code is_suspended}). When true the
+         *  member stays visible but their [Fight] is greyed for every viewer
+         *  (the server rejects invite/accept with {@code MATCHMAKING_SUSPENDED}).
+         *  Folds into {@link #greyed} like the other two flags but keeps its
+         *  own chip tooltip. */
+        private final boolean suspended;
         /** Unified "render this row as muted / inactive" flag — the union
-         *  of {@link #blocked} and {@link #outOfTheirRange}. Drives the
+         *  of {@link #blocked}, {@link #outOfTheirRange}, and
+         *  {@link #suspended} (see {@link #rowGreyed}). Drives the
          *  name colour, rank-chip hue, and every region/style/build
          *  chip's active/inactive palette so the whole row reads as
-         *  inactive when either condition holds. The two source flags
+         *  inactive when any condition holds. The source flags
          *  stay separate for chip text + click semantics. */
         private final boolean greyed;
         /** Re-queried at construction — false when style/build
@@ -4521,7 +4559,8 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
             this.onCancelInvite = onCancelInvite;
             this.blocked = isBlocked != null && isBlocked.test(p);
             this.outOfTheirRange = isOutOfTheirRange != null && isOutOfTheirRange.test(p);
-            this.greyed = this.blocked || this.outOfTheirRange;
+            this.suspended = p != null && p.isSuspended;
+            this.greyed = rowGreyed(this.blocked, this.outOfTheirRange, this.suspended);
             this.fightEnabled = fightEnabled == null || fightEnabled.test(p);
             this.selfPreview = selfPreview;
             setLayout(new BorderLayout());
@@ -4671,6 +4710,18 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
                 chip.setToolTipText(p.name + " only accepts invites within their own rank range — your rank is outside it");
                 return chip;
             }
+            if (suspended)
+            {
+                // Operator matchmaking-suspend: the server rejects any
+                // invite/accept with MATCHMAKING_SUSPENDED, so the chip
+                // renders greyed and is a no-op for every viewer. Body
+                // greying is handled via the {@link #greyed} flag.
+                JLabel chip = makeActionChip(label, BLOCKED_FG, BLOCKED_BORDER, () -> {});
+                chip.setName(ROW_ACTION_CHIP_NAME);
+                chip.setCursor(Cursor.getDefaultCursor());
+                chip.setToolTipText(p.name + " is temporarily suspended from matchmaking");
+                return chip;
+            }
             if (!fightEnabled)
             {
                 JLabel chip = makeActionChip(label, BLOCKED_FG, BLOCKED_BORDER, () -> {});
@@ -4793,6 +4844,7 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
             String nameTooltip;
             if (blocked) nameTooltip = displayName + " (blocked — click to Unblock from Player Lookup)";
             else if (outOfTheirRange) nameTooltip = displayName + " (your rank is outside their accept-invite range)";
+            else if (suspended) nameTooltip = displayName + " (temporarily suspended from matchmaking)";
             else nameTooltip = displayName;
             name.setToolTipText(nameTooltip);
 

@@ -50,6 +50,13 @@ public final class LobbyMember
     public final int peakRankIdx;
     public final String region;
     public final boolean isMod;
+    /** Operator matchmaking-suspend stamp from {@code lobby/roster}
+     *  ({@code is_suspended}). When {@code true}, every viewer greys
+     *  this member's Fight option — the server blocks invite/accept
+     *  with {@code MATCHMAKING_SUSPENDED} regardless of rank/block
+     *  state. Server-supplied only; defaults to {@code false} when
+     *  the field is absent (pre-deploy backend). */
+    public final boolean isSuspended;
     /** Lower bound of this member's own accept-invite slider (index into
      *  {@code RANK_LABELS}, inclusive). The plugin compares the
      *  <b>viewer's</b> own rank against {@code [minRankIdx, maxRankIdx]}
@@ -77,12 +84,20 @@ public final class LobbyMember
                        int currentRankIdx, int peakRankIdx, String region, boolean isMod)
     {
         this(playerId, name, styles, builds, currentRankIdx, peakRankIdx, region, isMod,
-            UNKNOWN_RANK_IDX, UNKNOWN_RANK_IDX);
+            false, UNKNOWN_RANK_IDX, UNKNOWN_RANK_IDX);
     }
 
     public LobbyMember(String playerId, String name, Set<Style> styles, Set<BuildType> builds,
                        int currentRankIdx, int peakRankIdx, String region, boolean isMod,
                        int minRankIdx, int maxRankIdx)
+    {
+        this(playerId, name, styles, builds, currentRankIdx, peakRankIdx, region, isMod,
+            false, minRankIdx, maxRankIdx);
+    }
+
+    public LobbyMember(String playerId, String name, Set<Style> styles, Set<BuildType> builds,
+                       int currentRankIdx, int peakRankIdx, String region, boolean isMod,
+                       boolean isSuspended, int minRankIdx, int maxRankIdx)
     {
         this.playerId = playerId;
         this.name = name;
@@ -96,6 +111,7 @@ public final class LobbyMember
         this.peakRankIdx = peakRankIdx;
         this.region = region;
         this.isMod = isMod;
+        this.isSuspended = isSuspended;
         this.minRankIdx = minRankIdx;
         this.maxRankIdx = maxRankIdx;
     }
