@@ -95,6 +95,25 @@ public class AdditionalStatsPanel extends JPanel {
         add(content, BorderLayout.NORTH);
     }
 
+    /**
+     * Clamp the maximum height to the preferred height. The content is pinned
+     * to {@link BorderLayout#NORTH}, and {@code BorderLayout} (a
+     * {@code LayoutManager2}) otherwise reports an unbounded maximum height.
+     * When this panel sits in the dashboard's vertical {@code BoxLayout}, that
+     * unbounded maximum makes {@code BoxLayout} hand it all of the leftover
+     * vertical slack — stretching the "Additional Stats" box far below its
+     * content and leaving a large empty gap (most visible right after login,
+     * when the rank/advanced sections below are short). Capping the height
+     * keeps the box exactly as tall as its content; width stays flexible so it
+     * still fills the panel.
+     */
+    @Override
+    public Dimension getMaximumSize() {
+        Dimension max = super.getMaximumSize();
+        Dimension pref = getPreferredSize();
+        return new Dimension(max.width, pref.height);
+    }
+
     public void setPvPDataService(PvPDataService service) {
         this.pvpDataService = service;
     }
