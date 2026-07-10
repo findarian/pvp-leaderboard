@@ -71,6 +71,70 @@ public final class PvPLeaderboardConstants
     public static final String DISCORD_PLUGIN_POLL_URL =
         DISCORD_AUTH_API_BASE + "/auth/discord/plugin-poll";
 
+    // ------------------------------------------------------------------
+    // LMS (Last Man Standing) freeze-log detection
+    // ------------------------------------------------------------------
+
+    /**
+     * OSRS worlds that host Last Man Standing. Freeze-log detection is
+     * gated on the player being on one of these worlds AND physically
+     * inside an {@link #LMS_AREAS} rectangle. Kept in sync with the
+     * backend compact world map's {@code "LMS"} key (390, 559, 580).
+     */
+    public static final int[] LMS_WORLDS = {390, 559, 580};
+
+    /**
+     * Template-coordinate bounding boxes (plane 0) for the two LMS
+     * arena maps, each as {@code {minX, minY, maxX, maxY}}. There are
+     * exactly two LMS maps; coordinates were read from Explv's Map
+     * corner tiles.
+     *
+     * <p><b>Instance note:</b> LMS arenas are instanced (hence the
+     * {@code y > 5700} template band, well outside the overworld), so
+     * a caller MUST convert the local player's position through
+     * {@code WorldPoint.fromLocalInstance(...)} before testing against
+     * these bounds — a raw {@code getWorldLocation()} returns
+     * dynamic-scene coordinates that will never match.
+     */
+    public static final int[][] LMS_AREAS = {
+        // Map 1: corners NW 3456,6206 / NE 3646,6207 / SW 3455,6015 / SE 3647,6015
+        {3455, 6015, 3647, 6207},
+        // Map 2: corners 3391,5887 / 3519,5887 / 3519,5760 / 3391,5760
+        {3391, 5760, 3519, 5887},
+    };
+
+    /** True iff {@code world} is one of {@link #LMS_WORLDS}. */
+    public static boolean isLmsWorld(int world)
+    {
+        for (int w : LMS_WORLDS)
+        {
+            if (w == world)
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * True iff the template coordinate {@code (x, y)} falls inside any
+     * of the {@link #LMS_AREAS} rectangles (inclusive bounds). Pure
+     * integer math so it is unit-testable without a RuneLite client;
+     * plane is intentionally not consulted (the y-band is unique to the
+     * instanced arenas, and the arenas span a single plane).
+     */
+    public static boolean isInLmsArea(int x, int y)
+    {
+        for (int[] r : LMS_AREAS)
+        {
+            if (x >= r[0] && x <= r[2] && y >= r[1] && y <= r[3])
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
     private PvPLeaderboardConstants()
     {
     }

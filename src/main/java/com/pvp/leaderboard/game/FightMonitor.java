@@ -1,6 +1,7 @@
 package com.pvp.leaderboard.game;
 
 import com.google.gson.JsonObject;
+import com.pvp.leaderboard.PvPLeaderboardConstants;
 import com.pvp.leaderboard.config.PvPLeaderboardConfig;
 import com.pvp.leaderboard.lobby.UserProfileLobbyJoinGate;
 import com.pvp.leaderboard.overlay.RankOverlay;
@@ -22,6 +23,8 @@ import net.runelite.api.Client;
 import net.runelite.api.HitsplatID;
 import net.runelite.api.Player;
 import net.runelite.api.Varbits;
+import net.runelite.api.coords.LocalPoint;
+import net.runelite.api.coords.WorldPoint;
 import net.runelite.api.events.ActorDeath;
 import net.runelite.api.events.GameTick;
 import net.runelite.api.events.HitsplatApplied;
@@ -102,6 +105,65 @@ public class FightMonitor
      *  and must not read as in-combat until one fires. */
     private volatile boolean inCombat = false;
 
+    // --- LMS freeze-log detection state ---
+
+    /** RuneLite config group these plugin settings live under. */
+    public static final String CONFIG_GROUP = "PvPLeaderboard";
+
+    /** Config key for the "show the plugin-disable ban warning on next
+     *  login" marker. Written (value {@code "true"}) when a
+     *  {@code plugin_disabled} freeze-log is submitted, so the warning
+     *  survives the plugin being toggled off; read + cleared by the
+     *  plugin on the next {@code LOGGED_IN}. */
+    public static final String LMS_PENDING_WARNING_KEY = "lmsDisablePendingWarning";
+
+    /** Config keys for the "show the doubled freeze-log MMR delta on next
+     *  login" marker. A freeze-log is submitted at logout / shutdown, so
+     *  there is no live session left to poll the match-history API and
+     *  surface the {@code -XX.XX MMR} notification the way a normal loss
+     *  does. Instead the submitted opponent id + fight_end_ts are
+     *  persisted here (surviving the plugin being toggled off) and read
+     *  back on the next {@code LOGGED_IN} to run the identical delta
+     *  fetch + {@link RankOverlay#showMmrDelta} display. */
+    public static final String LMS_PENDING_MMR_OPPONENT_KEY = "lmsFreezeMmrOpponent";
+    public static final String LMS_PENDING_MMR_ENDTS_KEY = "lmsFreezeMmrEndTs";
+
+    /** How long an in-progress fight is retained for freeze-log
+     *  purposes while the player is in an LMS arena. Much longer than
+     *  the normal 10s idle-GC window because LMS freeze-logging
+     *  happens deliberately after the combat timer has lapsed. */
+    static final long LMS_FREEZE_RETENTION_MS = 90_000L;
+
+    /** How recently (ms) the player must have been confirmed inside an
+     *  LMS arena for a logout to count as a freeze-log. Game ticks fire
+     *  ~every 600ms while logged in, so {@link #lastInLmsAreaMs} is
+     *  sub-second-fresh at a genuine mid-arena logout; the window is
+     *  padded to absorb a couple of missed ticks. */
+    static final long LMS_AREA_RECENCY_MS = 10_000L;
+
+    /** Wall-clock ms of the last game tick on which the local player
+     *  was confirmed standing inside an {@link PvPLeaderboardConstants#LMS_AREAS}
+     *  rectangle on an LMS world. Cached because at {@code LOGIN_SCREEN}
+     *  (and during {@code shutDown}) the local player object is gone. */
+    private volatile long lastInLmsAreaMs = 0L;
+
+    /** World number captured alongside {@link #lastInLmsAreaMs}. */
+    private volatile int lastLmsWorld = 0;
+
+    /** Local player name captured on the last tick it was resolvable,
+     *  used as the {@code player_id} for a freeze-log submission when
+     *  the live player object is already gone. */
+    private volatile String lastKnownSelfName = null;
+
+    /** In-memory guard so a pending freeze-log MMR replay is scheduled at
+     *  most once per login session. Both {@code startUp}'s already-logged-in
+     *  branch and the {@code LOGGED_IN} event call
+     *  {@link #showPendingFreezeLogMmrNotification()}, and a world hop
+     *  re-fires {@code LOGGED_IN}. Reset on {@link #resetFightState()}
+     *  (logout) so a genuine relog re-attempts when the prior login's
+     *  fetch failed and left the persistent marker intact. */
+    private volatile boolean freezeLogMmrReplayInFlight = false;
+
     // MMR tracking - no longer using pre-fight profile, using match history API instead
 
     @Inject
@@ -144,6 +206,9 @@ public class FightMonitor
         // or game-state bounce should not leave the popup-suppression
         // gate stuck on "in combat" indefinitely.
         lastInboundPvpDamageMs = 0L;
+        // Allow the freeze-log MMR replay to re-attempt on the next login
+        // (logout clears the in-session guard, not the persistent marker).
+        freezeLogMmrReplayInFlight = false;
         updateInCombatFlag();
         try { log.debug("[Fight] state reset; suppressTicks={}", suppressFightStartTicks); } catch (Exception ignore) {}
     }
@@ -330,16 +395,29 @@ public class FightMonitor
                 toRemove.forEach(perOpponentSuppressUntilTicks::remove);
             }
 
+            // Refresh the LMS-arena presence cache BEFORE the GC pass so
+            // the extended-retention decision below sees the current
+            // tick's position (and so a mid-arena logout has a fresh
+            // lastInLmsAreaMs to read after the player object is gone).
+            updateLmsAreaState();
+
             // Handle GC (every 33 ticks approx 20s)
             gcTicksCounter++;
             if (gcTicksCounter >= 33)
             {
                 gcTicksCounter = 0;
                 long now = System.currentTimeMillis();
+                // While the player is inside an LMS arena, retain
+                // in-progress fights far longer (90s) so a deliberate
+                // freeze-log after the combat timer lapses still has a
+                // live FightEntry to submit as a doubled loss. Outside
+                // LMS the normal 10s idle window is unchanged.
+                final long idleThreshold =
+                    isInLmsAreaRecently(now) ? LMS_FREEZE_RETENTION_MS : 10_000L;
                 activeFights.entrySet().removeIf(e -> {
                     FightEntry fe = e.getValue();
                     if (fe == null) return true;
-                    if (!fe.finalized && now - fe.lastActivityMs > 10_000L) {
+                    if (!fe.finalized && now - fe.lastActivityMs > idleThreshold) {
                         return true;
                     }
                     return false;
@@ -717,6 +795,327 @@ public class FightMonitor
         return !hasOtherActiveFights && !hasCurrentAttacker;
     }
 
+    // ------------------------------------------------------------------
+    // LMS freeze-log detection
+    // ------------------------------------------------------------------
+
+    /** Pure recency predicate for LMS-arena presence — mirrors
+     *  {@link #isWithinCombatWindow}. A never-set ({@code <= 0})
+     *  timestamp reads as "not in area". Negative elapsed (clock skew)
+     *  reads as in-area (safer side). */
+    static boolean isWithinLmsAreaWindow(long lastInLmsAreaMs, long nowMs)
+    {
+        if (lastInLmsAreaMs <= 0L) return false;
+        long elapsed = nowMs - lastInLmsAreaMs;
+        if (elapsed < 0L) return true;
+        return elapsed <= LMS_AREA_RECENCY_MS;
+    }
+
+    /** Pure freeze-log gate: submit a doubled loss iff the player is on
+     *  an LMS world, was inside an LMS arena recently, and an eligible
+     *  in-progress fight exists. Extracted static so the truth table is
+     *  unit-testable without the injected-client graph (mirrors
+     *  {@link #isInCombatDecision} / {@link #shouldClearInboundSignalAfterSubmission}). */
+    static boolean shouldFreezeLogSubmit(boolean lmsWorld,
+                                         boolean inLmsAreaRecently,
+                                         boolean hasEligibleFight)
+    {
+        return lmsWorld && inLmsAreaRecently && hasEligibleFight;
+    }
+
+    /** Normalise the caller-supplied reason to one of the two known
+     *  wire values. Anything other than {@code "plugin_disabled"}
+     *  (including null / blank) collapses to {@code "logout"} — the
+     *  benign, no-ban variant. */
+    static String normalizeFreezeReason(String reason)
+    {
+        return "plugin_disabled".equals(reason) ? "plugin_disabled" : "logout";
+    }
+
+    private boolean isInLmsAreaRecently(long nowMs)
+    {
+        return isWithinLmsAreaWindow(lastInLmsAreaMs, nowMs);
+    }
+
+    /** Refresh the cached LMS-arena presence + self name from the live
+     *  client. No-op unless the player is on an LMS world, inside an
+     *  instanced region, and physically within an {@link
+     *  PvPLeaderboardConstants#LMS_AREAS} rectangle (template coords via
+     *  {@link WorldPoint#fromLocalInstance}). */
+    private void updateLmsAreaState()
+    {
+        try
+        {
+            if (client == null) return;
+            Player lp = client.getLocalPlayer();
+            if (lp == null) return;
+            String name = lp.getName();
+            if (name != null && !name.trim().isEmpty())
+            {
+                lastKnownSelfName = name;
+            }
+            int world = client.getWorld();
+            if (!PvPLeaderboardConstants.isLmsWorld(world)) return;
+            if (!client.isInInstancedRegion()) return;
+            LocalPoint lpnt = lp.getLocalLocation();
+            if (lpnt == null) return;
+            WorldPoint wp = WorldPoint.fromLocalInstance(client, lpnt);
+            if (wp == null) return;
+            if (PvPLeaderboardConstants.isInLmsArea(wp.getX(), wp.getY()))
+            {
+                lastInLmsAreaMs = System.currentTimeMillis();
+                lastLmsWorld = world;
+            }
+        }
+        catch (Exception ignore)
+        {
+            // Defensive: presence tracking must never break the tick loop.
+        }
+    }
+
+    /** Pick the opponent for a freeze-log loss: the most-recently-active
+     *  non-finalized fight that exchanged damage and is still within the
+     *  extended LMS retention window. Returns null when none qualifies. */
+    private String findFreezeLogOpponent(long nowMs)
+    {
+        String best = null;
+        long bestActivity = -1L;
+        for (Map.Entry<String, FightEntry> e : activeFights.entrySet())
+        {
+            FightEntry fe = e.getValue();
+            if (fe == null || fe.finalized) continue;
+            boolean damageExchanged = fe.damageDealt.get() > 0 || fe.damageReceived.get() > 0;
+            if (!damageExchanged) continue;
+            if (nowMs - fe.lastActivityMs > LMS_FREEZE_RETENTION_MS) continue;
+            if (fe.lastActivityMs > bestActivity)
+            {
+                bestActivity = fe.lastActivityMs;
+                best = e.getKey();
+            }
+        }
+        return best;
+    }
+
+    /**
+     * Detect and submit an LMS freeze-log. Called from the plugin's
+     * {@code LOGIN_SCREEN} (reason {@code "logout"}) and {@code shutDown}
+     * (reason {@code "plugin_disabled"}) paths <b>before</b>
+     * {@link #resetFightState}. When an eligible in-progress fight is
+     * found in an LMS arena, it is finalized as a {@code loss} carrying
+     * the {@code lms_freeze_logout} flag (backend doubles the MMR loss).
+     * For {@code plugin_disabled} it additionally persists a
+     * pending-warning marker so the ban warning shows on next login.
+     *
+     * <p>Double-submit safe: the chosen fight's {@code finalized} flag
+     * is set before submission, so a second call (e.g. LOGIN_SCREEN then
+     * shutDown) is a no-op.
+     *
+     * @param reason {@code "logout"} or {@code "plugin_disabled"}
+     * @return the submission future when a freeze-log was submitted, or
+     *         {@code null} when nothing qualified.
+     */
+    public CompletableFuture<Boolean> handleLogoutFreezeLog(String reason)
+    {
+        try
+        {
+            long now = System.currentTimeMillis();
+            boolean lmsWorld = PvPLeaderboardConstants.isLmsWorld(lastLmsWorld);
+            boolean inArea = isInLmsAreaRecently(now);
+            String oppName = (lmsWorld && inArea) ? findFreezeLogOpponent(now) : null;
+            if (!shouldFreezeLogSubmit(lmsWorld, inArea, oppName != null))
+            {
+                return null;
+            }
+            FightEntry fe = activeFights.get(oppName);
+            if (fe == null || fe.finalized) return null;
+            // Guard against double-submit across LOGIN_SCREEN + shutDown.
+            fe.finalized = true;
+
+            String normReason = normalizeFreezeReason(reason);
+            log.debug("[LMSFreeze] submitting freeze-log loss opponent={} world={} reason={}",
+                oppName, lastLmsWorld, normReason);
+            CompletableFuture<Boolean> future =
+                finalizeFreezeLogFight(oppName, lastLmsWorld, fe, normReason);
+            if ("plugin_disabled".equals(normReason))
+            {
+                markPendingDisableWarning();
+            }
+            return future;
+        }
+        catch (Exception e)
+        {
+            log.debug("[LMSFreeze] handleLogoutFreezeLog failed: {}", e.getMessage());
+            return null;
+        }
+    }
+
+    /** Persist the "show ban warning on next login" marker. Written to
+     *  RuneLite config so it survives the plugin being toggled off. */
+    private void markPendingDisableWarning()
+    {
+        try
+        {
+            if (configManager != null)
+            {
+                configManager.setConfiguration(CONFIG_GROUP, LMS_PENDING_WARNING_KEY, "true");
+            }
+        }
+        catch (Exception e)
+        {
+            log.debug("[LMSFreeze] failed to persist pending warning: {}", e.getMessage());
+        }
+    }
+
+    /** Persist the "show the doubled freeze-log MMR delta on next login"
+     *  marker (opponent id + the fight_end_ts the loss was submitted
+     *  with). Written to RuneLite config so it survives the plugin being
+     *  toggled off / the client restarting. */
+    private void markPendingFreezeLogMmr(String opponentName, long endTs)
+    {
+        try
+        {
+            if (configManager != null && opponentName != null)
+            {
+                configManager.setConfiguration(CONFIG_GROUP, LMS_PENDING_MMR_OPPONENT_KEY, opponentName);
+                configManager.setConfiguration(CONFIG_GROUP, LMS_PENDING_MMR_ENDTS_KEY, String.valueOf(endTs));
+            }
+        }
+        catch (Exception e)
+        {
+            log.debug("[LMSFreeze] failed to persist pending MMR marker: {}", e.getMessage());
+        }
+    }
+
+    /** Clear the pending freeze-log MMR marker (both keys). */
+    private void clearPendingFreezeLogMmr()
+    {
+        try
+        {
+            if (configManager != null)
+            {
+                configManager.unsetConfiguration(CONFIG_GROUP, LMS_PENDING_MMR_OPPONENT_KEY);
+                configManager.unsetConfiguration(CONFIG_GROUP, LMS_PENDING_MMR_ENDTS_KEY);
+            }
+        }
+        catch (Exception e)
+        {
+            log.debug("[LMSFreeze] failed to clear pending MMR marker: {}", e.getMessage());
+        }
+    }
+
+    /**
+     * Surface the doubled MMR loss from a prior-session freeze-log the
+     * next time the player logs in. If the pending marker is present it is
+     * cleared immediately (show-once, even across repeated relogs) and the
+     * <em>same</em> match-history delta fetch the normal post-fight path
+     * uses is scheduled — so the player sees the identical {@code -XX.XX
+     * MMR} overlay a real loss produces, just triggered on login instead
+     * of at fight end. No marker → complete no-op.
+     *
+     * <p>The fetch is deferred a few seconds so client identity (account
+     * SHA) and the local player name resolve after login before the API
+     * call. The freeze-log match was submitted on the prior session, so
+     * the backend has long since processed it; the retry schedule inside
+     * {@link #fetchMmrDeltaFromMatchHistory} absorbs any residual lag.
+     */
+    public void showPendingFreezeLogMmrNotification()
+    {
+        try
+        {
+            if (configManager == null) return;
+            String opponent = configManager.getConfiguration(CONFIG_GROUP, LMS_PENDING_MMR_OPPONENT_KEY);
+            String endTsStr = configManager.getConfiguration(CONFIG_GROUP, LMS_PENDING_MMR_ENDTS_KEY);
+            if (opponent == null || opponent.trim().isEmpty()
+                || endTsStr == null || endTsStr.trim().isEmpty())
+            {
+                return;
+            }
+
+            long endTs;
+            try
+            {
+                endTs = Long.parseLong(endTsStr.trim());
+            }
+            catch (NumberFormatException nfe)
+            {
+                // Corrupt marker — drop it so it can't wedge future logins.
+                clearPendingFreezeLogMmr();
+                return;
+            }
+
+            // In-session guard: startUp's logged-in branch AND the
+            // LOGGED_IN event both call this, and a world hop re-fires
+            // LOGGED_IN — schedule the replay at most once per login. The
+            // guard is reset on logout (resetFightState), so a genuine
+            // relog re-attempts if the prior login's fetch failed.
+            if (freezeLogMmrReplayInFlight)
+            {
+                return;
+            }
+            freezeLogMmrReplayInFlight = true;
+
+            // NOTE: the marker is deliberately NOT cleared here. It is
+            // cleared only after the delta is successfully displayed (the
+            // onDisplayed hook below), so a bad-connection login where the
+            // fetch never lands leaves the marker intact to retry on the
+            // next login instead of silently losing the notification.
+            final String selfName = lastKnownSelfName != null ? lastKnownSelfName : getLocalPlayerName();
+            final String targetOpponent = opponent;
+            final long submittedEndTs = endTs;
+            log.debug("[LMSFreeze] pending freeze-log MMR marker found opponent={} endTs={} - scheduling delta fetch",
+                targetOpponent, submittedEndTs);
+            scheduler.schedule(
+                () -> fetchMmrDeltaFromMatchHistory(selfName, targetOpponent, null, false, 0, submittedEndTs,
+                    this::clearPendingFreezeLogMmr),
+                5L, java.util.concurrent.TimeUnit.SECONDS);
+        }
+        catch (Exception e)
+        {
+            log.debug("[LMSFreeze] showPendingFreezeLogMmrNotification failed: {}", e.getMessage());
+        }
+    }
+
+    /** Build + submit the freeze-log loss using cached values (the live
+     *  player object is already gone at logout / shutdown). Spellbook is
+     *  best-effort from the fight's start value; the backend penalty is
+     *  bucket-independent. */
+    private CompletableFuture<Boolean> finalizeFreezeLogFight(String opponentName,
+                                                              int world,
+                                                              FightEntry fe,
+                                                              String reason)
+    {
+        String selfName = lastKnownSelfName;
+        if (selfName == null)
+        {
+            selfName = getLocalPlayerName();
+        }
+        long endTs = System.currentTimeMillis() / 1000;
+        long startTs = fe.startTs > 0 ? fe.startTs : endTs - 60;
+        String sb = getSpellbookName(fe.startSpellbook);
+        MatchResult match = MatchResult.builder()
+            .playerId(selfName)
+            .opponentId(opponentName)
+            .result("loss")
+            .world(world)
+            .fightStartTs(startTs)
+            .fightEndTs(endTs)
+            .fightStartSpellbook(sb)
+            .fightEndSpellbook(sb)
+            .wasInMulti(fe.wasInMulti)
+            .damageToOpponent(fe.damageDealt.get())
+            .clientUniqueId(clientIdentityService != null
+                ? clientIdentityService.getClientUniqueId() : null)
+            .lmsFreezeLogout(true)
+            .lmsFreezeReason(reason)
+            .build();
+        // Persist the pending-MMR marker BEFORE the fire-and-forget submit:
+        // the player is logging out / disabling the plugin, so this session
+        // can't poll for the resulting delta. On the next login we replay
+        // the normal post-fight fetch keyed on this opponent + fight_end_ts.
+        markPendingFreezeLogMmr(opponentName, endTs);
+        return matchResultService.submitMatchResult(match);
+    }
+
     private void finalizeFight(String opponentName, String result, FightEntry entry)
     {
         long t0 = System.nanoTime();
@@ -891,14 +1290,14 @@ public class FightMonitor
             if (config.showMmrChangeNotification() && opponent != null && selfName != null) {
                 log.debug("[PostFight] Submission done (success={}), scheduling MMR fetch in 3s for opponent={}", success, opponent);
                 scheduler.schedule(() -> {
-                    fetchMmrDeltaFromMatchHistory(selfName, opponent, displayBucket, showBucketInMmr, 0, endTs);
+                    fetchMmrDeltaFromMatchHistory(selfName, opponent, displayBucket, showBucketInMmr, 0, endTs, null);
                 }, 3L, java.util.concurrent.TimeUnit.SECONDS);
             }
         }).exceptionally(ex -> {
             log.debug("[PostFight] Submission future failed, scheduling fallback MMR fetch: {}", ex.getMessage());
             if (config.showMmrChangeNotification() && opponent != null && selfName != null) {
                 scheduler.schedule(() -> {
-                    fetchMmrDeltaFromMatchHistory(selfName, opponent, displayBucket, showBucketInMmr, 0, endTs);
+                    fetchMmrDeltaFromMatchHistory(selfName, opponent, displayBucket, showBucketInMmr, 0, endTs, null);
                 }, 3L, java.util.concurrent.TimeUnit.SECONDS);
             }
             return null;
@@ -959,7 +1358,7 @@ public class FightMonitor
      * @param attempt 0-based attempt index (0 = first try, 1 = retry at 5s, 2 = retry at 10s)
      * @param submittedMatchEndTs The fight_end_ts of the submitted match, used to validate we got the correct match
      */
-    private void fetchMmrDeltaFromMatchHistory(String selfName, String opponentName, String displayBucket, boolean showBucketLabel, int attempt, long submittedMatchEndTs) {
+    void fetchMmrDeltaFromMatchHistory(String selfName, String opponentName, String displayBucket, boolean showBucketLabel, int attempt, long submittedMatchEndTs, Runnable onDisplayed) {
         log.debug("[PostFight] Fetching MMR delta from match history: self={} opponent={} showBucket={} attempt={} submittedTs={}", 
             selfName, opponentName, showBucketLabel, attempt, submittedMatchEndTs);
         
@@ -1041,6 +1440,15 @@ public class FightMonitor
                                 if (rankOverlay != null) {
                                     rankOverlay.showMmrDelta(mmrDelta, bucketLabel);
                                 }
+                                // Delta surfaced — let the caller finalize.
+                                // The freeze-log login replay uses this to
+                                // clear its persistent marker ONLY after a
+                                // successful display, so a bad-connection
+                                // login just retries on the next one instead
+                                // of silently dropping the notification.
+                                if (onDisplayed != null) {
+                                    onDisplayed.run();
+                                }
                                 return;
                             }
                         }
@@ -1053,7 +1461,7 @@ public class FightMonitor
                 if (attempt < MMR_RETRY_DELAYS.length) {
                     long delay = MMR_RETRY_DELAYS[attempt];
                     log.debug("[PostFight] Match not found in history, retrying in {}s (attempt {})", delay, attempt + 1);
-                    scheduler.schedule(() -> fetchMmrDeltaFromMatchHistory(selfName, opponentName, displayBucket, showBucketLabel, attempt + 1, submittedMatchEndTs),
+                    scheduler.schedule(() -> fetchMmrDeltaFromMatchHistory(selfName, opponentName, displayBucket, showBucketLabel, attempt + 1, submittedMatchEndTs, onDisplayed),
                         delay, java.util.concurrent.TimeUnit.SECONDS);
                 } else {
                     log.debug("[PostFight] Match not found in history after all retries, skipping MMR notification");
@@ -1061,7 +1469,7 @@ public class FightMonitor
             } else if (attempt < MMR_RETRY_DELAYS.length) {
                 long delay = MMR_RETRY_DELAYS[attempt];
                 log.debug("[PostFight] No matches in response, retrying in {}s (attempt {})", delay, attempt + 1);
-                scheduler.schedule(() -> fetchMmrDeltaFromMatchHistory(selfName, opponentName, displayBucket, showBucketLabel, attempt + 1, submittedMatchEndTs),
+                scheduler.schedule(() -> fetchMmrDeltaFromMatchHistory(selfName, opponentName, displayBucket, showBucketLabel, attempt + 1, submittedMatchEndTs, onDisplayed),
                     delay, java.util.concurrent.TimeUnit.SECONDS);
             } else {
                 log.debug("[PostFight] Failed to get matches after all retries");
@@ -1070,7 +1478,7 @@ public class FightMonitor
             if (attempt < MMR_RETRY_DELAYS.length) {
                 long delay = MMR_RETRY_DELAYS[attempt];
                 log.debug("[PostFight] Match history exception: {}, retrying in {}s (attempt {})", ex.getMessage(), delay, attempt + 1);
-                scheduler.schedule(() -> fetchMmrDeltaFromMatchHistory(selfName, opponentName, displayBucket, showBucketLabel, attempt + 1, submittedMatchEndTs),
+                scheduler.schedule(() -> fetchMmrDeltaFromMatchHistory(selfName, opponentName, displayBucket, showBucketLabel, attempt + 1, submittedMatchEndTs, onDisplayed),
                     delay, java.util.concurrent.TimeUnit.SECONDS);
             } else {
                 log.debug("[PostFight] Match history failed after all retries: {}", ex.getMessage());
@@ -1401,7 +1809,10 @@ public class FightMonitor
         }
     }
     
-    private static class FightEntry {
+    // Package-private (not private) so same-package unit tests can seed
+    // an in-progress fight for the freeze-log path without replaying the
+    // full hitsplat pipeline.
+    static class FightEntry {
         final long startTs;
         final int startSpellbook;
         volatile boolean wasInMulti;  // Mutable: set true if LOCAL player ever enters multi during this fight

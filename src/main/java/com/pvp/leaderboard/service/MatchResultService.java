@@ -71,22 +71,8 @@ public class MatchResultService
                 return overall;
             }
 
-            JsonObject body = new JsonObject();
-            body.addProperty("player_id", match.getPlayerId());
-            body.addProperty("opponent_id", match.getOpponentId());
-            body.addProperty("result", match.getResult());
-            body.addProperty("world", match.getWorld());
-            body.addProperty("fight_start_ts", match.getFightStartTs());
-            body.addProperty("fight_end_ts", match.getFightEndTs());
-            body.addProperty("fightStartSpellbook", match.getFightStartSpellbook());
-            body.addProperty("fightEndSpellbook", match.getFightEndSpellbook());
-            body.addProperty("wasInMulti", match.isWasInMulti());
-            body.addProperty("client_id", CLIENT_ID);
-            body.addProperty("plugin_version", PLUGIN_VERSION);
-            body.addProperty("damage_to_opponent", match.getDamageToOpponent());
+            String bodyJson = buildBodyJson(match);
 
-            String bodyJson = gson.toJson(body);
-            
             log.debug("[MatchAPI] Request body: {}", bodyJson);
 
             // HMAC-signed submission is the sole path. The plugin holds no
@@ -102,6 +88,48 @@ public class MatchResultService
             overall.complete(false);
         }
         return overall;
+    }
+
+    /**
+     * Builds the {@code POST /matchresult} JSON body. The 12 base fields
+     * are always present and unchanged; the two LMS freeze-log fields are
+     * appended <b>last</b> and only when set, so a normal fight produces a
+     * byte-for-byte identical payload to before this feature existed. The
+     * backend treats {@code lms_freeze_logout} / {@code lms_freeze_reason}
+     * as optional trailing fields.
+     *
+     * <p>Package-private so {@code MatchResultServiceTest} can pin the
+     * serialization contract without a network round-trip.
+     */
+    String buildBodyJson(MatchResult match)
+    {
+        JsonObject body = new JsonObject();
+        body.addProperty("player_id", match.getPlayerId());
+        body.addProperty("opponent_id", match.getOpponentId());
+        body.addProperty("result", match.getResult());
+        body.addProperty("world", match.getWorld());
+        body.addProperty("fight_start_ts", match.getFightStartTs());
+        body.addProperty("fight_end_ts", match.getFightEndTs());
+        body.addProperty("fightStartSpellbook", match.getFightStartSpellbook());
+        body.addProperty("fightEndSpellbook", match.getFightEndSpellbook());
+        body.addProperty("wasInMulti", match.isWasInMulti());
+        body.addProperty("client_id", CLIENT_ID);
+        body.addProperty("plugin_version", PLUGIN_VERSION);
+        body.addProperty("damage_to_opponent", match.getDamageToOpponent());
+
+        // Optional trailing LMS freeze-log fields — omitted entirely for
+        // normal fights so the common-case payload is unchanged.
+        if (match.isLmsFreezeLogout())
+        {
+            body.addProperty("lms_freeze_logout", true);
+            String reason = match.getLmsFreezeReason();
+            if (reason != null && !reason.trim().isEmpty())
+            {
+                body.addProperty("lms_freeze_reason", reason);
+            }
+        }
+
+        return gson.toJson(body);
     }
 
     private CompletableFuture<Boolean> submitSignedFightAsync(String body, String clientUniqueId)

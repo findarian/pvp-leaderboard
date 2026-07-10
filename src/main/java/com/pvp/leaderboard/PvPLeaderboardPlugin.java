@@ -6,6 +6,7 @@ import com.pvp.leaderboard.game.FightMonitor;
 import com.pvp.leaderboard.game.MenuHandler;
 import com.pvp.leaderboard.overlay.LobbyInviteNotificationOverlay;
 import com.pvp.leaderboard.overlay.MatchFoundNotificationOverlay;
+import com.pvp.leaderboard.overlay.PluginDisableWarningOverlay;
 import com.pvp.leaderboard.overlay.RankOverlay;
 import com.pvp.leaderboard.service.ClientIdentityService;
 import com.pvp.leaderboard.service.DiscordAuthService;
@@ -13,6 +14,8 @@ import com.pvp.leaderboard.service.MembershipService;
 import com.pvp.leaderboard.service.PvPDataService;
 import com.pvp.leaderboard.service.WhitelistService;
 import com.pvp.leaderboard.ui.DashboardPanel;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
 import javax.inject.Inject;
 import lombok.extern.slf4j.Slf4j;
 import net.runelite.api.Client;
@@ -25,7 +28,9 @@ import net.runelite.api.events.MenuOptionClicked;
 import net.runelite.client.config.ConfigManager;
 import net.runelite.client.eventbus.EventBus;
 import net.runelite.client.eventbus.Subscribe;
+import net.runelite.client.events.ClientShutdown;
 import net.runelite.client.events.ConfigChanged;
+import net.runelite.client.input.MouseManager;
 import net.runelite.client.plugins.Plugin;
 import net.runelite.client.plugins.PluginDescriptor;
 import net.runelite.client.ui.ClientToolbar;
@@ -62,6 +67,15 @@ public class PvPLeaderboardPlugin extends Plugin
 
 	@Inject
 	private MatchFoundNotificationOverlay matchFoundNotificationOverlay;
+
+	@Inject
+	private PluginDisableWarningOverlay pluginDisableWarningOverlay;
+
+	@Inject
+	private ConfigManager configManager;
+
+	@Inject
+	private MouseManager mouseManager;
 
 	@Inject
 	private EventBus eventBus;
@@ -103,6 +117,14 @@ public class PvPLeaderboardPlugin extends Plugin
 	private NavigationButton navButton;
 	private int pendingSelfRankLookupTicks = -1;
 	private boolean pendingHeartbeatStart = false;
+
+	/** Set true when RuneLite fires {@link ClientShutdown} (the whole
+	 *  client is closing). Distinguishes a graceful client exit — which
+	 *  {@link #shutDown()} then treats as a plain {@code logout}
+	 *  freeze-log — from the plugin being toggled off mid-fight, which is
+	 *  a {@code plugin_disabled} ban offense. Volatile: ClientShutdown
+	 *  fires on the client thread, shutDown() reads it during teardown. */
+	private volatile boolean clientShutdownSeen = false;
 
 	public String getClientUniqueId()
 	{
@@ -229,6 +251,19 @@ public class PvPLeaderboardPlugin extends Plugin
 			dashboardPanel.setMatchFoundNotifier(matchFoundPopup::showMatch);
 		}
 
+		// LMS plugin-disable ban warning popup. Registered as a mouse
+		// listener so its OK button is clickable; the dismiss callback
+		// clears the persisted pending-warning marker so it shows exactly
+		// once per offense. Not config-gated — a ban warning must always
+		// surface.
+		final PluginDisableWarningOverlay disableWarning = pluginDisableWarningOverlay;
+		if (disableWarning != null)
+		{
+			overlayManager.add(disableWarning);
+			disableWarning.setOnDismiss(this::clearPendingDisableWarning);
+			mouseManager.registerMouseListener(disableWarning);
+		}
+
 		// One-shot startup diagnostic — pins the in-combat suppression
 		// config toggle state + whether each overlay's provider got
 		// wired. The popup-mid-combat bug class has been recurrent
@@ -280,6 +315,12 @@ public class PvPLeaderboardPlugin extends Plugin
 			// in-game) — kick the gate so the dashboard shows real
 			// counts from the get-go instead of "Not yet refreshed".
 			lobbyJoinGate.onLogin();
+			// If the plugin was just re-enabled after a mid-fight disable
+			// offense, the pending-warning marker is set — surface it now.
+			maybeShowPendingDisableWarning();
+			// Same for a pending freeze-log MMR delta: replay it as the
+			// normal -XX.XX MMR overlay now the session is back.
+			fightMonitor.showPendingFreezeLogMmrNotification();
 		}
 
 		log.debug("PvP Leaderboard started!");
@@ -288,6 +329,34 @@ public class PvPLeaderboardPlugin extends Plugin
 	@Override
 	protected void shutDown() throws Exception
 	{
+		// FIRST, before any teardown: detect a mid-fight plugin disable
+		// in an LMS arena. If RuneLite already signalled ClientShutdown
+		// this is a graceful client exit → treat as a plain logout
+		// freeze-log (2x loss, no ban). Otherwise the user toggled the
+		// plugin off mid-fight → plugin_disabled (2x loss + ban
+		// escalation + warning marker). Submit synchronously with a
+		// bounded wait so plugin teardown doesn't kill the HTTP call.
+		try
+		{
+			String reason = clientShutdownSeen ? "logout" : "plugin_disabled";
+			CompletableFuture<Boolean> freezeLog = fightMonitor.handleLogoutFreezeLog(reason);
+			if (freezeLog != null)
+			{
+				try
+				{
+					freezeLog.get(3, TimeUnit.SECONDS);
+				}
+				catch (Exception waitEx)
+				{
+					log.debug("[LMSFreeze] shutdown submit wait ended: {}", waitEx.getMessage());
+				}
+			}
+		}
+		catch (Exception e)
+		{
+			log.debug("[LMSFreeze] shutdown freeze-log detection failed: {}", e.getMessage());
+		}
+
 		menuHandler.shutdown();
 		if (rankOverlay != null)
 		{
@@ -303,6 +372,12 @@ public class PvPLeaderboardPlugin extends Plugin
 		{
 			overlayManager.remove(matchFoundNotificationOverlay);
 			matchFoundNotificationOverlay.clear();
+		}
+		if (pluginDisableWarningOverlay != null)
+		{
+			mouseManager.unregisterMouseListener(pluginDisableWarningOverlay);
+			overlayManager.remove(pluginDisableWarningOverlay);
+			pluginDisableWarningOverlay.clear();
 		}
 		clientToolbar.removeNavigation(navButton);
 		whitelistService.onLogout();
@@ -330,6 +405,56 @@ public class PvPLeaderboardPlugin extends Plugin
 		// so a re-toggle of the plugin starts fresh.
 		lobbyJoinGate.onLogout();
 		log.debug("PvP Leaderboard stopped!");
+	}
+
+	/** RuneLite fires this when the whole client is closing. We latch it
+	 *  so the subsequent {@link #shutDown()} knows this was a graceful
+	 *  client exit (treated as a {@code logout} freeze-log) rather than a
+	 *  deliberate mid-fight plugin disable (a {@code plugin_disabled} ban
+	 *  offense). */
+	@Subscribe
+	public void onClientShutdown(ClientShutdown event)
+	{
+		clientShutdownSeen = true;
+	}
+
+	/** Show the LMS plugin-disable ban warning if the persisted marker is
+	 *  set. The marker is cleared only when the popup is dismissed (OK
+	 *  click or the 10 s window elapses), so it shows exactly once per
+	 *  offense even across client restarts. */
+	private void maybeShowPendingDisableWarning()
+	{
+		try
+		{
+			String pending = configManager.getConfiguration(
+				com.pvp.leaderboard.game.FightMonitor.CONFIG_GROUP,
+				com.pvp.leaderboard.game.FightMonitor.LMS_PENDING_WARNING_KEY);
+			if ("true".equals(pending) && pluginDisableWarningOverlay != null)
+			{
+				log.debug("[LMSWarn] pending disable warning marker set - showing popup");
+				pluginDisableWarningOverlay.showWarning();
+			}
+		}
+		catch (Exception e)
+		{
+			log.debug("[LMSWarn] maybeShowPendingDisableWarning failed: {}", e.getMessage());
+		}
+	}
+
+	/** Dismiss callback wired into the warning overlay — clears the
+	 *  persisted marker so the warning does not re-show. */
+	private void clearPendingDisableWarning()
+	{
+		try
+		{
+			configManager.unsetConfiguration(
+				com.pvp.leaderboard.game.FightMonitor.CONFIG_GROUP,
+				com.pvp.leaderboard.game.FightMonitor.LMS_PENDING_WARNING_KEY);
+		}
+		catch (Exception e)
+		{
+			log.debug("[LMSWarn] clearPendingDisableWarning failed: {}", e.getMessage());
+		}
 	}
 
 	@Subscribe
@@ -443,9 +568,24 @@ public class PvPLeaderboardPlugin extends Plugin
 				{
 					webSocketManager.connect(uuid, selfName);
 				}
+
+				// Surface a pending LMS plugin-disable ban warning now
+				// that the viewport is available again (offense happened
+				// on a prior session that was disabled mid-fight).
+				maybeShowPendingDisableWarning();
+				// Replay the doubled freeze-log MMR loss as the normal
+				// -XX.XX MMR overlay: a freeze-log submitted at last
+				// logout couldn't poll for its delta, so we deferred the
+				// notification to this login.
+				fightMonitor.showPendingFreezeLogMmrNotification();
 			}
 			else if (gameStateChanged.getGameState() == GameState.LOGIN_SCREEN)
 			{
+				// LMS freeze-log detection MUST run before resetFightState
+				// wipes the active fights: a logout / connection-lost
+				// mid-fight inside an LMS arena is submitted as a doubled
+				// loss (reason=logout, no ban).
+				fightMonitor.handleLogoutFreezeLog("logout");
 				// Fully clear fight state on logout
 				fightMonitor.resetFightState();
 				// Symmetric refresh: GameState dropped to LOGIN_SCREEN,
