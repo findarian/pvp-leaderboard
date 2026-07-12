@@ -1,7 +1,6 @@
 package com.pvp.leaderboard.overlay;
 
 import com.pvp.leaderboard.cache.MembershipCache;
-import com.pvp.leaderboard.cache.WhitelistPlayerCache;
 import com.pvp.leaderboard.config.PvPLeaderboardConfig;
 import com.pvp.leaderboard.game.PlayerRankEvent;
 import com.pvp.leaderboard.service.PvPDataService;
@@ -28,16 +27,16 @@ public class RankOverlay extends Overlay
     private final Client client;
     private final PvPLeaderboardConfig config;
     private final PvPDataService pvpDataService;
-    private final WhitelistPlayerCache whitelistPlayerCache;
     /** Opt-in membership set from the snapshot/delta feed (names only). The
      *  overlay gates rendering on this; rank itself comes from the name-keyed
      *  shards (see {@link #fetchSceneShardRankIfNeeded}). Replaces the
      *  whitelist.json membership blob (see PLAN_PRESENCE_FRESHNESS.md). */
     private final MembershipCache membershipCache;
 
-    // Displayed ranks cache (for self)
+    // Resolved rank labels keyed by canonical name — populated by the
+    // API-set path (post-fight) and by scene/self shard lookups; read
+    // every frame by the overlay render loop.
     private final ConcurrentHashMap<String, String> displayedRanks = new ConcurrentHashMap<>();
-    private final Map<String, Long> displayedRanksTimestamp = new ConcurrentHashMap<>();
     
     // API-set ranks that should persist until shard cache refreshes with matching data
     private final ConcurrentHashMap<String, String> apiSetRanks = new ConcurrentHashMap<>();
@@ -54,17 +53,17 @@ public class RankOverlay extends Overlay
     private volatile boolean selfRankAttempted = false;
     private volatile long nextSelfRankAllowedAtMs = 0L;
 
-    /** Scene shard lookup state for whitelisted players visible in the
-     *  world who don't yet have a rank label above their head. Aligns
-     *  retry interval with the backend's DynamoDB-stream shard writer
-     *  (~30 s propagation) so a newly-active opt-in player stops
-     *  sitting blank for minutes while {@code whitelist.json} waits
-     *  for its 9:30 refresh cycle. Uses
+    /** Scene shard lookup state for opted-in players visible in the
+     *  world who don't yet have a rank label above their head. Retry
+     *  throttle so render() (~60 fps) issues at most one shard
+     *  resolution attempt per player per interval. Uses the passive
+     *  ({@code bypassCache=false}) overload of
      *  {@link PvPDataService#getShardRankByName(String, String, boolean)}
-     *  with {@code bypassCache=true} on each attempt so we don't serve
-     *  a stale 60-min positive-cache entry from a prior passive read.
-     *  Bounded by whitelist membership + in-scene visibility + this
-     *  per-player backoff — not a whole-world shard poll. */
+     *  so repeat attempts are served from the 6h positive cache (once
+     *  resolved) or the missing-player negative cache (when unranked),
+     *  keeping CDN cost bounded even in a crowded scene. Bounded by
+     *  membership + in-scene visibility + this per-player backoff —
+     *  never a whole-world shard poll. */
     private static final long SCENE_SHARD_RETRY_MS = 30_000L;
     private final ConcurrentHashMap<String, Long> sceneShardLastAttemptMs = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, Boolean> sceneShardInFlight = new ConcurrentHashMap<>();
@@ -93,12 +92,11 @@ public class RankOverlay extends Overlay
     
     @Inject
     public RankOverlay(Client client, PvPLeaderboardConfig config, PvPDataService pvpDataService, 
-                       WhitelistPlayerCache whitelistPlayerCache, MembershipCache membershipCache)
+                       MembershipCache membershipCache)
     {
         this.client = client;
         this.config = config;
         this.pvpDataService = pvpDataService;
-        this.whitelistPlayerCache = whitelistPlayerCache;
         this.membershipCache = membershipCache;
         // Always use DYNAMIC for snap-to-player rendering
         // Use UNDER_WIDGETS layer (same as player indicators) so it appears above prayers
@@ -198,7 +196,6 @@ public class RankOverlay extends Overlay
         }
         String key = NameUtils.canonicalKey(playerName);
         displayedRanks.put(key, rank);
-        displayedRanksTimestamp.put(key, System.currentTimeMillis());
         // Track this as an API-set rank - persists until shard cache confirms with same rank
         apiSetRanks.put(key, rank);
         pvpDataService.clearShardNegativeCache(playerName);
@@ -445,9 +442,7 @@ public class RankOverlay extends Overlay
         if (lastBucketKey == null || !lastBucketKey.equals(currentBucket))
         {
             displayedRanks.clear();
-            displayedRanksTimestamp.clear();
             apiSetRanks.clear();
-            whitelistPlayerCache.clearLookupCache();
             sceneShardLastAttemptMs.clear();
             sceneShardInFlight.clear();
             lastBucketKey = currentBucket;
@@ -537,18 +532,19 @@ public class RankOverlay extends Overlay
     }
     
     /**
-     * Render ranks for whitelisted players in the scene.
-     * Only shows ranks for players on the whitelist (opt-in system).
-     * Uses whichever data was fetched most recently:
-     *   - API-fetched rank from a fight (stored in displayedRanks with timestamp)
-     *   - Whitelist cache (refreshed every ~9.5 minutes)
-     * Uses current bucket setting, with fallback to overall if bucket not found.
+     * Render ranks above opted-in players in the scene.
+     *
+     * <p>Membership (who is an opted-in plugin user) comes from the
+     * snapshot/delta feed ({@link MembershipCache}); the rank label
+     * itself is resolved per name from the {@code rank_idx} shards and
+     * stored in {@link #displayedRanks} — either eagerly by a fight's
+     * API result ({@link PlayerRankEvent}) or lazily by the scene shard
+     * lookup below. Uses the current bucket setting.
      */
     private void renderWhitelistPlayers(Graphics2D graphics, Player localPlayer, String bucket,
                                         int heightOffset)
     {
         String localName = localPlayer.getName();
-        long whitelistRefreshMs = whitelistPlayerCache.getLastRefreshMs();
 
         // Defensive: client.getPlayers() can return null transiently
         // during scene loads / world hops. The enhanced-for below would
@@ -571,44 +567,15 @@ public class RankOverlay extends Overlay
             // Only show ranks for opted-in players (membership feed).
             if (!membershipCache.isMember(playerName)) continue;
             
-            String displayRank = null;
             String nameKey = NameUtils.canonicalKey(playerName);
-            
-            // Get API-fetched rank and its timestamp
-            String apiRank = displayedRanks.get(nameKey);
-            Long apiTimestamp = displayedRanksTimestamp.get(nameKey);
-            
-            // Get whitelist cache rank
-            WhitelistPlayerCache.BucketRank whitelistRank = whitelistPlayerCache.getRank(playerName, bucket);
-            String formattedWhitelistRank = whitelistRank != null ? whitelistRank.getFormattedTier() : null;
-            
-            // Use whichever was fetched most recently
-            if (apiRank != null && apiTimestamp != null)
-            {
-                if (whitelistRefreshMs > apiTimestamp && formattedWhitelistRank != null)
-                {
-                    // Whitelist was refreshed after API fetch - use whitelist (newer)
-                    displayRank = formattedWhitelistRank;
-                }
-                else
-                {
-                    // API fetch is more recent - use API data
-                    displayRank = apiRank;
-                }
-            }
-            else if (formattedWhitelistRank != null)
-            {
-                // No API data - use whitelist cache
-                displayRank = formattedWhitelistRank;
-            }
+            // Rank resolved either from a prior fight (API-set) or a
+            // previous scene shard lookup — both land in displayedRanks.
+            String displayRank = displayedRanks.get(nameKey);
 
-            // Whitelisted + visible but still no label — the
-            // whitelist.json row may be missing this bucket, the
-            // player may have just opted in (CDN whitelist lags
-            // heartbeats), or shards may have fresher data than
-            // the last whitelist pull. Kick an async shard read
-            // (bypass positive cache) instead of waiting up to
-            // 9:30 for the next whitelist.json refresh.
+            // Opted-in + visible but no label yet — kick a cached shard
+            // read to resolve it. Passive (cache-first) so a crowded
+            // scene is served from the 6h positive cache / missing-player
+            // negative cache instead of hammering the CDN each retry.
             if (displayRank == null)
             {
                 fetchSceneShardRankIfNeeded(playerName, bucket, nameKey);
@@ -628,18 +595,31 @@ public class RankOverlay extends Overlay
     }
 
     /**
-     * Async shard fetch for a whitelisted, in-scene player who still
-     * has no rank label. Uses {@code bypassCache=true} so each retry
-     * picks up the DynamoDB-stream writer's ~30 s shard updates
-     * instead of a stale passive-cache entry. Throttled to one
-     * in-flight attempt per player and {@link #SCENE_SHARD_RETRY_MS}
-     * between attempts so render() doesn't hammer the CDN.
+     * Async shard fetch for an opted-in, in-scene player who still has
+     * no rank label. Uses the passive (cache-first) lookup so repeat
+     * resolutions across a crowded scene are served from the 6h
+     * positive shard cache — and genuinely-unranked players from the
+     * missing-player negative cache — instead of hitting the CDN on
+     * every retry. Throttled to one in-flight attempt per player and
+     * {@link #SCENE_SHARD_RETRY_MS} between attempts so render() never
+     * calls the service every frame. A resolved rank lands in
+     * {@link #displayedRanks} and renders on the next frame; a peer's
+     * own post-fight rank change still updates immediately via the
+     * API-set path.
      */
     private void fetchSceneShardRankIfNeeded(String playerName, String bucket, String nameKey)
     {
         long now = System.currentTimeMillis();
+        // First attempt for a player has no recorded timestamp — map.get
+        // returns a null Long. Coalesce to 0L (the "never attempted"
+        // sentinel shouldAttemptSceneShardLookup expects); passing the
+        // null straight into the primitive-long param autounboxes to an
+        // NPE that the render() wrapper swallows, which is exactly what
+        // silently blocked EVERY scene rank resolution once whitelist.json
+        // rank data was removed.
+        Long lastAttempt = sceneShardLastAttemptMs.get(nameKey);
         if (!shouldAttemptSceneShardLookup(
-            sceneShardLastAttemptMs.get(nameKey), now, SCENE_SHARD_RETRY_MS,
+            lastAttempt == null ? 0L : lastAttempt, now, SCENE_SHARD_RETRY_MS,
             sceneShardInFlight.containsKey(nameKey)))
         {
             return;
@@ -649,10 +629,10 @@ public class RankOverlay extends Overlay
             return;
         }
         sceneShardLastAttemptMs.put(nameKey, now);
-        log.debug("[Overlay] Scene shard lookup (bypass) for whitelisted player {} bucket={}",
+        log.debug("[Overlay] Scene shard lookup (cached) for opted-in player {} bucket={}",
             playerName, bucket);
 
-        pvpDataService.getShardRankByName(playerName, bucket, true)
+        pvpDataService.getShardRankByName(playerName, bucket, false)
             .whenComplete((sr, ex) ->
             {
                 sceneShardInFlight.remove(nameKey);
@@ -668,9 +648,7 @@ public class RankOverlay extends Overlay
                         playerName, bucket, SCENE_SHARD_RETRY_MS / 1000L);
                     return;
                 }
-                long fetchedAt = System.currentTimeMillis();
                 displayedRanks.put(nameKey, sr.tier);
-                displayedRanksTimestamp.put(nameKey, fetchedAt);
                 log.debug("[Overlay] Scene shard rank for {} bucket={}: {}",
                     playerName, bucket, sr.tier);
             });
@@ -698,7 +676,6 @@ public class RankOverlay extends Overlay
                 if (apiTier != null)
                 {
                     displayedRanks.put(key, apiTier);
-                    displayedRanksTimestamp.put(key, fetchCompletedAt);
                     apiSetRanks.put(key, apiTier);
                     log.debug("[Overlay] Self rank fetched from API: {} = {}", selfName, apiTier);
                     nextSelfRankAllowedAtMs = fetchCompletedAt + 60_000L;
@@ -744,7 +721,6 @@ public class RankOverlay extends Overlay
                             // Shard cache has refreshed with matching data - clear the API override
                             apiSetRanks.remove(key);
                             displayedRanks.put(key, shardRank);
-                            displayedRanksTimestamp.put(key, fetchCompletedAt);
                             log.debug("[Overlay] Shard cache refreshed for {}: {} (API override cleared)", selfName, shardRank);
                         }
                         else
@@ -758,7 +734,6 @@ public class RankOverlay extends Overlay
                     {
                         // No API override - use shard data
                         displayedRanks.put(key, shardRank);
-                        displayedRanksTimestamp.put(key, fetchCompletedAt);
                         log.debug("[Overlay] Self rank fetched from shard (fallback): {} = {}", selfName, shardRank);
                     }
                     nextSelfRankAllowedAtMs = fetchCompletedAt + 60_000L;

@@ -50,8 +50,14 @@ public class PvPDataService
 	private final ClientIdentityService clientIdentityService;
 
 	// Shard lookup caching
-    // Per spec: Shard Files = 60m TTL
-	private static final long SHARD_CACHE_EXPIRY_MS = 60L * 60L * 1000L; 
+    // 6-hour positive TTL. The rank overlay resolves peer ranks through
+    // the passive (cached) shard path, so this TTL directly bounds overlay
+    // CDN egress at scale — a busy scene re-reads from memory for 6h
+    // instead of re-hitting the CDN. Overhead ranks tolerate up to 6h of
+    // staleness; a peer's own post-fight rank still updates immediately via
+    // the API-set path (PlayerRankEvent -> displayedRanks). Pinned by
+    // PvPDataServiceShardCacheTtlTest.
+	private static final long SHARD_CACHE_EXPIRY_MS = 6L * 60L * 60L * 1000L; 
     // "Not Found" State = 1 hour TTL
 	private static final long MISSING_PLAYER_BACKOFF_MS = 60L * 60L * 1000L;
     // Failed fetch backoff
