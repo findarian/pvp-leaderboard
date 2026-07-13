@@ -9,6 +9,7 @@ import com.pvp.leaderboard.cache.MatchesCacheEntry;
 import com.pvp.leaderboard.cache.ShardEntry;
 import com.pvp.leaderboard.cache.UserStatsCache;
 import com.pvp.leaderboard.config.PvPLeaderboardConfig;
+import com.pvp.leaderboard.util.NameUtils;
 import com.pvp.leaderboard.util.RankUtils;
 import lombok.extern.slf4j.Slf4j;
 import okhttp3.CacheControl;
@@ -98,8 +99,7 @@ public class PvPDataService
      */
     public void clearShardNegativeCache(String playerName) {
         if (playerName == null) return;
-        String canonicalName = playerName.trim().replaceAll("\\s+", " ").toLowerCase();
-        missingPlayerUntilMs.remove(canonicalName);
+        missingPlayerUntilMs.remove(NameUtils.canonicalKey(playerName));
     }
 
     // User Profile Caching
@@ -499,8 +499,9 @@ public class PvPDataService
 
     private static String canonicalUserCacheKey(String playerName)
     {
-        if (playerName == null) return "";
-        return playerName.trim().replaceAll("\\s+", " ").toLowerCase();
+        // NameUtils handles the nameplate non-breaking space (\u00A0) so a
+        // scene-sourced name and a feed/JSON-sourced name share one cache key.
+        return NameUtils.canonicalKey(playerName);
     }
 
     private static String userProfileCacheKey(String playerName)
@@ -848,8 +849,10 @@ public class PvPDataService
             return CompletableFuture.completedFuture(null);
         }
 
-        // 1. Canonicalize Name and bucket (normalize spaces for consistency)
-        String canonicalName = playerName.trim().replaceAll("\\s+", " ").toLowerCase();
+        // 1. Canonicalize Name and bucket (normalize spaces for consistency;
+        // NameUtils also maps nameplate \u00A0 separators to regular spaces
+        // so scene names match the backend-canonical shard keys).
+        String canonicalName = NameUtils.canonicalKey(playerName);
         String bucketPath = (bucket == null || bucket.isEmpty()) ? "overall" : bucket.toLowerCase();
 
         // Dedupe key includes the bypass flag so a passive cached

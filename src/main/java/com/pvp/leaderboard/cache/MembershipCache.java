@@ -1,5 +1,6 @@
 package com.pvp.leaderboard.cache;
 
+import com.pvp.leaderboard.util.NameUtils;
 import lombok.extern.slf4j.Slf4j;
 
 import javax.inject.Inject;
@@ -155,9 +156,12 @@ public class MembershipCache
         return out;
     }
 
-    /** Matches the backend {@code canon_name}: trim, collapse spaces, lowercase. */
+    /** Matches the backend {@code canon_name}: trim, collapse spaces, lowercase.
+     *  Delegates to {@link NameUtils#canonicalKey} — the single plugin-side
+     *  canonicalization authority — so nameplate forms with non-breaking
+     *  spaces ({@code \u00A0}) match the feed's backend-canonical names. */
     private static String canonicalize(String name)
     {
-        return name.trim().replaceAll("\\s+", " ").toLowerCase();
+        return NameUtils.canonicalKey(name);
     }
 }

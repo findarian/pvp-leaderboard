@@ -68,6 +68,17 @@ public class RankOverlay extends Overlay
     private final ConcurrentHashMap<String, Long> sceneShardLastAttemptMs = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, Boolean> sceneShardInFlight = new ConcurrentHashMap<>();
 
+    /** Negative backoff for the profile-API fallback used when a scene
+     *  player misses the CDN shard (mirrors the lobby's shard→/user
+     *  fallback). The shard GET is cheap + CDN/negative-cached, but the
+     *  {@code /user} profile fetch is a Lambda+DynamoDB call, so a player
+     *  who resolves in NEITHER shard nor profile must not re-hit /user on
+     *  every {@link #SCENE_SHARD_RETRY_MS} tick. Positive resolutions are
+     *  cached permanently in {@link #displayedRanks}, so this only rate
+     *  limits genuinely-unresolvable players. */
+    private static final long SCENE_PROFILE_MISS_BACKOFF_MS = 10L * 60L * 1000L;
+    private final ConcurrentHashMap<String, Long> sceneProfileMissUntilMs = new ConcurrentHashMap<>();
+
     // MMR change notification queue (for multi-kill scenarios)
     private final java.util.concurrent.ConcurrentLinkedQueue<MmrNotification> mmrNotificationQueue = new java.util.concurrent.ConcurrentLinkedQueue<>();
     private volatile MmrNotification currentMmrNotification = null;
@@ -445,6 +456,7 @@ public class RankOverlay extends Overlay
             apiSetRanks.clear();
             sceneShardLastAttemptMs.clear();
             sceneShardInFlight.clear();
+            sceneProfileMissUntilMs.clear();
             lastBucketKey = currentBucket;
             selfRankAttempted = false;
             nextSelfRankAllowedAtMs = 0L;
@@ -578,7 +590,7 @@ public class RankOverlay extends Overlay
             // negative cache instead of hammering the CDN each retry.
             if (displayRank == null)
             {
-                fetchSceneShardRankIfNeeded(playerName, bucket, nameKey);
+                fetchSceneRankIfNeeded(playerName, bucket, nameKey);
                 continue;
             }
             
@@ -595,19 +607,27 @@ public class RankOverlay extends Overlay
     }
 
     /**
-     * Async shard fetch for an opted-in, in-scene player who still has
-     * no rank label. Uses the passive (cache-first) lookup so repeat
-     * resolutions across a crowded scene are served from the 6h
-     * positive shard cache — and genuinely-unranked players from the
-     * missing-player negative cache — instead of hitting the CDN on
-     * every retry. Throttled to one in-flight attempt per player and
+     * Async two-tier rank resolution for an opted-in, in-scene player who
+     * still has no rank label — mirrors {@code WebSocketLobbyService}'s
+     * roster enrichment:
+     * <ol>
+     *   <li><b>Shard</b> (passive, cache-first): served from the 6h
+     *       positive shard cache, or the missing-player negative cache,
+     *       so a crowded scene doesn't re-hit the CDN every retry.</li>
+     *   <li><b>Profile API fallback</b> on a shard miss: players the shard
+     *       writer hasn't picked up for this bucket only resolve via the
+     *       {@code /user} endpoint. Rate-limited by
+     *       {@link #SCENE_PROFILE_MISS_BACKOFF_MS} so an unresolvable
+     *       player doesn't hammer the Lambda+DynamoDB path.</li>
+     * </ol>
+     * Throttled to one in-flight attempt per player and
      * {@link #SCENE_SHARD_RETRY_MS} between attempts so render() never
      * calls the service every frame. A resolved rank lands in
-     * {@link #displayedRanks} and renders on the next frame; a peer's
-     * own post-fight rank change still updates immediately via the
-     * API-set path.
+     * {@link #displayedRanks} (cached until bucket change) and renders on
+     * the next frame; a peer's own post-fight rank change still updates
+     * immediately via the API-set path.
      */
-    private void fetchSceneShardRankIfNeeded(String playerName, String bucket, String nameKey)
+    private void fetchSceneRankIfNeeded(String playerName, String bucket, String nameKey)
     {
         long now = System.currentTimeMillis();
         // First attempt for a player has no recorded timestamp — map.get
@@ -629,28 +649,66 @@ public class RankOverlay extends Overlay
             return;
         }
         sceneShardLastAttemptMs.put(nameKey, now);
-        log.debug("[Overlay] Scene shard lookup (cached) for opted-in player {} bucket={}",
+        log.debug("[Overlay] Scene rank lookup (cached shard) for opted-in player {} bucket={}",
             playerName, bucket);
 
         pvpDataService.getShardRankByName(playerName, bucket, false)
             .whenComplete((sr, ex) ->
             {
-                sceneShardInFlight.remove(nameKey);
                 if (ex != null)
                 {
+                    sceneShardInFlight.remove(nameKey);
                     log.debug("[Overlay] Scene shard lookup failed for {}: {}",
                         playerName, ex.getMessage());
                     return;
                 }
-                if (sr == null || sr.tier == null || sr.tier.trim().isEmpty())
+                if (sr != null && sr.tier != null && !sr.tier.trim().isEmpty())
                 {
-                    log.debug("[Overlay] Scene shard lookup miss for {} bucket={} (retry in {}s)",
-                        playerName, bucket, SCENE_SHARD_RETRY_MS / 1000L);
+                    sceneShardInFlight.remove(nameKey);
+                    displayedRanks.put(nameKey, sr.tier);
+                    log.debug("[Overlay] Scene shard rank for {} bucket={}: {}",
+                        playerName, bucket, sr.tier);
                     return;
                 }
-                displayedRanks.put(nameKey, sr.tier);
-                log.debug("[Overlay] Scene shard rank for {} bucket={}: {}",
-                    playerName, bucket, sr.tier);
+                // Shard miss — fall back to the profile API exactly like the
+                // lobby roster enrichment (WebSocketLobbyService). Players the
+                // shard writer hasn't picked up for this bucket (e.g. "RUN
+                // PIGGY") only resolve via /user. Rate-limited by a negative
+                // backoff so an unresolvable player doesn't re-hit the
+                // Lambda+DynamoDB path on every scene-retry tick.
+                Long missUntil = sceneProfileMissUntilMs.get(nameKey);
+                if (missUntil != null && System.currentTimeMillis() < missUntil)
+                {
+                    sceneShardInFlight.remove(nameKey);
+                    return;
+                }
+                log.debug("[Overlay] Scene shard miss for {} bucket={} — trying profile API",
+                    playerName, bucket);
+                pvpDataService.getRankFromProfileForLobby(playerName, bucket)
+                    .whenComplete((psr, pex) ->
+                    {
+                        sceneShardInFlight.remove(nameKey);
+                        if (pex != null)
+                        {
+                            log.debug("[Overlay] Scene profile lookup failed for {}: {}",
+                                playerName, pex.getMessage());
+                            return;
+                        }
+                        if (psr != null && psr.tier != null && !psr.tier.trim().isEmpty())
+                        {
+                            displayedRanks.put(nameKey, psr.tier);
+                            log.debug("[Overlay] Scene profile rank for {} bucket={}: {}",
+                                playerName, bucket, psr.tier);
+                            return;
+                        }
+                        // Unresolved in both shard and profile — back off the
+                        // profile retry to protect the /user endpoint.
+                        sceneProfileMissUntilMs.put(nameKey,
+                            System.currentTimeMillis() + SCENE_PROFILE_MISS_BACKOFF_MS);
+                        log.debug("[Overlay] Scene rank unresolved for {} bucket={} "
+                            + "(shard+profile miss) — profile backoff {}m",
+                            playerName, bucket, SCENE_PROFILE_MISS_BACKOFF_MS / 60_000L);
+                    });
             });
     }
 
