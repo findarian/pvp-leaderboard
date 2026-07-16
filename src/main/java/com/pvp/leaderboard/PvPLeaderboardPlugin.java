@@ -1,5 +1,6 @@
 package com.pvp.leaderboard;
 
+import com.google.gson.Gson;
 import com.google.inject.Provides;
 import com.pvp.leaderboard.config.PvPLeaderboardConfig;
 import com.pvp.leaderboard.game.FightMonitor;
@@ -8,12 +9,14 @@ import com.pvp.leaderboard.overlay.LobbyInviteNotificationOverlay;
 import com.pvp.leaderboard.overlay.MatchFoundNotificationOverlay;
 import com.pvp.leaderboard.overlay.PluginDisableWarningOverlay;
 import com.pvp.leaderboard.overlay.RankOverlay;
+import com.pvp.leaderboard.pvptracker.FightPerformance;
 import com.pvp.leaderboard.service.ClientIdentityService;
 import com.pvp.leaderboard.service.DiscordAuthService;
 import com.pvp.leaderboard.service.MembershipService;
 import com.pvp.leaderboard.service.PvPDataService;
 import com.pvp.leaderboard.service.WhitelistService;
 import com.pvp.leaderboard.ui.DashboardPanel;
+import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import javax.inject.Inject;
@@ -30,6 +33,7 @@ import net.runelite.client.eventbus.EventBus;
 import net.runelite.client.eventbus.Subscribe;
 import net.runelite.client.events.ClientShutdown;
 import net.runelite.client.events.ConfigChanged;
+import net.runelite.client.events.PluginMessage;
 import net.runelite.client.input.MouseManager;
 import net.runelite.client.plugins.Plugin;
 import net.runelite.client.plugins.PluginDescriptor;
@@ -112,6 +116,9 @@ public class PvPLeaderboardPlugin extends Plugin
 
 	@Inject
 	private com.pvp.leaderboard.lobby.LobbyPreferences lobbyPreferences;
+
+	@Inject
+	private Gson gson;
 
 	private DashboardPanel dashboardPanel;
 	private NavigationButton navButton;
@@ -746,6 +753,51 @@ public class PvPLeaderboardPlugin extends Plugin
 	PvPLeaderboardConfig provideConfig(ConfigManager configManager)
 	{
 		return configManager.getConfig(PvPLeaderboardConfig.class);
+	}
+
+	@Subscribe
+	public void onPluginMessage(PluginMessage event)
+	{
+		if (!event.getNamespace().equals("PvPLeaderboard"))
+		{
+			return;
+		}
+
+		if (!event.getName().equals("onFightEnded"))
+		{
+			return;
+		}
+
+		Map<String, Object> data = event.getData();
+
+		try
+		{
+			FightPerformance fight = gson.fromJson(data.get("fight").toString(), FightPerformance.class);
+
+			log.info("onPluginMessage: Received FightPerformance from pvp-performance-tracker plugin.");
+			log.info("onPluginMessage - Fight info: "
+				+ fight.competitor.getName()
+				+ " vs. "
+				+ fight.opponent.getName()
+				+ " on t=" + fight.getLastFightTime()
+				+ ", fType=" + fight.fightType.toString()
+
+				+ ", comp OP = " + fight.competitor.getOffPraySuccessCount() + "/" + fight.competitor.getAttackCount()
+				+ ", opp OP = " + fight.opponent.getOffPraySuccessCount() + "/" + fight.opponent.getAttackCount()
+
+				+ ", comp eD = " + fight.competitor.getExpectedDamage()
+				+ ", opp eD = " + fight.opponent.getExpectedDamage()
+
+				+ ", comp DmgDealt = " + fight.competitor.getDamageDealt()
+				+ ", opp DmgDealt = " + fight.opponent.getDamageDealt()
+			);
+		}
+		catch(Exception e)
+		{
+			log.info("onPluginMessage - Unexpected error while reading fight data: " + e.getMessage());
+		}
+
+		// Do something with the fight
 	}
 
 	public Client getClient()
