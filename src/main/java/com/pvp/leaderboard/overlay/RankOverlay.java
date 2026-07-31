@@ -37,6 +37,22 @@ public class RankOverlay extends Overlay
     // API-set path (post-fight) and by scene/self shard lookups; read
     // every frame by the overlay render loop.
     private final ConcurrentHashMap<String, String> displayedRanks = new ConcurrentHashMap<>();
+
+    /** When each {@link #displayedRanks} entry was last written or
+     *  re-checked, in millis since epoch. Drives {@link #PEER_RANK_REFRESH_MS}. */
+    private final ConcurrentHashMap<String, Long> displayedRankAtMs = new ConcurrentHashMap<>();
+
+    /** How long a peer's rank label may go without a re-resolution
+     *  attempt. Without this, a label resolved once was pinned for the
+     *  whole session: the scene loop only looks a player up when it has
+     *  NO label, so an existing entry short-circuited every later read
+     *  and {@code PvPDataService.SHARD_CACHE_EXPIRY_MS} (6h) was never
+     *  reached for overhead ranks. Deliberately far below that TTL so a
+     *  refresh lands on the next shard generation shortly after it
+     *  expires; refreshes inside the TTL are served from the in-memory
+     *  shard cache, so the added CDN cost is one read per player per 6h.
+     *  Pinned by RankOverlayPeerRankRefreshTest. */
+    static final long PEER_RANK_REFRESH_MS = 15L * 60L * 1000L;
     
     // API-set ranks that should persist until shard cache refreshes with matching data
     private final ConcurrentHashMap<String, String> apiSetRanks = new ConcurrentHashMap<>();
@@ -206,11 +222,33 @@ public class RankOverlay extends Overlay
             return;
         }
         String key = NameUtils.canonicalKey(playerName);
-        displayedRanks.put(key, rank);
+        putDisplayedRank(key, rank);
         // Track this as an API-set rank - persists until shard cache confirms with same rank
         apiSetRanks.put(key, rank);
         pvpDataService.clearShardNegativeCache(playerName);
         log.debug("[Overlay] setRankFromApi: key={} rank={} (will persist until shard confirms)", key, rank);
+    }
+
+    /**
+     * Write a resolved rank label and stamp it for the refresh cadence.
+     * Every path that populates {@link #displayedRanks} must go through
+     * here, otherwise the entry looks ageless to
+     * {@link #isDisplayedRankStale}.
+     */
+    private void putDisplayedRank(String nameKey, String rank)
+    {
+        displayedRanks.put(nameKey, rank);
+        displayedRankAtMs.put(nameKey, System.currentTimeMillis());
+    }
+
+    /** Package-private for unit tests — decides whether a displayed rank
+     *  label is old enough to warrant a background re-resolution. A null
+     *  timestamp means the label came from a path that didn't stamp it,
+     *  so its age is unknown; treat it as due so the map self-heals. */
+    static boolean isDisplayedRankStale(Long setAtMs, long nowMs, long refreshIntervalMs)
+    {
+        if (setAtMs == null) return true;
+        return nowMs - setAtMs >= refreshIntervalMs;
     }
 
     /**
@@ -453,6 +491,7 @@ public class RankOverlay extends Overlay
         if (lastBucketKey == null || !lastBucketKey.equals(currentBucket))
         {
             displayedRanks.clear();
+            displayedRankAtMs.clear();
             apiSetRanks.clear();
             sceneShardLastAttemptMs.clear();
             sceneShardInFlight.clear();
@@ -588,11 +627,26 @@ public class RankOverlay extends Overlay
             // read to resolve it. Passive (cache-first) so a crowded
             // scene is served from the 6h positive cache / missing-player
             // negative cache instead of hammering the CDN each retry.
+            // The profile fallback is allowed here: a blank head has
+            // nothing to show, so the expensive path is worth it.
             if (displayRank == null)
             {
-                fetchSceneRankIfNeeded(playerName, bucket, nameKey);
+                fetchSceneRankIfNeeded(playerName, bucket, nameKey, true);
                 continue;
             }
+
+            // Label present but past its refresh interval — re-resolve in
+            // the background while still rendering the current value, so
+            // a peer who ranked up mid-session stops showing a label
+            // frozen at whatever it was when we first saw them. Shard
+            // only: we already have something to display, so a miss must
+            // not escalate to the /user Lambda.
+            if (isDisplayedRankStale(displayedRankAtMs.get(nameKey),
+                System.currentTimeMillis(), PEER_RANK_REFRESH_MS))
+            {
+                fetchSceneRankIfNeeded(playerName, bucket, nameKey, false);
+            }
+
             
             // Get player's screen position
             Point headLoc = player.getCanvasTextLocation(graphics, "", heightOffset);
@@ -623,11 +677,19 @@ public class RankOverlay extends Overlay
      * Throttled to one in-flight attempt per player and
      * {@link #SCENE_SHARD_RETRY_MS} between attempts so render() never
      * calls the service every frame. A resolved rank lands in
-     * {@link #displayedRanks} (cached until bucket change) and renders on
-     * the next frame; a peer's own post-fight rank change still updates
-     * immediately via the API-set path.
+     * {@link #displayedRanks} and renders on the next frame, and is
+     * re-resolved every {@link #PEER_RANK_REFRESH_MS}; a peer's own
+     * post-fight rank change still updates immediately via the API-set
+     * path.
+     *
+     * @param allowProfileFallback whether a shard miss may escalate to
+     *        the {@code /user} profile API. True for a player with no
+     *        label at all, false for a periodic refresh of a label we can
+     *        already render — the fallback is a Lambda+DynamoDB call and
+     *        isn't worth paying to confirm a rank we're already showing.
      */
-    private void fetchSceneRankIfNeeded(String playerName, String bucket, String nameKey)
+    private void fetchSceneRankIfNeeded(String playerName, String bucket, String nameKey,
+                                        boolean allowProfileFallback)
     {
         long now = System.currentTimeMillis();
         // First attempt for a player has no recorded timestamp — map.get
@@ -649,6 +711,11 @@ public class RankOverlay extends Overlay
             return;
         }
         sceneShardLastAttemptMs.put(nameKey, now);
+        // Re-arm the refresh cadence at ATTEMPT time, not on completion:
+        // a lookup that fails or resolves nothing must still wait a full
+        // interval, otherwise an unresolvable player would retry every
+        // SCENE_SHARD_RETRY_MS forever.
+        displayedRankAtMs.put(nameKey, now);
         log.debug("[Overlay] Scene rank lookup (cached shard) for opted-in player {} bucket={}",
             playerName, bucket);
 
@@ -665,9 +732,16 @@ public class RankOverlay extends Overlay
                 if (sr != null && sr.tier != null && !sr.tier.trim().isEmpty())
                 {
                     sceneShardInFlight.remove(nameKey);
-                    displayedRanks.put(nameKey, sr.tier);
-                    log.debug("[Overlay] Scene shard rank for {} bucket={}: {}",
-                        playerName, bucket, sr.tier);
+                    applySceneShardRank(playerName, nameKey, sr.tier);
+                    return;
+                }
+                // Nothing to gain from the profile API when we already
+                // have a label to render — keep the /user path cold.
+                if (!allowProfileFallback)
+                {
+                    sceneShardInFlight.remove(nameKey);
+                    log.debug("[Overlay] Scene rank refresh for {} bucket={} found no shard entry "
+                        + "— keeping existing label", playerName, bucket);
                     return;
                 }
                 // Shard miss — fall back to the profile API exactly like the
@@ -696,7 +770,7 @@ public class RankOverlay extends Overlay
                         }
                         if (psr != null && psr.tier != null && !psr.tier.trim().isEmpty())
                         {
-                            displayedRanks.put(nameKey, psr.tier);
+                            putDisplayedRank(nameKey, psr.tier);
                             log.debug("[Overlay] Scene profile rank for {} bucket={}: {}",
                                 playerName, bucket, psr.tier);
                             return;
@@ -710,6 +784,32 @@ public class RankOverlay extends Overlay
                             playerName, bucket, SCENE_PROFILE_MISS_BACKOFF_MS / 60_000L);
                     });
             });
+    }
+
+    /**
+     * Adopt a shard-resolved rank for a scene player, deferring to a
+     * post-fight API rank that the shard hasn't caught up to yet.
+     *
+     * <p>Mirrors {@link #fetchRankForSelfFromShard}'s reconciliation: an
+     * API rank is newer than any shard generation, so a disagreeing shard
+     * read is stale data and must not clobber it. Once the shard agrees,
+     * the override has served its purpose and is dropped.
+     */
+    private void applySceneShardRank(String playerName, String nameKey, String shardRank)
+    {
+        String apiRank = apiSetRanks.get(nameKey);
+        if (apiRank != null && !apiRank.equals(shardRank))
+        {
+            log.debug("[Overlay] Preserving API rank for {}: {} (shard has stale: {})",
+                playerName, apiRank, shardRank);
+            return;
+        }
+        if (apiRank != null)
+        {
+            apiSetRanks.remove(nameKey);
+        }
+        putDisplayedRank(nameKey, shardRank);
+        log.debug("[Overlay] Scene shard rank for {}: {}", playerName, shardRank);
     }
 
     /** Package-private for unit tests — decides whether a new scene
@@ -733,7 +833,7 @@ public class RankOverlay extends Overlay
                 
                 if (apiTier != null)
                 {
-                    displayedRanks.put(key, apiTier);
+                    putDisplayedRank(key, apiTier);
                     apiSetRanks.put(key, apiTier);
                     log.debug("[Overlay] Self rank fetched from API: {} = {}", selfName, apiTier);
                     nextSelfRankAllowedAtMs = fetchCompletedAt + 60_000L;
@@ -778,7 +878,7 @@ public class RankOverlay extends Overlay
                         {
                             // Shard cache has refreshed with matching data - clear the API override
                             apiSetRanks.remove(key);
-                            displayedRanks.put(key, shardRank);
+                            putDisplayedRank(key, shardRank);
                             log.debug("[Overlay] Shard cache refreshed for {}: {} (API override cleared)", selfName, shardRank);
                         }
                         else
@@ -791,7 +891,7 @@ public class RankOverlay extends Overlay
                     else
                     {
                         // No API override - use shard data
-                        displayedRanks.put(key, shardRank);
+                        putDisplayedRank(key, shardRank);
                         log.debug("[Overlay] Self rank fetched from shard (fallback): {} = {}", selfName, shardRank);
                     }
                     nextSelfRankAllowedAtMs = fetchCompletedAt + 60_000L;
