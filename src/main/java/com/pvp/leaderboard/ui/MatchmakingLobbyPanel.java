@@ -13,7 +13,14 @@ import com.pvp.leaderboard.lobby.NoOpLobbyJoinGate;
 import com.pvp.leaderboard.lobby.MatchInfo;
 import com.pvp.leaderboard.lobby.OutgoingInvite;
 import com.pvp.leaderboard.lobby.Style;
+import com.pvp.leaderboard.queue.NoOpQueueService;
+import com.pvp.leaderboard.queue.QueueEventListener;
+import com.pvp.leaderboard.queue.QueuePrefs;
+import com.pvp.leaderboard.queue.QueueService;
+import com.pvp.leaderboard.queue.QueueState;
+import com.pvp.leaderboard.queue.QueueText;
 import com.pvp.leaderboard.util.RankUtils;
+import com.pvp.leaderboard.util.SlowPathMonitor;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -75,6 +82,8 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
     /** Stable test hook — {@link com.pvp.leaderboard.DashboardPanelTest} finds the
      *  scrolling roster container by this name. Don't rename without updating tests. */
     public static final String ROSTER_NAME = "matchmaking-roster";
+    /** The incoming-invite strip above the root cards (set 7). */
+    public static final String INVITES_NAME = "matchmaking-invites";
 
     /** Test hook on each row's action chip ([Fight] / [Lookup] / [×]) —
      *  the single name lets tests count rows regardless of chip variant. */
@@ -83,15 +92,27 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
     /** Human-readable rank labels derived once from {@link RankUtils#THRESHOLDS}. */
     private static final String[] RANK_LABELS = buildRankLabels();
 
-    /** Root card keys: pre-lobby gate, browseable lobby, and the full-screen
-     *  fight-setup view (Pick Style → optional sub-location → Meet At) that
-     *  takes over the panel between [Fight] and "Go back to Lobby". The
-     *  card-key strings double as {@link Component#getName()} on each
-     *  card's root panel so tests (and any future "which card am I on?"
-     *  diagnostic) can find the currently-visible card by name. */
+    /** Root card keys: the gate — since set 7 (operator 2026-09-22) the
+     *  <b>queue view</b> every player rests on: region / style / build
+     *  picks, the {@link QueueGateSection} with the one <b>Queue for
+     *  Matchmaking</b> button, and Go to lobby for moderators —, the
+     *  roster ("all the open socket connections with players"): the
+     *  moderators' <b>mod view</b>, attached to the card host only while
+     *  {@link LobbyJoinGate#isMod()} says so ({@link #applyModAccess}),
+     *  and the full-screen fight-setup view (Pick Style → optional
+     *  sub-location → Meet At) that takes over the panel between [Fight] /
+     *  a queue match and "Go back to Lobby". The card-key strings double
+     *  as {@link Component#getName()} on each card's root panel so tests
+     *  (and any future "which card am I on?" diagnostic) can find the
+     *  currently-visible card by name. Every switch goes through
+     *  {@link #showCard(String)}. */
     public static final String CARD_GATE = "gate";
     public static final String CARD_LOBBY = "lobby";
     public static final String CARD_FIGHT = "fight";
+    /** Plan 10 F.1: the matchmaking queue's "Searching…" card
+     *  ({@link QueueSearchingPanel}), shown while {@code queue/state} says
+     *  searching and never over a fight being set up. */
+    public static final String CARD_QUEUE = "queue";
 
     /** Stable {@link Component#getName()} on {@code rootCardHost} so
      *  tests can locate it without walking layout indices. */
@@ -188,8 +209,42 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
     private final Map<BuildType, JToggleButton> buildToggles = new EnumMap<>(BuildType.class);
     private JComboBox<String> regionCombo;
     /** Disabled until ≥1 style is selected AND an account type is picked.
-     *  Re-evaluated whenever any gate toggle changes. */
+     *  Re-evaluated whenever any gate toggle changes. Set 7: shown to
+     *  moderators only — it opens the roster (the mod view). */
     private JButton goToLobbyBtn;
+
+    // -------------------- Set 7 (operator 2026-09-22): queue view / mod view --------------------
+    /** The roster card. Built once (its widgets are written to by the
+     *  server pushes whoever the player is) but attached to
+     *  {@link #rootCardHost} only while {@link LobbyJoinGate#isMod()} — for
+     *  a regular player it is not hidden, it is not in the tree
+     *  ({@link #applyModAccess}). */
+    private JPanel lobbyCard;
+    /** {@code true} while a moderator has picked the mod view (the roster)
+     *  over the queue view — the dashboard's sub-nav toggle or Go to
+     *  lobby. Session-only and reset on logout: the queue view is the
+     *  default on every login, for moderators too. */
+    private boolean modViewSelected;
+    /** {@link #refreshInvitesContainer()}'s answer, kept so a card switch
+     *  can re-apply the strip's visibility without re-walking the cards. */
+    private boolean invitesAnyVisible;
+    /** Told after every card switch and every {@link #setModView} so the
+     *  dashboard's "Queue view" / "Mod view" toggle can relabel itself —
+     *  the panel changes view on its own too (Go to lobby, Leave Lobby, a
+     *  logout). Null-safe; the dashboard wires it. */
+    private Runnable onViewChanged;
+
+    // -------------------- Plan 10 F.1: matchmaking queue --------------------
+    /** Queue transport. Inert until {@link #setQueueService} wires the real
+     *  one (the plugin does, config-gated); the gate hides the queue block
+     *  while it is inert. */
+    private QueueService queueService = new NoOpQueueService();
+    /** The gate's queue block (wait picker, rank-range toggle, queue
+     *  button); visibility follows {@link QueueService#isAvailable()}. */
+    private QueueGateSection queueSection;
+    /** The {@link #CARD_QUEUE} card; ticked at 1 Hz by
+     *  {@link #onFightTick()} while it is the visible card. */
+    private QueueSearchingPanel queueCard;
 
     /** Pinned strip at the top of the lobby (above the roster scroll) that
      *  holds zero or more {@link IncomingInvitePanel} cards — one per
@@ -692,17 +747,33 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         rootCards = new CardLayout();
         rootCardHost = new JPanel(rootCards);
         rootCardHost.setName(ROOT_CARD_HOST_NAME);
+        // Set 7: the incoming-invite strip lives ABOVE the cards, not in the
+        // roster card — a regular player never sees the roster but must
+        // still be able to accept a moderator's invite. Built before the
+        // gate because applyLoginGateState() (run inside buildStyleGate)
+        // switches cards, which re-applies the strip's visibility.
+        invitesContainer = buildInvitesContainer();
         JPanel gateCard = buildStyleGate();
         gateCard.setName(CARD_GATE);
         rootCardHost.add(gateCard, CARD_GATE);
-        JPanel lobbyCard = buildLobbyView();
+        // The roster card is attached by applyModAccess() — moderators only.
+        lobbyCard = buildLobbyView();
         lobbyCard.setName(CARD_LOBBY);
-        rootCardHost.add(lobbyCard, CARD_LOBBY);
         fightSetupContainer = new JPanel(new BorderLayout());
         fightSetupContainer.setName(CARD_FIGHT);
         rootCardHost.add(fightSetupContainer, CARD_FIGHT);
-        add(rootCardHost, BorderLayout.CENTER);
-        rootCards.show(rootCardHost, CARD_GATE);
+        // Plan 10 F.1: the queue's Searching card. The two buttons route
+        // straight to the transport; the card itself only renders.
+        queueCard = new QueueSearchingPanel(MatchmakingLobbyPanel::rankLabelAt,
+            () -> queueService.expandRange(), () -> queueService.leave());
+        queueCard.setName(CARD_QUEUE);
+        rootCardHost.add(queueCard, CARD_QUEUE);
+        JPanel centre = new JPanel(new BorderLayout());
+        centre.add(invitesContainer, BorderLayout.NORTH);
+        centre.add(rootCardHost, BorderLayout.CENTER);
+        add(centre, BorderLayout.CENTER);
+        applyModAccess();
+        showCard(CARD_GATE);
 
         fightTicker = new Timer(1000, e -> onFightTick());
         fightTicker.setRepeats(true);
@@ -982,6 +1053,15 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
 
         gateContent.add(leftAlignedStrut(12));
 
+        // ---- Plan 10 F.1: matchmaking queue ----
+        // Hidden until the plugin wires a real QueueService (config-gated);
+        // enabled only for exactly one unlocked style + one build — see
+        // refreshQueueButton(), hooked into updateGoToLobbyEnabled().
+        queueSection = new QueueGateSection(prefs, GATE_HEADER_PT, this::onQueueClicked);
+        refreshQueueRangeLabel();
+        queueSection.setVisible(queueService.isAvailable());
+        gateContent.add(queueSection);
+
         goToLobbyBtn = new JButton("Go to lobby");
         goToLobbyBtn.setFont(goToLobbyBtn.getFont().deriveFont(Font.BOLD, 16f));
         goToLobbyBtn.setMargin(new Insets(10, 12, 10, 12));
@@ -994,6 +1074,9 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         goToLobbyBtn.setBorderPainted(false);
         goToLobbyBtn.addActionListener(e ->
         {
+            // Set 7: the roster is the moderators' view; the button is hidden
+            // for everyone else (applyModAccess) and inert if reached anyway.
+            if (!isModerator()) return;
             // Region picker only sets the user's own region — the lobby
             // shows everyone regardless of region. Forward the gate picks
             // to the service; it'll push the roster + any pending incoming
@@ -1019,7 +1102,9 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
             saveGateSelections();
             prefs.setHasJoined(true);
             renderRoster();
-            rootCards.show(rootCardHost, CARD_LOBBY);
+            // Go to lobby means "show me the roster": the mod view.
+            modViewSelected = true;
+            showCard(CARD_LOBBY);
         });
         gateContent.add(goToLobbyBtn);
         updateGoToLobbyEnabled();
@@ -1121,6 +1206,8 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
             // re-computes the unlocked-style set from scratch.
             autoJoinIssuedThisSession = false;
             zeroConfigJoinedThisSession = false;
+            // Set 7: the queue view is the default on every login.
+            modViewSelected = false;
             // Active fight session pinning: the user is mid-confirm
             // (CARD_FIGHT) or already in MeetAt. World hops can briefly
             // pass through LOGIN_SCREEN, and an intentional logout
@@ -1137,12 +1224,26 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
             // CARD_FIGHT gives the user visual continuity so they can
             // hop to the meeting world without losing their place.
             if (currentFightSession != null) return;
-            rootCards.show(rootCardHost, CARD_GATE);
+            // Plan 10 F.1: a logged-out player cannot fight — leave the
+            // queue so the server stops searching for them.
+            if (isCurrentlyOnCard(CARD_QUEUE)) queueService.leave();
+            showCard(CARD_GATE);
             return;
         }
 
-        if ((hasJoinedLobby || zeroConfigJoinedThisSession) && currentFightSession == null)
+        // Set 7: the Searching card is driven by queue/state alone — a gate
+        // tick (the hourly count refresh) must not yank it away.
+        if ((hasJoinedLobby || zeroConfigJoinedThisSession) && currentFightSession == null
+            && !isCurrentlyOnCard(CARD_QUEUE))
         {
+            // Set 7: a member rests on the queue view unless a moderator
+            // asked for the roster; the pick checks below only guard the
+            // roster card.
+            if (!modViewSelected || !isModerator())
+            {
+                showCard(CARD_GATE);
+                return;
+            }
             // Auto-restore safety net: if the persisted gate picks have
             // become invalid since the user last logged in (e.g. all
             // their advertised styles fell below the SMURF_GUARD
@@ -1154,7 +1255,7 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
             // empty-set check below sees the post-cleanup state.
             if (selectedStyles.isEmpty() || selectedBuildTypes.isEmpty())
             {
-                rootCards.show(rootCardHost, CARD_GATE);
+                showCard(CARD_GATE);
                 return;
             }
             // Don't auto-restore the lobby card while SMURF_GUARD
@@ -1167,7 +1268,7 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
                 Integer c = counts.get(s);
                 if (c == null || !LobbyJoinGate.isUnlocked(c))
                 {
-                    rootCards.show(rootCardHost, CARD_GATE);
+                    showCard(CARD_GATE);
                     return;
                 }
             }
@@ -1175,7 +1276,7 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
             // children to find the one with isVisible()==true; cheaper
             // to just always re-issue the show(CARD_LOBBY) — CardLayout
             // is a no-op if we're already on that card.
-            rootCards.show(rootCardHost, CARD_LOBBY);
+            showCard(CARD_LOBBY);
         }
     }
 
@@ -1241,23 +1342,18 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         EnumSet<Style> unlocked = unlockedStyles();
         if (unlocked.isEmpty()) return; // doesn't qualify in any style yet
 
-        selectedStyles.clear();
-        selectedStyles.addAll(unlocked);
-        selectedBuildTypes.clear();
-        selectedBuildTypes.addAll(EnumSet.allOf(BuildType.class));
-        // Mirror the new advertised set onto the (hidden) gate widgets +
-        // the self-preview row so a later Leave Lobby → gate visit shows
-        // a coherent starting state.
-        syncGateToggleSelections();
-        refreshCurrentStyleLabel();
-        renderSelfPreview();
-
-        service.joinLobby(selfRegion, selectedStyles, selectedBuildTypes,
-            rankMinIdx, rankMaxIdx, pickSortBucket());
+        // Set 7: the wire set is advertised as before (every unlocked style,
+        // every build, the same sort bucket) but it no longer overwrites the
+        // user's own picks — those are the queue's picks (one style + one
+        // build, persisted by the queue click / Go to lobby), and a login
+        // must not reset them to "everything selected", which disabled the
+        // queue button on every login.
+        service.joinLobby(selfRegion, unlocked, EnumSet.allOf(BuildType.class),
+            rankMinIdx, rankMaxIdx, sortBucketFor(unlocked));
         autoJoinIssuedThisSession = true;
         zeroConfigJoinedThisSession = true;
         renderRoster();
-        rootCards.show(rootCardHost, CARD_LOBBY);
+        showCard(memberHomeCard());
     }
 
     /** The set of styles the user has unlocked (match count at/over the
@@ -1277,23 +1373,6 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         return out;
     }
 
-    /** Pushes {@link #selectedStyles}/{@link #selectedBuildTypes} onto the
-     *  gate toggle buttons' selected state. {@code setSelected} fires only
-     *  the item-listener (visual repaint), never the action-listener (which
-     *  is what mutates+persists the sets), so this is a one-way render sync
-     *  with no feedback loop. No-op before the gate widgets are built. */
-    private void syncGateToggleSelections()
-    {
-        for (Map.Entry<Style, JToggleButton> e : styleToggles.entrySet())
-        {
-            e.getValue().setSelected(selectedStyles.contains(e.getKey()));
-        }
-        for (Map.Entry<BuildType, JToggleButton> e : buildToggles.entrySet())
-        {
-            e.getValue().setSelected(selectedBuildTypes.contains(e.getKey()));
-        }
-    }
-
     /** Enables {@link #goToLobbyBtn} only when all gate picks are
      *  satisfied: ≥1 style, ≥1 account build, AND every selected style
      *  has cleared the anti-smurf threshold via {@link #joinGate}. The
@@ -1301,6 +1380,8 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
      *  why they can't proceed yet. */
     private void updateGoToLobbyEnabled()
     {
+        // Plan 10 F.1: the queue button re-evaluates on the same triggers.
+        refreshQueueButton();
         if (goToLobbyBtn == null) return;
         boolean basicPicksOk = !selectedStyles.isEmpty() && !selectedBuildTypes.isEmpty();
         boolean allStylesUnlocked = true;
@@ -1326,6 +1407,329 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         goToLobbyBtn.setBackground(ok ? new Color(0x2e, 0x7d, 0x32) : new Color(0x55, 0x55, 0x55));
     }
 
+    // -------------------- Plan 10 F.1: matchmaking queue --------------------
+
+    /** Wires the queue transport. The plugin passes
+     *  {@code WebSocketQueueService} while the {@code enableQuickMatch}
+     *  config is on and {@link NoOpQueueService} otherwise; either way the
+     *  panel becomes the listener, starts the service and shows / hides the
+     *  gate's queue block. Safe to call again on a config flip — a user
+     *  left on the Searching card by an inert service is returned to the
+     *  gate / lobby. */
+    public void setQueueService(QueueService svc)
+    {
+        QueueService previous = queueService;
+        if (previous != null && previous != svc) previous.setListener(null);
+        queueService = svc == null ? new NoOpQueueService() : svc;
+        queueService.setListener(new QueueEvents());
+        queueService.start();
+        boolean available = queueService.isAvailable();
+        if (queueSection != null)
+        {
+            queueSection.setVisible(available);
+            // G-2: the wait time / rank range live in one row shared with
+            // Discord — write the touched key on a local pick, read the row
+            // back on wire-up. One key per frame: pushing both would let a
+            // wait change overwrite a rank range set on Discord.
+            queueSection.setOnWaitChanged(this::pushQueueWaitPref);
+            queueSection.setOnRangeChanged(this::pushQueueRankRange);
+        }
+        if (available) queueService.requestPrefs();
+        if (!available) returnFromQueueCard(null);
+        updateGoToLobbyEnabled();
+    }
+
+    /** Local wait pick → the shared prefs row, so the Discord modal prefills with it. */
+    private void pushQueueWaitPref()
+    {
+        if (queueSection != null) queueService.sendWaitPref(queueSection.waitPrefS());
+    }
+
+    /** Local rank-range pick → the shared prefs row. Off sends an explicit
+     *  null so the row is cleared rather than left at Discord's value. */
+    private void pushQueueRankRange()
+    {
+        if (queueSection == null) return;
+        boolean rangeOn = queueSection.rangeEnabled();
+        queueService.sendRankRange(rangeOn ? rankMinIdx : QueueState.UNKNOWN,
+            rangeOn ? rankMaxIdx : QueueState.UNKNOWN);
+    }
+
+    /** "Queue for Matchmaking": one style, one build, the user's region,
+     *  the lobby slider bounds when the rank-range toggle is on, and the
+     *  wait preference. The gate picks are persisted like a lobby join. */
+    private void onQueueClicked()
+    {
+        Style style = QueueGateSection.soleStyle(selectedStyles);
+        BuildType build = QueueGateSection.soleBuild(selectedBuildTypes);
+        if (style == null || build == null || queueSection == null) return;
+        boolean rangeOn = queueSection.rangeEnabled();
+        int minIdx = rangeOn ? rankMinIdx : QueueState.UNKNOWN;
+        int maxIdx = rangeOn ? rankMaxIdx : QueueState.UNKNOWN;
+        queueService.join(selfRegion, style, build, minIdx, maxIdx, queueSection.waitPrefS());
+        saveGateSelections();
+        if (rangeOn)
+        {
+            prefs.setQueueMinRankIdx(rankMinIdx);
+            prefs.setQueueMaxRankIdx(rankMaxIdx);
+        }
+    }
+
+    /** Queue button: exactly one unlocked style + exactly one build; while
+     *  disabled the hint names what is missing ({@link #queueHint}). */
+    private void refreshQueueButton()
+    {
+        if (queueSection == null) return;
+        Map<Style, Integer> counts = joinGate != null ? joinGate.getMatchCounts() : null;
+        boolean ok = QueueGateSection.eligible(selectedStyles, selectedBuildTypes, counts);
+        queueSection.setQueueEnabled(ok);
+        if (!ok) queueSection.setHint(queueHint(selectedStyles, selectedBuildTypes, counts));
+    }
+
+    /** The sentence under a disabled queue button — what to pick or unlock
+     *  (set 7): no / several styles, no / several builds, a locked style
+     *  (with the fights still needed), or counts not loaded yet. Pure. */
+    static String queueHint(Set<Style> styles, Set<BuildType> builds, Map<Style, Integer> counts)
+    {
+        Style style = QueueGateSection.soleStyle(styles);
+        if (style == null)
+        {
+            int n = styles == null ? 0 : styles.size();
+            return n == 0 ? "Pick one style to queue." : "Pick exactly one style to queue (" + n + " picked).";
+        }
+        if (QueueGateSection.soleBuild(builds) == null)
+        {
+            int n = builds == null ? 0 : builds.size();
+            return n == 0 ? "Pick your build to queue." : "Pick exactly one build to queue (" + n + " picked).";
+        }
+        Integer count = counts == null ? null : counts.get(style);
+        if (count == null) return "Loading your " + style.label + " match count…";
+        int more = LobbyJoinGate.remaining(count);
+        return style.label + " is locked: " + more + " more " + style.label + " fight" + (more == 1 ? "" : "s")
+            + " to unlock the queue.";
+    }
+
+    /** Keeps the rank-range toggle's label in step with the lobby slider. */
+    private void refreshQueueRangeLabel()
+    {
+        if (queueSection == null) return;
+        queueSection.setRangeLabels(rankLabelAt(rankMinIdx), rankLabelAt(rankMaxIdx));
+    }
+
+    private static String rankLabelAt(int idx)
+    {
+        return RANK_LABELS[clampRankIdx(idx)];
+    }
+
+    /** Walks {@link #rootCardHost}'s children for the visible card and asks
+     *  whether its name is {@code cardName}. CardLayout updates visibility
+     *  synchronously on the EDT, so this read sees the live state. */
+    private boolean isCurrentlyOnCard(String cardName)
+    {
+        if (rootCardHost == null) return false;
+        for (Component c : rootCardHost.getComponents())
+        {
+            if (c.isVisible() && cardName.equals(c.getName())) return true;
+        }
+        return false;
+    }
+
+    // -------------------- Set 7: cards, the queue view and the mod view --------------------
+
+    /** The one way to switch root cards. A request for the roster from a
+     *  player who does not have it (not a moderator) lands on the queue
+     *  view instead, and the incoming-invite strip above the cards is
+     *  re-evaluated (hidden over the fight views). */
+    private void showCard(String card)
+    {
+        if (rootCards == null || rootCardHost == null) return;
+        if (CARD_LOBBY.equals(card) && (lobbyCard == null || lobbyCard.getParent() != rootCardHost))
+        {
+            card = CARD_GATE;
+        }
+        rootCards.show(rootCardHost, card);
+        applyInvitesStripVisibility();
+        fireViewChanged();
+    }
+
+    /** The dashboard's hook — see {@link #onViewChanged}. */
+    public void setOnViewChanged(Runnable listener)
+    {
+        this.onViewChanged = listener;
+    }
+
+    private void fireViewChanged()
+    {
+        Runnable l = onViewChanged;
+        if (l != null) l.run();
+    }
+
+    /** Where the player rests: the queue view (the gate card), or the
+     *  roster for a moderator who asked for the mod view. */
+    private String homeCard()
+    {
+        return modViewSelected && isModerator() ? CARD_LOBBY : CARD_GATE;
+    }
+
+    /** {@link #homeCard()} for a lobby member — the same answer; the pick
+     *  checks that guard the roster card live in
+     *  {@link #applyLoginGateState()}, which runs on every gate tick. */
+    private String memberHomeCard()
+    {
+        return homeCard();
+    }
+
+    /** {@link LobbyJoinGate#isMod()} — the {@code is_mod} field of the
+     *  player's own {@code /user} profile, never a config flag. */
+    public boolean isModerator()
+    {
+        return joinGate != null && joinGate.isMod();
+    }
+
+    /** {@code true} while a moderator is on (or has asked for) the roster. */
+    public boolean isModView()
+    {
+        return modViewSelected && isModerator();
+    }
+
+    /** The dashboard's "Queue view" / "Mod view" toggle. Ignored for a
+     *  regular player (the roster is not theirs); a fight or a search in
+     *  progress keeps its card — the choice applies when that card exits. */
+    public void setModView(boolean modView)
+    {
+        if (!isModerator())
+        {
+            modViewSelected = false;
+            return;
+        }
+        modViewSelected = modView;
+        if (currentFightSession != null || isCurrentlyOnCard(CARD_FIGHT) || isCurrentlyOnCard(CARD_QUEUE))
+        {
+            // The choice is remembered for when that card exits; the
+            // toggle still relabels now.
+            fireViewChanged();
+            return;
+        }
+        showCard(homeCard());
+    }
+
+    /** Attaches the roster card for a moderator and detaches it for
+     *  everyone else — called from the ctor and on every gate tick, so a
+     *  mod status that arrives with {@code /user} (or goes away with an
+     *  account switch) re-evaluates the panel without a restart. Go to
+     *  lobby follows the same rule. */
+    private void applyModAccess()
+    {
+        boolean mod = isModerator();
+        if (goToLobbyBtn != null) goToLobbyBtn.setVisible(mod);
+        if (lobbyCard == null || rootCardHost == null) return;
+        boolean attached = lobbyCard.getParent() == rootCardHost;
+        if (mod && !attached)
+        {
+            rootCardHost.add(lobbyCard, CARD_LOBBY);
+            rootCardHost.revalidate();
+            rootCardHost.repaint();
+        }
+        else if (!mod && attached)
+        {
+            boolean wasShowing = isCurrentlyOnCard(CARD_LOBBY);
+            rootCardHost.remove(lobbyCard);
+            modViewSelected = false;
+            rootCardHost.revalidate();
+            rootCardHost.repaint();
+            if (wasShowing) showCard(CARD_GATE);
+        }
+        else if (!mod)
+        {
+            modViewSelected = false;
+        }
+    }
+
+    /** The incoming-invite strip: shown while it holds an in-range card and
+     *  the panel is not on a fight view (a second fight cannot be accepted
+     *  mid-setup — the server would refuse it anyway). */
+    private void applyInvitesStripVisibility()
+    {
+        if (invitesContainer == null) return;
+        invitesContainer.setVisible(invitesAnyVisible && !isCurrentlyOnCard(CARD_FIGHT));
+    }
+
+    /** The strip's container (above the root cards since set 7): one
+     *  {@link IncomingInvitePanel} per outstanding invite, a divider below. */
+    private JPanel buildInvitesContainer()
+    {
+        JPanel strip = new JPanel();
+        strip.setName(INVITES_NAME);
+        strip.setLayout(new BoxLayout(strip, BoxLayout.Y_AXIS));
+        strip.setBorder(BorderFactory.createCompoundBorder(
+            new MatteBorder(0, 0, 1, 0, new Color(0x40, 0x40, 0x40)),
+            BorderFactory.createEmptyBorder(4, 4, 4, 4)));
+        strip.setVisible(false);
+        return strip;
+    }
+
+    /** {@code queue/state searching}: render the card and show it — unless
+     *  a fight is being set up (Confirm / Meet-At), which always outranks
+     *  the queue card. */
+    private void showQueueSearching(QueueState state)
+    {
+        if (queueCard == null) return;
+        queueCard.render(state,
+            QueueText.styleLabel(state.style, QueueGateSection.soleStyle(selectedStyles)),
+            QueueText.buildLabel(state.build, QueueGateSection.soleBuild(selectedBuildTypes)));
+        if (currentFightSession != null) return;
+        showCard(CARD_QUEUE);
+    }
+
+    /** Leaves the Searching card (idle / timeout / inert service) for the
+     *  lobby when the user is a lobby member, else the gate; an optional
+     *  banner explains why (expired, opponent declined, timeout). */
+    private void returnFromQueueCard(String banner)
+    {
+        // Set 7: home is the queue view, or the roster for a moderator in
+        // the mod view — membership no longer decides the card.
+        if (isCurrentlyOnCard(CARD_QUEUE)) showCard(homeCard());
+        if (banner != null) showErrorBanner(banner);
+    }
+
+    /** The queue's server pushes (EDT — the service marshals). A match
+     *  needs no handling here: the lobby's own {@code lobby/fight_proposed}
+     *  arrives alongside {@code queue/matched} and {@link #onFightProposed}
+     *  swaps to the Confirm Fight view as for any invite. */
+    private final class QueueEvents implements QueueEventListener
+    {
+        @Override
+        public void onQueueState(QueueState state)
+        {
+            if (state == null) return;
+            if (state.isSearching())
+            {
+                showQueueSearching(state);
+                return;
+            }
+            returnFromQueueCard(QueueText.forIdleReason(state.reason));
+        }
+
+        @Override
+        public void onQueueTimeout(QueueState state)
+        {
+            returnFromQueueCard(QueueText.forTimeout(state == null ? 0 : state.waitPrefS));
+        }
+
+        @Override
+        public void onQueuePrefs(com.google.gson.JsonObject prefs)
+        {
+            // G-2: the shared row, possibly last written from Discord.
+            if (queueSection != null) queueSection.applyPrefs(QueuePrefs.fromJson(prefs));
+        }
+
+        @Override
+        public void onQueueError(String code, String message)
+        {
+            showErrorBanner(QueueText.forError(code, message));
+        }
+    }
+
     /** EDT callback fired by {@link LobbyJoinGate#addListener}. Re-renders
      *  the gate's status row + re-applies the style-toggle lock state +
      *  re-runs {@link #updateGoToLobbyEnabled()} so a refresh that flips
@@ -1336,6 +1740,9 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
      *  both fire through this listener. */
     private void onJoinGateChanged()
     {
+        // Set 7: mod status rides on the same /user refresh — attach or
+        // detach the roster card before the card logic below runs.
+        applyModAccess();
         // Order matters: lock-state runs first so applyLoginGateState's
         // empty-picks branch sees post-cleanup selectedStyles. Without
         // this ordering a user whose persisted styles are all locked
@@ -1728,12 +2135,17 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         selfRegion = DEFAULT_REGION;
         rankMinIdx = 0;
         rankMaxIdx = RANK_LABELS.length - 1;
+        refreshQueueRangeLabel();
         // Explicit "I want to re-pick" — clear the sticky lobby flag so
         // the next login doesn't bypass the gate, AND wipe the persisted
         // values so a plugin restart starts at the gate too.
         hasJoinedLobby = false;
         zeroConfigJoinedThisSession = false;
+        // Set 7: Leave Lobby returns to the queue view.
+        modViewSelected = false;
         prefs.clear();
+        // Plan 10 F.1: prefs.clear() wiped the queue picks too — re-align the widgets.
+        if (queueSection != null) queueSection.reset();
         // Leave Lobby is an explicit opt-out: set the sticky flag (AFTER
         // prefs.clear(), which resets it to false) so zero-config auto-join
         // stays suppressed across restarts until the user manually
@@ -1885,23 +2297,12 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
 
         lobby.add(top, BorderLayout.NORTH);
 
-        invitesContainer = new JPanel();
-        invitesContainer.setLayout(new BoxLayout(invitesContainer, BoxLayout.Y_AXIS));
-        invitesContainer.setBorder(BorderFactory.createCompoundBorder(
-            new MatteBorder(0, 0, 1, 0, new Color(0x40, 0x40, 0x40)),
-            BorderFactory.createEmptyBorder(4, 4, 4, 4)));
-
-        JComponent scroll = buildRosterScroll();
-        JPanel center = new JPanel(new BorderLayout(0, 0));
-        center.add(invitesContainer, BorderLayout.NORTH);
-        center.add(scroll, BorderLayout.CENTER);
-
-        // Seed invites used to be inlined here. They now arrive
-        // asynchronously via {@link LobbyEventListener#onIncomingInvite}
-        // after the user passes the gate.
-        refreshInvitesContainer();
-
-        lobby.add(center, BorderLayout.CENTER);
+        // Set 7: the incoming-invite strip is no longer part of this card —
+        // it sits above the root cards (see the ctor) so a regular player,
+        // who never sees the roster, can still accept a moderator's invite.
+        // Invites arrive asynchronously via
+        // {@link LobbyEventListener#onIncomingInvite} after the join.
+        lobby.add(buildRosterScroll(), BorderLayout.CENTER);
         return lobby;
     }
 
@@ -2238,7 +2639,7 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         fightSetupContainer.add(view, BorderLayout.CENTER);
         fightSetupContainer.revalidate();
         fightSetupContainer.repaint();
-        rootCards.show(rootCardHost, CARD_FIGHT);
+        showCard(CARD_FIGHT);
         if (view instanceof JScrollPane)
         {
             final JScrollPane sp = (JScrollPane) view;
@@ -2274,7 +2675,7 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
             cancelOutgoingInvite(currentFightSession.opponent.playerId, false);
             currentFightSession = null;
         }
-        rootCards.show(rootCardHost, CARD_LOBBY);
+        showCard(homeCard());
         renderRoster();
         forceRejoinIfEligible();
     }
@@ -2351,17 +2752,15 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
                 return;
             }
         }
-        // Defence-in-depth: skip if the panel is on a non-lobby card.
-        // The fight / session-expired call sites have already
-        // switched to CARD_LOBBY before calling us, and the 60-s
-        // ticker runs whether the panel is visible or not — but a
-        // user who hit Reset Options mid-session would have flipped
-        // back to CARD_GATE and we don't want to silently re-join
-        // them. CardLayout updates visibility synchronously on the
+        // Defence-in-depth: skip while the panel is on a fight or a
+        // Searching card. Since set 7 a member rests on the queue view
+        // (the gate card) as often as on the roster, so both home cards
+        // qualify; the Leave Lobby case is covered by !hasJoinedLobby
+        // above. CardLayout updates visibility synchronously on the
         // EDT, so this read sees the live state.
-        if (!isCurrentlyOnLobbyCard())
+        if (!isCurrentlyOnCard(CARD_LOBBY) && !isCurrentlyOnCard(CARD_GATE))
         {
-            LOG.debug("MatchmakingLobbyPanel.forceRejoinIfEligible SKIP - not on CARD_LOBBY");
+            LOG.debug("MatchmakingLobbyPanel.forceRejoinIfEligible SKIP - not on a home card");
             return;
         }
         LOG.debug("MatchmakingLobbyPanel.forceRejoinIfEligible FIRING - issuing service.joinLobby"
@@ -2369,21 +2768,6 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
             selfRegion, selectedStyles, selectedBuildTypes, rankMinIdx, rankMaxIdx);
         service.joinLobby(selfRegion, selectedStyles, selectedBuildTypes,
             rankMinIdx, rankMaxIdx, pickSortBucket());
-    }
-
-    /** Walks {@link #rootCardHost}'s children to find the one with
-     *  {@code isVisible()==true} and asks whether its name matches
-     *  {@link #CARD_LOBBY}. Cheap (3 components) and matches the
-     *  pattern documented at the {@code currentVisibleCard()}
-     *  comment elsewhere in this file. */
-    private boolean isCurrentlyOnLobbyCard()
-    {
-        if (rootCardHost == null) return false;
-        for (java.awt.Component c : rootCardHost.getComponents())
-        {
-            if (c.isVisible() && CARD_LOBBY.equals(c.getName())) return true;
-        }
-        return false;
     }
 
     /** Pick a fight style for {@code opponent}. Same visual treatment as the
@@ -2529,7 +2913,7 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
 
         service.sendInvite(opponent, style, build, location);
 
-        rootCards.show(rootCardHost, CARD_LOBBY);
+        showCard(CARD_LOBBY);
         renderRoster();
     }
 
@@ -3023,6 +3407,9 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
                 fightCountdownLabel.setText(formatRemaining(s));
             }
         }
+
+        // Plan 10 F.1: the Searching card's elapsed clock between server pushes.
+        if (queueCard != null && isCurrentlyOnCard(CARD_QUEUE)) queueCard.tick();
     }
 
     /** Walks {@link #rosterContainer} and re-renders only rows whose player
@@ -3070,11 +3457,26 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
      *  {@link #rosterRefreshTicker} is only a backstop for any future
      *  code path that stages into {@link #pendingRoster} without
      *  calling {@link #applyPendingRosterUpdate()}. Defensive-copies the
-     *  list so the caller can keep mutating its own collection. */
+     *  list so the caller can keep mutating its own collection.
+     *
+     *  <p>Drops snapshots that would render exactly what's already on
+     *  screen — see {@link #rendersIdentically}. The server re-broadcasts
+     *  the full roster whenever anyone joins, leaves or re-joins, so in a
+     *  busy lobby this fires every few seconds, and each push arrives
+     *  twice (unenriched, then rank-enriched). Rebuilding ~20 rows on the
+     *  EDT for an unchanged list was a visible client stutter. */
     @Override
     public void onRosterSnapshot(List<LobbyMember> snapshot)
     {
         if (snapshot == null) return;
+        // Skipped only when nothing about the render would differ. A
+        // pending stale mark counts as a difference: the marked row is
+        // currently hidden and this snapshot is what un-hides it, so
+        // that case must fall through to a real rebuild below.
+        if (recentlyStalePlayerIds.isEmpty() && rendersIdentically(snapshot, roster))
+        {
+            return;
+        }
         // A fresh authoritative snapshot supersedes any client-side
         // staleness assumptions: if the server still has a row for a
         // previously-marked-stale peer, either (a) the peer reconnected
@@ -3086,6 +3488,26 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         recentlyStalePlayerIds.clear();
         this.pendingRoster = new ArrayList<>(snapshot);
         applyPendingRosterUpdate();
+    }
+
+    /**
+     * Whether {@code incoming} would produce the same rows as
+     * {@code displayed}.
+     *
+     * <p>Order-sensitive on purpose. The render sorts by peak rank, so a
+     * re-ordered snapshot of the same members does render identically —
+     * but proving that here means duplicating the sort, and a false
+     * "unchanged" shows the user stale data while a false "changed" only
+     * costs one rebuild. The wire order is stable in practice, so the
+     * cheap comparison catches the repeat pushes this exists for.
+     *
+     * <p>Element comparison is {@link LobbyMember#equals}, which covers
+     * every field a row renders or gates on.
+     */
+    static boolean rendersIdentically(List<LobbyMember> incoming, List<LobbyMember> displayed)
+    {
+        if (incoming == null || displayed == null) return false;
+        return incoming.equals(displayed);
     }
 
     @Override
@@ -3393,7 +3815,7 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         // Mirror exitFightSetup() but without the cancelInvite — the
         // session is already torn down server-side.
         currentFightSession = null;
-        rootCards.show(rootCardHost, CARD_LOBBY);
+        showCard(homeCard());
         renderRoster();
         // Server removed both lobby rows when the fight was accepted.
         // The 30-s confirm window just elapsed without resolution; both
@@ -3476,7 +3898,7 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         // straight back in while the alt is the active account. A genuine
         // re-login clears this in applyLoginGateState() (logout branch).
         autoJoinIssuedThisSession = true;
-        rootCards.show(rootCardHost, CARD_GATE);
+        showCard(CARD_GATE);
         renderRoster();
         showErrorBanner(activeAccountName == null || activeAccountName.trim().isEmpty()
             ? "You're now in the lobby on another account, so you were removed here."
@@ -3880,7 +4302,7 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
             // default, desync all gate toggle visuals, then return to the
             // gate. Go-to-lobby will be disabled until the user re-picks.
             resetGateOptions();
-            rootCards.show(rootCardHost, CARD_GATE);
+            showCard(CARD_GATE);
         });
         // Lock the button to its natural preferred size so neither the
         // outer BoxLayout (which would otherwise shrink it to fit a
@@ -3987,6 +4409,8 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
             rankMaxIdx = rankRange.getHigh();
             updateRankValueLabel(minValue, rankMinIdx);
             updateRankValueLabel(maxValue, rankMaxIdx);
+            // Plan 10 F.1: the gate's "Rank range: X – Y" queue toggle shows the same bounds.
+            refreshQueueRangeLabel();
             if (!rankRange.getValueIsAdjusting())
             {
                 // Persist on commit (drag-end) rather than every drag
@@ -4128,7 +4552,30 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         @Override public boolean getScrollableTracksViewportHeight() { return false; }
     }
 
+    /** EDT watchdog for the roster rebuild. This tears down and
+     *  reconstructs every row, and it runs on the same thread that
+     *  paints the client's UI, so a slow one is felt as a hitch. Silent
+     *  unless it blows the budget — see {@link SlowPathMonitor}. */
+    private final SlowPathMonitor renderMonitor =
+        new SlowPathMonitor("[MatchmakingLobbyPanel] roster render (EDT)", 50L, 60_000L);
+
     private void renderRoster()
+    {
+        long startNanos = System.nanoTime();
+        try
+        {
+            renderRosterTimed();
+        }
+        finally
+        {
+            String slow = renderMonitor.record(
+                SlowPathMonitor.millisSince(startNanos, System.nanoTime()),
+                System.currentTimeMillis());
+            if (slow != null) LOG.warn("{}", slow);
+        }
+    }
+
+    private void renderRosterTimed()
     {
         rosterContainer.removeAll();
 
@@ -4421,9 +4868,16 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
      *  based on the wrong bucket's MMR. */
     private String pickSortBucket()
     {
+        return sortBucketFor(selectedStyles);
+    }
+
+    /** The first advertised style in {@link Style} order, or "overall" —
+     *  the {@code lobby/join} sort bucket for any advertised set. */
+    private static String sortBucketFor(Set<Style> styles)
+    {
         for (Style s : Style.values())
         {
-            if (selectedStyles.contains(s))
+            if (styles != null && styles.contains(s))
             {
                 return s.name().toLowerCase();
             }
@@ -5712,7 +6166,8 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
                 if (inRange) anyVisible = true;
             }
         }
-        invitesContainer.setVisible(anyVisible);
+        invitesAnyVisible = anyVisible;
+        applyInvitesStripVisibility();
         invitesContainer.revalidate();
         invitesContainer.repaint();
     }

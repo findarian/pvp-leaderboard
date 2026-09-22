@@ -16,6 +16,7 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Supplier;
 
 /**
@@ -86,6 +87,20 @@ public final class UserProfileLobbyJoinGate implements LobbyJoinGate
 
     private volatile long lastRefreshEpochMs;
 
+    /** Consecutive soft-404 refreshes ({@code /user} returned "player
+     *  not found"). Drives the geometric backoff in
+     *  {@link #backOffAfterSoftMiss()}; reset by a successful refresh
+     *  and by {@link #onLogin()}.
+     *
+     *  <p>A soft 404 is a stable condition — an account the backend
+     *  has never seen stays unknown until it plays a match — but the
+     *  refresh path deliberately doesn't treat it as a success, so
+     *  without this counter the gate sat on the 60 s fast-retry for
+     *  the whole session. Each of those retries passes
+     *  {@code forceRefresh=true}, which bypasses the profile cache,
+     *  so it was an uncacheable API call every minute per client. */
+    private final AtomicInteger consecutiveSoftMisses = new AtomicInteger();
+
     /** Active auto-refresh handle; null when {@link #onLogout()} or no
      *  login has occurred. */
     private ScheduledFuture<?> autoRefresh;
@@ -143,6 +158,9 @@ public final class UserProfileLobbyJoinGate implements LobbyJoinGate
     {
         cancelAutoRefreshLocked();
         loggedIn = true;
+        // Fresh session — a new character may well be one the backend
+        // knows, so don't inherit the previous account's backoff.
+        consecutiveSoftMisses.set(0);
         // Fast-retry schedule for the initial-fetch window: every
         // minute until the first refresh succeeds. The refresh()
         // success path replaces this with the {@link
@@ -294,9 +312,11 @@ public final class UserProfileLobbyJoinGate implements LobbyJoinGate
                         // stuck below THRESHOLD until they restarted
                         // RuneLite or clicked Refresh count manually.
                         applyAllZero();
+                        backOffAfterSoftMiss();
                         return;
                     }
                     applyProfile(profile);
+                    consecutiveSoftMisses.set(0);
                     lastRefreshEpochMs = System.currentTimeMillis();
                     // First-success / manual-refresh promote: switch to
                     // the hourly cadence and reset the clock so the
@@ -316,6 +336,38 @@ public final class UserProfileLobbyJoinGate implements LobbyJoinGate
                     fireListenersOnEdt();
                 }
             });
+    }
+
+    /** Widens the retry interval after repeated soft-404s, doubling
+     *  each time up to the {@link #AUTO_REFRESH_INTERVAL_MS} cap.
+     *
+     *  <p>The first miss is left alone on the fast retry: that's the
+     *  case this schedule exists for (a brand-new account whose first
+     *  match is about to land), and it's worth one prompt re-check.
+     *  It's the indefinite repetition that had to stop — the interval
+     *  now reaches the hourly cap after ~6 misses, so an account the
+     *  backend simply doesn't know costs the same as any other idle
+     *  client instead of an uncacheable request every minute.
+     *
+     *  <p>No-op when logged out: {@link #cancelAutoRefreshLocked()}
+     *  has already torn the schedule down and re-arming here would
+     *  leak a task onto RuneLite's client-wide executor. */
+    private synchronized void backOffAfterSoftMiss()
+    {
+        int misses = consecutiveSoftMisses.incrementAndGet();
+        if (misses < 2) return;
+        if (!loggedIn) return;
+        long interval = INITIAL_RETRY_INTERVAL_MS;
+        for (int i = 1; i < misses && interval < AUTO_REFRESH_INTERVAL_MS; i++)
+        {
+            interval *= 2;
+        }
+        if (interval > AUTO_REFRESH_INTERVAL_MS) interval = AUTO_REFRESH_INTERVAL_MS;
+        log.debug("[LobbyJoinGate] profile still unknown after {} attempts - next check in {}s",
+            misses, interval / 1000L);
+        cancelAutoRefreshLocked();
+        autoRefresh = scheduler.scheduleAtFixedRate(
+            this::autoTick, interval, interval, TimeUnit.MILLISECONDS);
     }
 
     /** Replace the active {@link #autoRefresh} with the long-period

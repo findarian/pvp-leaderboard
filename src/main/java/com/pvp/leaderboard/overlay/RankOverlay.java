@@ -6,6 +6,7 @@ import com.pvp.leaderboard.game.PlayerRankEvent;
 import com.pvp.leaderboard.service.PvPDataService;
 import com.pvp.leaderboard.util.NameUtils;
 import com.pvp.leaderboard.util.RankUtils;
+import com.pvp.leaderboard.util.SlowPathMonitor;
 import lombok.extern.slf4j.Slf4j;
 import net.runelite.api.Client;
 import net.runelite.api.Player;
@@ -137,6 +138,24 @@ public class RankOverlay extends Overlay
     // Using fixed values prevents "jumping" when players wear different helmets/hats
     private static final int HEAD_HEIGHT = 220;      // At head level (just above player name)
     private static final int ABOVE_HEAD_HEIGHT = 268; // Above head (higher than head position)
+
+    /** Drop-shadow behind every rank label. Hoisted out of the draw
+     *  loop: this ran once per label per frame. */
+    private static final Color OUTLINE_COLOR = new Color(0, 0, 0, 180);
+
+    /** 3rd Age glow: concentric white layers, widest and faintest
+     *  first, drawn under the solid label. Paired by index with
+     *  {@link #GLOW_COLORS}. */
+    private static final int[] GLOW_OFFSETS = {3, 2, 1};
+    private static final Color[] GLOW_COLORS = {
+        new Color(255, 255, 255, 25),
+        new Color(255, 255, 255, 50),
+        new Color(255, 255, 255, 100),
+    };
+
+    /** Label font, rebuilt only when the configured text size changes —
+     *  see {@link #rankFont(int)}. Touched only from the render thread. */
+    private Font rankFont;
 
     /**
      * Get the height offset for rendering rank based on position setting.
@@ -437,8 +456,31 @@ public class RankOverlay extends Overlay
      *  giving prompt feedback if a new failure appears mid-session. */
     private static final long RENDER_ERROR_LOG_INTERVAL_MS = 60_000L;
 
+    /** Frame-time watchdog. Silent unless a frame blows the budget —
+     *  see {@link SlowPathMonitor}. 50ms is ~3 frames at 60 FPS: well
+     *  past "a bit heavy" and into what a player would notice as a
+     *  hitch, so a line here is real evidence rather than noise. */
+    private final SlowPathMonitor frameMonitor =
+        new SlowPathMonitor("[RankOverlay] frame", 50L, 60_000L);
+
     @Override
     public Dimension render(Graphics2D graphics)
+    {
+        long startNanos = System.nanoTime();
+        try
+        {
+            return renderTimed(graphics);
+        }
+        finally
+        {
+            String slow = frameMonitor.record(
+                SlowPathMonitor.millisSince(startNanos, System.nanoTime()),
+                System.currentTimeMillis());
+            if (slow != null) log.warn("{}", slow);
+        }
+    }
+
+    private Dimension renderTimed(Graphics2D graphics)
     {
         // Catch-all guard: the rank overlay paints every frame at
         // ~60 FPS and reaches into client/Player APIs that can
@@ -906,17 +948,16 @@ public class RankOverlay extends Overlay
 
     private void renderRankText(Graphics2D g, String fullRank, int x, int y, int size)
     {
-        if (fullRank == null || fullRank.trim().isEmpty())
+        String text = rankLabelText(fullRank);
+        if (text.isEmpty())
         {
             return;
         }
 
-        String[] parts = fullRank.split(" ");
-        String rankName = parts[0];
-        String division = parts.length > 1 ? parts[1] : "";
-        String text = division.isEmpty() ? rankName : (rankName + " " + division);
+        int space = text.indexOf(' ');
+        String rankName = (space < 0) ? text : text.substring(0, space);
 
-        g.setFont(new Font(Font.DIALOG, Font.BOLD, size));
+        g.setFont(rankFont(size));
         FontMetrics fm = g.getFontMetrics();
         int textW = fm.stringWidth(text);
         int textH = fm.getAscent();
@@ -924,22 +965,14 @@ public class RankOverlay extends Overlay
         int baseY = y + textH;
 
         // Check for 3rd Age - special glow effect
-        boolean isThirdAge = rankName.equals("3rd") || fullRank.startsWith("3rd");
+        boolean isThirdAge = text.startsWith("3rd");
 
         if (isThirdAge && !config.colorblindMode())
         {
-            // Glowing white effect: multiple layers with decreasing alpha
-            int[][] glowLayers = {
-                {3, 25},   // offset 3px, alpha 25
-                {2, 50},   // offset 2px, alpha 50
-                {1, 100},  // offset 1px, alpha 100
-            };
-
-            for (int[] layer : glowLayers)
+            for (int i = 0; i < GLOW_OFFSETS.length; i++)
             {
-                int offset = layer[0];
-                int alpha = layer[1];
-                g.setColor(new Color(255, 255, 255, alpha));
+                int offset = GLOW_OFFSETS[i];
+                g.setColor(GLOW_COLORS[i]);
                 for (int dy = -offset; dy <= offset; dy++)
                 {
                     for (int dx = -offset; dx <= offset; dx++)
@@ -957,7 +990,7 @@ public class RankOverlay extends Overlay
         else
         {
             // Standard rendering: black outline + colored text
-            g.setColor(new Color(0, 0, 0, 180));
+            g.setColor(OUTLINE_COLOR);
             for (int dy = -1; dy <= 1; dy++)
             {
                 for (int dx = -1; dx <= 1; dx++)
@@ -968,7 +1001,7 @@ public class RankOverlay extends Overlay
             }
 
             // Determine text color
-            if (config.colorblindMode() || fullRank.startsWith("Rank "))
+            if (config.colorblindMode() || text.startsWith("Rank "))
             {
                 g.setColor(Color.WHITE);
             }
@@ -978,6 +1011,46 @@ public class RankOverlay extends Overlay
             }
             g.drawString(text, centerX, baseY);
         }
+    }
+
+    /**
+     * The label to draw for {@code fullRank}: the rank and its division,
+     * trimmed and single-spaced, or empty when there's nothing to show.
+     *
+     * <p>Normalised rather than used verbatim because the label is
+     * centred on the player's head from its measured width — a stray
+     * double space would draw wider than it measured and sit off-centre.
+     */
+    static String rankLabelText(String fullRank)
+    {
+        if (fullRank == null) return "";
+        String trimmed = fullRank.trim();
+        if (trimmed.isEmpty()) return "";
+        int space = trimmed.indexOf(' ');
+        if (space < 0) return trimmed;
+        String rankName = trimmed.substring(0, space);
+        String division = trimmed.substring(space + 1).trim();
+        return division.isEmpty() ? rankName : (rankName + " " + division);
+    }
+
+    /**
+     * The bold label font at {@code size}, cached across frames.
+     *
+     * <p>This is called once per visible opted-in player per frame, so
+     * at 50 FPS in a crowded area it ran thousands of times a second —
+     * each {@code new Font} also forced a fresh font-metrics lookup.
+     * The size only changes when the user moves the rank-text-size
+     * slider, so one cached instance serves ~every call.
+     */
+    private Font rankFont(int size)
+    {
+        Font cached = rankFont;
+        if (cached == null || cached.getSize() != size)
+        {
+            cached = new Font(Font.DIALOG, Font.BOLD, size);
+            rankFont = cached;
+        }
+        return cached;
     }
 
     private void renderMmrChangeNotification(Graphics2D g, Player localPlayer)
@@ -1104,6 +1177,8 @@ public class RankOverlay extends Overlay
                 return "multi";
             case DMM:
                 return "dmm";
+            case TOURNAMENT:
+                return "tournament";
             case OVERALL:
             default:
                 return "overall";

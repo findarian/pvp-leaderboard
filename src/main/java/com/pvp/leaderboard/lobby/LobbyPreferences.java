@@ -60,11 +60,21 @@ public class LobbyPreferences
      *  cleared by a manual Go-to-lobby. */
     public static final String KEY_USER_LEFT = "lobbyUserLeft";
 
+    /** Plan 10 F.1 (2026-09-21): the queue's own picks — the wait preference
+     *  (seconds, one of QueueService.WAIT_PREF_CHOICES; also the server-side
+     *  shared pref) and the optional rank range for the queue, kept apart
+     *  from the lobby slider so the two features never fight over one key. */
+    public static final String KEY_QUEUE_WAIT = "queueWaitPrefS";
+    public static final String KEY_QUEUE_RANGE_ENABLED = "queueRangeEnabled";
+    public static final String KEY_QUEUE_MIN_RANK_IDX = "queueMinRankIdx";
+    public static final String KEY_QUEUE_MAX_RANK_IDX = "queueMaxRankIdx";
+
     /** Aggregated list so {@link #clear()} can wipe in one loop without
      *  drifting from the constants above. */
     private static final String[] ALL_KEYS = {
         KEY_REGION, KEY_STYLES, KEY_BUILDS,
         KEY_MIN_RANK_IDX, KEY_MAX_RANK_IDX, KEY_HAS_JOINED, KEY_USER_LEFT,
+        KEY_QUEUE_WAIT, KEY_QUEUE_RANGE_ENABLED, KEY_QUEUE_MIN_RANK_IDX, KEY_QUEUE_MAX_RANK_IDX,
     };
 
     /** {@code null} ⇒ in-memory mode. */
@@ -93,6 +103,48 @@ public class LobbyPreferences
     public static LobbyPreferences inMemory()
     {
         return new LobbyPreferences();
+    }
+
+    // -------------------- Queue (Plan 10 F.1) --------------------
+
+    public int getQueueWaitPrefS(int defaultValue)
+    {
+        return readInt(KEY_QUEUE_WAIT, defaultValue);
+    }
+
+    public void setQueueWaitPrefS(int seconds)
+    {
+        writeRaw(KEY_QUEUE_WAIT, Integer.toString(seconds));
+    }
+
+    public boolean getQueueRangeEnabled()
+    {
+        return "true".equals(readRaw(KEY_QUEUE_RANGE_ENABLED));
+    }
+
+    public void setQueueRangeEnabled(boolean enabled)
+    {
+        writeRaw(KEY_QUEUE_RANGE_ENABLED, Boolean.toString(enabled));
+    }
+
+    public int getQueueMinRankIdx(int defaultValue)
+    {
+        return readInt(KEY_QUEUE_MIN_RANK_IDX, defaultValue);
+    }
+
+    public void setQueueMinRankIdx(int idx)
+    {
+        writeRaw(KEY_QUEUE_MIN_RANK_IDX, Integer.toString(idx));
+    }
+
+    public int getQueueMaxRankIdx(int defaultValue)
+    {
+        return readInt(KEY_QUEUE_MAX_RANK_IDX, defaultValue);
+    }
+
+    public void setQueueMaxRankIdx(int idx)
+    {
+        writeRaw(KEY_QUEUE_MAX_RANK_IDX, Integer.toString(idx));
     }
 
     // -------------------- Region --------------------

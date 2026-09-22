@@ -195,6 +195,26 @@ public class FightMonitor
         this.rankOverlay = rankOverlay;
     }
 
+    /** Plan 10 F.2 (AS-72): while the local player is in a RUNNING tournament
+     *  (and the config allows it) the auto-switch targets the Tournament
+     *  bucket instead of the fight's style, so a tournament game does not
+     *  flip the panel to NH. Cleared by the session tracker when the player
+     *  leaves the bracket; the next ordinary fight then switches like every
+     *  bucket. Wired by the plugin; defaults to "never pinned". */
+    private volatile java.util.function.BooleanSupplier tournamentBucketPin = () -> false;
+
+    public void setTournamentBucketPin(java.util.function.BooleanSupplier pin)
+    {
+        this.tournamentBucketPin = pin == null ? () -> false : pin;
+    }
+
+    /** The bucket the auto-switch should land on: the Tournament bucket while
+     *  pinned, else the fight's own bucket (may be {@code null} when unmapped). */
+    static PvPLeaderboardConfig.RankBucket resolveAutoSwitchTarget(PvPLeaderboardConfig.RankBucket fightBucket, boolean tournamentPinned)
+    {
+        return tournamentPinned ? PvPLeaderboardConfig.RankBucket.TOURNAMENT : fightBucket;
+    }
+
     public void resetFightState()
     {
         opponent = null;
@@ -211,6 +231,27 @@ public class FightMonitor
         freezeLogMmrReplayInFlight = false;
         updateInCombatFlag();
         try { log.debug("[Fight] state reset; suppressTicks={}", suppressFightStartTicks); } catch (Exception ignore) {}
+    }
+
+    /** The bucket of the last fight this session classified — the
+     *  kill-streak box's "current style" (BOARD row 33); {@code null} until
+     *  then. Deliberately not cleared by {@link #resetFightState()}: a relog
+     *  does not change the style you were last fighting in. */
+    private volatile PvPLeaderboardConfig.RankBucket lastFightBucket = null;
+
+    /** Records the bucket {@link #determineBucket} classified a finished fight as. */
+    void recordFightBucket(String fightBucket)
+    {
+        lastFightBucket = bucketStringToEnum(fightBucket);
+    }
+
+    /** Where the bucket auto-switch would land right now: the Tournament
+     *  bucket while pinned, else the last classified fight's bucket, else
+     *  {@code null} (no fight yet this session). The kill-streak box reads
+     *  this so "which style am I in" has one source of truth. */
+    public PvPLeaderboardConfig.RankBucket getAutoSwitchTarget()
+    {
+        return resolveAutoSwitchTarget(lastFightBucket, tournamentBucketPin.getAsBoolean());
     }
 
     /** Recency window (ms) for {@link #isInCombat()}. Matches the GC
@@ -1165,6 +1206,7 @@ public class FightMonitor
         
         log.debug("[MatchSubmit] Determined bucket: {} (world={} multi={} startSb={} endSb={})", 
             fightBucket, world, wasMulti, startSpellbookName, endSpellbookName);
+        recordFightBucket(fightBucket);
 
         // Determine which bucket to use for API calls
         // If auto-switch is enabled, use the fight bucket; otherwise use the user's manual selection
@@ -1173,7 +1215,9 @@ public class FightMonitor
         
         // Check if fight bucket differs from user's current selection
         PvPLeaderboardConfig.RankBucket currentBucket = config.rankBucket();
-        PvPLeaderboardConfig.RankBucket fightBucketEnum = bucketStringToEnum(fightBucket);
+        // Plan 10 F.2: a running tournament pins the target to the Tournament bucket.
+        final boolean tournamentPinned = tournamentBucketPin.getAsBoolean();
+        PvPLeaderboardConfig.RankBucket fightBucketEnum = resolveAutoSwitchTarget(bucketStringToEnum(fightBucket), tournamentPinned);
         boolean fightBucketDiffers = (fightBucketEnum != null && currentBucket != fightBucketEnum);
         
         // Auto-switch leaderboard if enabled - always switch to match fight style
@@ -1203,8 +1247,9 @@ public class FightMonitor
                 log.debug("[AutoSwitch] Could not map fightBucket '{}' to enum", fightBucket);
             }
             
-            // Use fight bucket for API refresh when auto-switch is enabled
-            apiRefreshBucket = fightBucket;
+            // Use fight bucket for API refresh when auto-switch is enabled;
+            // a pinned tournament game is rated in the tournament bucket (Plan 10 A.3).
+            apiRefreshBucket = tournamentPinned ? "tournament" : fightBucket;
         }
         else
         {
@@ -1788,6 +1833,7 @@ public class FightMonitor
             case "veng": return PvPLeaderboardConfig.RankBucket.VENG;
             case "multi": return PvPLeaderboardConfig.RankBucket.MULTI;
             case "dmm": return PvPLeaderboardConfig.RankBucket.DMM;
+            case "tournament": return PvPLeaderboardConfig.RankBucket.TOURNAMENT;
             default: return null;
         }
     }

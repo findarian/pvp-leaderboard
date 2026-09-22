@@ -39,10 +39,10 @@ public final class SocketProtocol
      * The 10 lobby cmds the plugin is allowed to send. Anything outside
      * this set throws from {@link #encode(Gson, String, JsonObject)}.
      *
-     * <p>Tournament cmds ({@code tournament/list},
-     * {@code tournament/register}, etc.) land at Phase 4 and will be
-     * appended to this set in the same change that wires
-     * {@code TournamentService}.
+     * <p>Plan 10 (2026-09-21) appended the five {@code queue/*} cmds and
+     * the nine {@code tournament/*} cmds (WEBSOCKET_PROTOCOL.md 6.2b / 6.3);
+     * {@code WebSocketQueueService} / {@code WebSocketTournamentService}
+     * are the only senders.
      *
      * <p>Server-only outbound cmds ({@code lobby/roster},
      * {@code lobby/invite_received}, etc.) are NEVER in this set —
@@ -67,6 +67,23 @@ public final class SocketProtocol
         // ALLOWED_COMMANDS env), so live range changes never reached peers
         // until a rejoin. Mirrors backend/core/socket_protocol.py default.
         s.add("lobby/update_range");
+        // Plan 10 (2026-09-21): the matchmaking queue (Part B, WebSocketQueueService)
+        // and the Swiss tournaments (Part C, WebSocketTournamentService). Mirrors the
+        // backend additive ALLOWED_COMMANDS_EXTRA / ALLOWED_COMMANDS_TOURNAMENT env lines.
+        s.add("queue/join");
+        s.add("queue/leave");
+        s.add("queue/expand_range");
+        s.add("queue/set_prefs");
+        s.add("queue/status");
+        s.add("tournament/list");
+        s.add("tournament/register");
+        s.add("tournament/withdraw");
+        s.add("tournament/status");
+        s.add("tournament/subscribe");
+        s.add("tournament/unsubscribe");
+        s.add("tournament/in_combat");
+        s.add("tournament/round_end_reply");
+        s.add("tournament/report_problem");
         ALLOWED_OUTGOING = Collections.unmodifiableSet(s);
     }
 

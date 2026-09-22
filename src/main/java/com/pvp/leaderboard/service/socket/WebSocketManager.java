@@ -364,14 +364,18 @@ public final class WebSocketManager
             log.warn("WebSocketManager: refusing to send disallowed cmd={}", cmd);
             return false;
         }
-        // Outbound trace — gated on log.isDebugEnabled() so we don't
-        // pay the JSON-string concat cost in prod builds where DEBUG
-        // is off. data may be null on no-arg cmds (e.g. lobby/leave),
-        // tolerate that. Truncate the JSON preview so a hypothetical
-        // huge payload can't blow up the log.
-        if (log.isDebugEnabled())
+        // Outbound trace — the payload preview costs a JSON-string
+        // concat, so it sits at TRACE alongside the inbound one; DEBUG
+        // keeps the command name. data may be null on no-arg cmds
+        // (e.g. lobby/leave), tolerate that. Truncate the JSON preview
+        // so a hypothetical huge payload can't blow up the log.
+        if (log.isTraceEnabled())
         {
-            log.debug("WebSocketManager: -> {} {}", cmd, previewJson(data));
+            log.trace("WebSocketManager: -> {} {}", cmd, previewJson(data));
+        }
+        else
+        {
+            log.debug("WebSocketManager: -> {}", cmd);
         }
         return snapshot.send(wire);
     }
@@ -559,16 +563,19 @@ public final class WebSocketManager
                 return;
             }
             // Inbound trace — same pattern as the outbound trace in
-            // {@link WebSocketManager#send}. Gating on isDebugEnabled
-            // is the difference between "free" in prod and "kilobyte
-            // string allocation per message" in dev. presence/count
-            // fires on a fixed cadence so it shows up here at the
-            // same level as lobby/roster; if that gets noisy, the
-            // caller can filter by logger or down-shift specific
-            // commands to TRACE.
-            if (log.isDebugEnabled())
+            // {@link WebSocketManager#send}. The payload preview is a
+            // kilobyte-scale string built on this thread, which is the
+            // socket's read loop, so it sits at TRACE; DEBUG keeps the
+            // command name, which is what tells you the frame arrived
+            // at all. A busy lobby/roster is several KB per push every
+            // few seconds.
+            if (log.isTraceEnabled())
             {
-                log.debug("WebSocketManager: <- {} {}", cmd.cmd, previewJson(cmd.data));
+                log.trace("WebSocketManager: <- {} {}", cmd.cmd, previewJson(cmd.data));
+            }
+            else
+            {
+                log.debug("WebSocketManager: <- {}", cmd.cmd);
             }
             eventBus.fire(cmd.cmd, cmd.data);
         }

@@ -116,6 +116,43 @@ public final class LobbyMember
         this.maxRankIdx = maxRankIdx;
     }
 
+    /**
+     * Value equality over every field the lobby row renders or gates on.
+     *
+     * <p>Exists so the panel can tell a roster push that actually
+     * changed something from one that repeats what's already on screen —
+     * the server re-broadcasts the full roster on any member's join,
+     * leave or rank change, and rebuilding ~20 Swing rows for an
+     * identical list is pure EDT cost. Because that comparison decides
+     * whether a rebuild happens, leaving a field out here would show the
+     * user stale data, so every field participates.
+     */
+    @Override
+    public boolean equals(Object o)
+    {
+        if (this == o) return true;
+        if (!(o instanceof LobbyMember)) return false;
+        LobbyMember other = (LobbyMember) o;
+        return currentRankIdx == other.currentRankIdx
+            && peakRankIdx == other.peakRankIdx
+            && isMod == other.isMod
+            && isSuspended == other.isSuspended
+            && minRankIdx == other.minRankIdx
+            && maxRankIdx == other.maxRankIdx
+            && java.util.Objects.equals(playerId, other.playerId)
+            && java.util.Objects.equals(name, other.name)
+            && java.util.Objects.equals(region, other.region)
+            && styles.equals(other.styles)
+            && builds.equals(other.builds);
+    }
+
+    @Override
+    public int hashCode()
+    {
+        return java.util.Objects.hash(playerId, name, styles, builds, currentRankIdx,
+            peakRankIdx, region, isMod, isSuspended, minRankIdx, maxRankIdx);
+    }
+
     /** Compact style-flag string ("NVMD" if all four styles are set).
      *  Order follows {@link Style} declaration order. */
     public String styleFlags()

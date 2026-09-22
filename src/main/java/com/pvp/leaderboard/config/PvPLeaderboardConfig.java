@@ -89,6 +89,15 @@ public interface PvPLeaderboardConfig extends Config
 			{
 				return "DMM";
 			}
+		},
+		/** Plan 10: the Swiss-tournament rating bucket (2026-09-21). */
+		TOURNAMENT
+		{
+			@Override
+			public String toString()
+			{
+				return "Tournament";
+			}
 		}
 	}
 
@@ -154,6 +163,18 @@ public interface PvPLeaderboardConfig extends Config
 		position = 3
 	)
 	default boolean autoSwitchBucket()
+	{
+		return true;
+	}
+
+	@ConfigItem(
+		keyName = "autoSwitchTournamentBucket",
+		name = "Auto-switch to Tournament",
+		description = "While you are in a running tournament the side panel and overlay use the Tournament bucket; it switches back at the next fight like every bucket (Plan 10)",
+		section = overlaySection,
+		position = 4
+	)
+	default boolean autoSwitchTournamentBucket()
 	{
 		return true;
 	}
@@ -364,6 +385,30 @@ public interface PvPLeaderboardConfig extends Config
 		return true;
 	}
 
+	@ConfigItem(
+		keyName = "enableQuickMatch",
+		name = "Matchmaking queue",
+		description = "Show 'Queue for matchmaking' on the Matchmaking gate: one style, optional rank range, a wait time shared with Discord (Plan 10)",
+		section = otherSection,
+		position = 1
+	)
+	default boolean enableQuickMatch()
+	{
+		return true;
+	}
+
+	@ConfigItem(
+		keyName = "enableTournaments",
+		name = "Tournaments tab",
+		description = "Show the Tournaments sub-tab (register, live standings, round clock). Only the tab is gated: the opponent outline and the Tournament bucket auto-switch stay on regardless (Plan 10)",
+		section = otherSection,
+		position = 2
+	)
+	default boolean enableTournaments()
+	{
+		return true;
+	}
+
 	// ==================== Whitelist Settings ====================
 
 	@ConfigItem(
@@ -388,5 +433,65 @@ public interface PvPLeaderboardConfig extends Config
 	default boolean enableWhitelistRanks()
 	{
 		return true;
+	}
+
+	// ==================== Kill Streak Box (BOARD row 33) ====================
+	// The section is declared here with its items so the whole feature is ONE
+	// hunk at the end of the file, apart from the Plan 10 step-7 hunks above
+	// (staging map in docs/PLUGIN_PROGRESS.md).
+
+	@ConfigSection(
+		name = "Kill Streak Box",
+		description = "A movable box with your current kill streak in the style you are fighting in (off by default)",
+		position = 5
+	)
+	String killStreakSection = "killStreak";
+
+	@ConfigItem(
+		keyName = "showKillStreakBox",
+		name = "Show kill streak box",
+		description = "Show a movable box reading '<style> Current Kill Streak: N' (Alt+drag to move it). Off by default.",
+		section = killStreakSection,
+		position = 0
+	)
+	default boolean showKillStreakBox()
+	{
+		return false;
+	}
+
+	@ConfigItem(
+		keyName = "killStreakBoxAutoSwitch",
+		name = "Auto-switch style",
+		description = "Follow the style of your last fight (NH, Veng, Multi or DMM) and Event while you are in a running tournament. Off: always show the style picked below.",
+		section = killStreakSection,
+		position = 1
+	)
+	default boolean killStreakBoxAutoSwitch()
+	{
+		return true;
+	}
+
+	@ConfigItem(
+		keyName = "killStreakBoxBucket",
+		name = "Style",
+		description = "The style the box shows while auto-switch is off (Event = tournaments)",
+		section = killStreakSection,
+		position = 2
+	)
+	default StreakBucket killStreakBoxBucket()
+	{
+		return StreakBucket.NH;
+	}
+
+	@ConfigItem(
+		keyName = "killStreakBoxShowLongest",
+		name = "Show longest streak",
+		description = "Add a second line with your longest kill streak in that style",
+		section = killStreakSection,
+		position = 3
+	)
+	default boolean killStreakBoxShowLongest()
+	{
+		return false;
 	}
 }

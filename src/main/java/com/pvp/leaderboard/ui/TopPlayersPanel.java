@@ -12,14 +12,14 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 
 /**
  * "Top players" view — a scrollable Top 100 leaderboard mirroring the website,
- * one row per account: <code>#rank &nbsp; Player Name &nbsp; Rank (% to next)</code>.
+ * one row per account: <code>#rank &nbsp; Player Name &nbsp; Rank</code>, sized
+ * to the largest font the sidepanel width allows.
  *
  * <p>Reads the exact same cached S3 artifact the website uses
  * ({@code /leaderboard[_<bucket>].json}) via
@@ -30,13 +30,35 @@ import java.util.concurrent.CompletableFuture;
  */
 public class TopPlayersPanel extends JPanel implements Scrollable
 {
-    private static final String[] BUCKET_LABELS = {"Overall", "NH", "Veng", "Multi", "DMM"};
+    private static final String[] BUCKET_LABELS = {"Overall", "NH", "Veng", "Multi", "DMM", "Tournament"};
     private static final String DEFAULT_BUCKET = "nh";
     private static final int TOP_N = 100;
 
     private static final Color SELECTED_BG = new Color(60, 60, 60);
     private static final Color RANKNUM_COLOR = new Color(0xCF, 0xA8, 0x4A); // muted gold
-    private static final Color PCT_COLOR = new Color(0x9A, 0x88, 0x66);     // muted gold for "(xx.x%)"
+
+    /** Row geometry the auto-fit subtracts before it knows how much width
+     *  the three columns actually get. BorderLayout puts a gap on both
+     *  sides of the centre cell, hence two. */
+    private static final int ROW_HGAP = 6;
+    private static final int ROW_PAD_X = 4;
+    private static final int ROW_PAD_Y = 2;
+    private static final int ROW_GAPS = 2;
+
+    /** Bounds for the auto-fitted row text, same reasoning as the tier
+     *  list: the floor is a legibility limit, the cap only stops a very
+     *  wide panel from turning 100 rows into an endless scroll. Width is
+     *  meant to bind at any realistic sidepanel size. */
+    private static final int ROW_MIN_PT = 9;
+    private static final int ROW_MAX_PT = 20;
+
+    /** The rank number and tier columns render one point below the player
+     *  name, which is the row's primary element. */
+    private static final int SECONDARY_PT_DELTA = 1;
+
+    /** Widest rank number a top-100 list can show; the rank column is
+     *  sized to it so the names line up down the list. */
+    private static final String WIDEST_RANK_NUM = "#100";
 
     /** One leaderboard row, derived purely from the cached JSON. */
     static final class Row
@@ -62,6 +84,13 @@ public class TopPlayersPanel extends JPanel implements Scrollable
     private JPanel bucketBar;
     private final JPanel listPanel = new JPanel();
     private final JLabel statusLabel = new JLabel();
+
+    /** Every rendered row, for the width-driven font fit. */
+    private final List<PlayerRow> playerRows = new ArrayList<>();
+    /** Point size currently applied to the rows; -1 until the first fit. */
+    private int appliedRowPt = -1;
+    /** Shared width-driven font fit (search + Look-and-Feel-accurate measuring). */
+    private final RowTextFit fit = new RowTextFit();
 
     private volatile String selectedBucket = DEFAULT_BUCKET;
 
@@ -188,6 +217,7 @@ public class TopPlayersPanel extends JPanel implements Scrollable
     private void showStatus(String text)
     {
         listPanel.removeAll();
+        playerRows.clear();
         statusLabel.setText(text);
         statusLabel.setVisible(true);
         listPanel.revalidate();
@@ -198,6 +228,7 @@ public class TopPlayersPanel extends JPanel implements Scrollable
     private void renderRows(List<Row> rows)
     {
         listPanel.removeAll();
+        playerRows.clear();
         if (rows.isEmpty())
         {
             showStatus("No ranked players yet for this bucket.");
@@ -209,6 +240,20 @@ public class TopPlayersPanel extends JPanel implements Scrollable
         {
             listPanel.add(buildRow(r));
         }
+        // Fresh labels carry no fitted font yet, and the rows that decide
+        // the fit only exist now — the panel itself hasn't resized, so
+        // nothing else would trigger it.
+        // These are brand-new labels carrying no fitted font, so the fit
+        // has to start from scratch — a size "already applied" to the
+        // discarded rows would otherwise short-circuit it and leave this
+        // batch at the Look-and-Feel default.
+        // These are brand-new labels carrying no fitted font, so the fit
+        // has to start from scratch — a size "already applied" to the
+        // discarded rows would otherwise short-circuit it and leave this
+        // batch at the Look-and-Feel default.
+        appliedRowPt = -1;
+        applyRowPt(ROW_MAX_PT); // defined size even if the panel is not laid out yet
+        refitRowFonts();
         listPanel.revalidate();
         listPanel.repaint();
         revalidateUpChain();
@@ -237,47 +282,176 @@ public class TopPlayersPanel extends JPanel implements Scrollable
 
     private JPanel buildRow(Row r)
     {
-        JPanel row = new JPanel(new BorderLayout(6, 0));
+        JPanel row = new JPanel(new BorderLayout(ROW_HGAP, 0));
         row.setName("topPlayerRow");
-        row.setBorder(BorderFactory.createEmptyBorder(2, 4, 2, 4));
-        row.setMaximumSize(new Dimension(Integer.MAX_VALUE, 26));
+        row.setBorder(BorderFactory.createEmptyBorder(ROW_PAD_Y, ROW_PAD_X, ROW_PAD_Y, ROW_PAD_X));
         row.setAlignmentX(LEFT_ALIGNMENT);
 
         JLabel rankNum = new JLabel("#" + r.worldRank);
         rankNum.setName("topPlayerRankNum");
-        rankNum.setFont(rankNum.getFont().deriveFont(Font.BOLD, 12f));
         rankNum.setForeground(RANKNUM_COLOR);
-        rankNum.setPreferredSize(new Dimension(36, 20));
         row.add(rankNum, BorderLayout.WEST);
 
         JLabel name = new JLabel(r.name);
         name.setName("topPlayerName");
-        name.setFont(name.getFont().deriveFont(Font.PLAIN, 13f));
         name.setForeground(Color.WHITE);
         row.add(name, BorderLayout.CENTER);
 
-        JLabel tier = new JLabel(tierHtml(r));
+        // Rank tier only — the in-tier "% to next" used to sit here, but it
+        // was the widest thing in the row and bought the least: it pushed
+        // the auto-fit down and squeezed the player name.
+        JLabel tier = new JLabel(r.tierLabel);
         tier.setName("topPlayerTier");
-        tier.setFont(tier.getFont().deriveFont(Font.PLAIN, 12f));
+        tier.setForeground("3rd Age".equals(r.rankFamily) ? Color.WHITE : RankUtils.getRankColor(r.rankFamily));
         tier.setHorizontalAlignment(SwingConstants.RIGHT);
         row.add(tier, BorderLayout.EAST);
 
+        playerRows.add(new PlayerRow(row, rankNum, name, tier));
         return row;
     }
 
-    private static String tierHtml(Row r)
+    /** A leaderboard row's moving parts, held together so the font fit can
+     *  measure all three columns and resize the row that contains them. */
+    private static final class PlayerRow
     {
-        Color c = "3rd Age".equals(r.rankFamily) ? Color.WHITE : RankUtils.getRankColor(r.rankFamily);
-        String tierHex = String.format("#%02x%02x%02x", c.getRed(), c.getGreen(), c.getBlue());
-        String pctHex = String.format("#%02x%02x%02x", PCT_COLOR.getRed(), PCT_COLOR.getGreen(), PCT_COLOR.getBlue());
-        return "<html><span style='color:" + tierHex + ";'><b>" + escape(r.tierLabel) + "</b></span>"
-            + " <span style='color:" + pctHex + ";'>(" + String.format(Locale.US, "%.1f", r.progressPct) + "%)</span></html>";
+        final JPanel row;
+        final JLabel rankNum;
+        final JLabel name;
+        final JLabel tier;
+
+        PlayerRow(JPanel row, JLabel rankNum, JLabel name, JLabel tier)
+        {
+            this.row = row;
+            this.rankNum = rankNum;
+            this.name = name;
+            this.tier = tier;
+        }
     }
 
-    private static String escape(String s)
+    /**
+     * Re-fit the row text to the panel's current width before laying out.
+     *
+     * <p>Hooked here rather than on a resize listener so the fit is driven
+     * by the same pass that positions the rows — there's no window where
+     * the text is sized for a stale width.
+     */
+    @Override
+    public void doLayout()
     {
-        if (s == null) return "";
-        return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;");
+        refitRowFonts();
+        super.doLayout();
+    }
+
+    /**
+     * Pick the largest point size at which EVERY row's three columns fit
+     * side by side, within {@link #ROW_MIN_PT}..{@link #ROW_MAX_PT}.
+     *
+     * <p>One size for all rows rather than per-row: mixed sizes down a
+     * single list read as a rendering bug. The widest row therefore
+     * governs the list — in practice the longest player name.
+     */
+    private void refitRowFonts()
+    {
+        int width = getWidth();
+        if (width <= 0 || playerRows.isEmpty())
+        {
+            return; // not laid out yet, or nothing to size
+        }
+        int usable = width - (2 * ROW_PAD_X) - (ROW_GAPS * ROW_HGAP);
+        if (usable <= 0)
+        {
+            return;
+        }
+
+        applyRowPt(fit.largestFitting(ROW_MIN_PT, ROW_MAX_PT, pt -> allRowsFit(pt, usable)));
+
+        // Backstop. Everything above measures a stand-in label; these are
+        // the real components the layout will size. If the installed
+        // Look-and-Feel makes them even slightly wider than the stand-in,
+        // step down until they genuinely fit — a shortfall here is what
+        // Swing renders as an ellipsized player name. Normally costs zero
+        // iterations.
+        while (appliedRowPt > ROW_MIN_PT && !appliedRowsFit(usable))
+        {
+            applyRowPt(appliedRowPt - 1);
+        }
+    }
+
+    private boolean allRowsFit(int namePt, int usable)
+    {
+        Font nameFont = nameFont(namePt);
+        Font secondaryFont = secondaryFont(namePt);
+        int rankColumn = rankColumnWidth(secondaryFont);
+        for (PlayerRow row : playerRows)
+        {
+            int needed = rankColumn
+                + fit.textWidth(row.name.getText(), nameFont)
+                + fit.textWidth(row.tier.getText(), secondaryFont);
+            if (needed > usable)
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /** Whether the rows fit at the size currently applied, measured on the
+     *  live labels rather than the stand-in. */
+    private boolean appliedRowsFit(int usable)
+    {
+        for (PlayerRow row : playerRows)
+        {
+            int needed = row.rankNum.getPreferredSize().width
+                + row.name.getPreferredSize().width
+                + row.tier.getPreferredSize().width;
+            if (needed > usable)
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private void applyRowPt(int namePt)
+    {
+        if (namePt == appliedRowPt)
+        {
+            return; // idempotent — avoids a setFont/revalidate layout loop
+        }
+        appliedRowPt = namePt;
+
+        Font nameFont = nameFont(namePt);
+        Font secondaryFont = secondaryFont(namePt);
+        int rowHeight = Math.max(fit.textHeight(nameFont), fit.textHeight(secondaryFont)) + (2 * ROW_PAD_Y);
+        // Fixed-width rank column so the names line up down the list; it
+        // has to track the font or "#100" gets truncated.
+        Dimension rankSize = new Dimension(rankColumnWidth(secondaryFont), rowHeight);
+
+        for (PlayerRow row : playerRows)
+        {
+            row.rankNum.setFont(secondaryFont);
+            row.rankNum.setPreferredSize(rankSize);
+            row.name.setFont(nameFont);
+            row.tier.setFont(secondaryFont);
+            // BoxLayout caps each row at its maximum size, so this has to
+            // track the font or taller glyphs get clipped.
+            row.row.setMaximumSize(new Dimension(Integer.MAX_VALUE, rowHeight));
+        }
+    }
+
+    private int rankColumnWidth(Font secondaryFont)
+    {
+        return fit.textWidth(WIDEST_RANK_NUM, secondaryFont);
+    }
+
+    private static Font nameFont(int namePt)
+    {
+        return RowTextFit.baseFont().deriveFont(Font.PLAIN, (float) namePt);
+    }
+
+    private static Font secondaryFont(int namePt)
+    {
+        return RowTextFit.baseFont().deriveFont(Font.BOLD, (float) (namePt - SECONDARY_PT_DELTA));
     }
 
     /** Per-account aggregate built while de-duplicating the raw player rows. */

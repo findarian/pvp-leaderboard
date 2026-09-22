@@ -3,6 +3,7 @@ package com.pvp.leaderboard.ui;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import com.pvp.leaderboard.service.PvPDataService;
+import com.pvp.leaderboard.util.OverallMmr;
 import com.pvp.leaderboard.util.RankUtils;
 import lombok.extern.slf4j.Slf4j;
 
@@ -135,6 +136,23 @@ public class AdditionalStatsPanel extends JPanel {
         this.selectedBucket = (bucket == null ? "overall" : bucket.toLowerCase(Locale.ROOT));
     }
 
+    /**
+     * The tier-graph bucket selector's wire keys, in display order. G-11
+     * appended {@code tournament} so the selector matches the website's
+     * Performance Overview; the "Overall" series is unchanged (the backend
+     * adds Tournament to Overall at 10% ON TOP of the existing 100% —
+     * {@code backend/core/buckets.with_tournament} — so the local
+     * approximation in {@link #rebuildDialogSeries} is untouched here).
+     */
+    static String[] bucketKeys() {
+        return new String[]{"overall", "nh", "veng", "multi", "dmm", "tournament"};
+    }
+
+    /** Display labels for {@link #bucketKeys()}, same order. */
+    static String[] bucketLabels() {
+        return new String[]{"Overall", "NH", "Veng", "Multi", "DMM", "Tournament"};
+    }
+
     private String getTierGraphButtonText() {
         resetDayIfNeeded();
         int used = dailyNewLookups.size();
@@ -182,8 +200,8 @@ public class AdditionalStatsPanel extends JPanel {
 
         JPanel mainPanel = new JPanel(new BorderLayout(0, 4));
 
-        String[] bucketKeys = {"overall", "nh", "veng", "multi", "dmm"};
-        String[] bucketLabels = {"Overall", "NH", "Veng", "Multi", "DMM"};
+        String[] bucketKeys = bucketKeys();
+        String[] bucketLabels = bucketLabels();
         JPanel bucketBar = new JPanel(new FlowLayout(FlowLayout.LEFT, 4, 2));
         JButton[] bucketBtns = new JButton[bucketKeys.length];
         TierGraphLabelsPanel labelsPanel = new TierGraphLabelsPanel();
@@ -366,6 +384,47 @@ public class AdditionalStatsPanel extends JPanel {
         }
     }
 
+    /** A match whose mu moves more than this from the bucket's previous
+     *  point is treated as bad data and skipped (the point is still
+     *  plotted at the previous value). */
+    private static final int MAX_MMR_DELTA_PER_MATCH = 250;
+
+    /**
+     * The "Overall" history for the tier graph — one Overall mu per match,
+     * in the given (already sorted) order. G-16 (operator decision
+     * 2026-09-22): the formula is the backend's, mirrored in
+     * {@link OverallMmr} — the four standard buckets weighted
+     * {@code 0.55 / 0.30 / 0.05 / 0.10} (1000 until a bucket has a game)
+     * plus {@code 0.10 × tournament} on top, where the tournament term
+     * exists only once a tournament match with a rating has been seen; a
+     * history without one plots exactly the legacy Overall. A point that
+     * carries no usable mu (or jumps more than {@link #MAX_MMR_DELTA_PER_MATCH})
+     * leaves its bucket where it was. Package-private for the tests.
+     */
+    static List<Double> overallMuSeries(List<JsonObject> sortedItems) {
+        OverallMmr acc = new OverallMmr();
+        List<Double> out = new ArrayList<>();
+        for (JsonObject m : sortedItems) {
+            String b = asStr(m, "bucket").toLowerCase(Locale.ROOT);
+            if (OverallMmr.isRated(b)) {
+                Double prev = acc.lastMu(b);
+                // A standard bucket starts from the 1000 default exactly as
+                // before (a delta-only first point resolves against it and
+                // the outlier guard measures from it). The tournament bucket
+                // has no local seed: its first point must carry a rating of
+                // its own, or the term stays absent.
+                Double baseline = prev != null ? prev
+                        : (OverallMmr.TOURNAMENT_BUCKET.equals(b) ? null : OverallMmr.DEFAULT_MU);
+                double mu = resolveMuFromMatch(m, baseline);
+                if (Double.isFinite(mu) && (baseline == null || Math.abs(mu - baseline) <= MAX_MMR_DELTA_PER_MATCH)) {
+                    acc.record(b, mu);
+                }
+            }
+            out.add(acc.overall());
+        }
+        return out;
+    }
+
     private void rebuildDialogSeries(JsonArray allMatches, String bucket,
                                      TierGraphLabelsPanel labelsPanel, TierGraphPlotPanel plotPanel) {
         log.debug("[TierGraph] rebuildDialogSeries: totalMatches={}, bucket='{}'", allMatches.size(), bucket);
@@ -377,30 +436,10 @@ public class AdditionalStatsPanel extends JPanel {
                 .collect(Collectors.toList());
         log.debug("[TierGraph] After filter/sort for '{}': {} matches with MMR data", bucket, items.size());
 
-        final int MAX_MMR_DELTA_PER_MATCH = 250;
         List<Double> rawY = new ArrayList<>();
 
         if ("overall".equals(bucket)) {
-            final Map<String, Double> weights = new LinkedHashMap<>();
-            weights.put("nh", 0.55); weights.put("veng", 0.30); weights.put("multi", 0.05); weights.put("dmm", 0.10);
-            final Map<String, Double> last = new HashMap<>();
-            weights.keySet().forEach(k -> last.put(k, 1000.0));
-
-            for (JsonObject m : items) {
-                String b = asStr(m, "bucket").toLowerCase(Locale.ROOT);
-                if (weights.containsKey(b)) {
-                    Double prev = last.get(b);
-                    double mu = resolveMuFromMatch(m, prev);
-                    if (Double.isFinite(mu)) {
-                        if (!Double.isFinite(prev) || Math.abs(mu - prev) <= MAX_MMR_DELTA_PER_MATCH) {
-                            last.put(b, mu);
-                        }
-                    }
-                }
-                double overallMu = 0.0;
-                for (Map.Entry<String, Double> e : weights.entrySet()) {
-                    overallMu += last.getOrDefault(e.getKey(), 1000.0) * e.getValue();
-                }
+            for (double overallMu : overallMuSeries(items)) {
                 rawY.add(RankUtils.calculateContinuousTierValue(overallMu));
             }
         } else {

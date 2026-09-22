@@ -8,6 +8,7 @@ import com.pvp.leaderboard.service.ShardRank;
 import com.pvp.leaderboard.service.socket.SocketEventBus;
 import com.pvp.leaderboard.service.socket.WebSocketManager;
 import com.pvp.leaderboard.util.RankUtils;
+import com.pvp.leaderboard.util.SlowPathMonitor;
 import lombok.extern.slf4j.Slf4j;
 
 import javax.inject.Inject;
@@ -122,15 +123,39 @@ public class WebSocketLobbyService implements LobbyService
      *  visible UI hitches and a flood of debug logs. */
     private static final long RESOLVED_RANK_CACHE_TTL_MS = 60L * 60L * 1000L;
 
-    /** Resolved-rank cache entry. {@code rankIdx} only stores
-     *  successful resolutions ({@code >= 0}); we intentionally do
-     *  NOT cache the {@code -1} "Waiting" sentinel here — those rows
-     *  are owned by the periodic {@link #retryUnresolvedRanks()}
-     *  ticker which clears
-     *  {@link PvPDataService#clearShardNegativeCache(String)} and
-     *  re-runs enrichment. {@code resolvedAtMs} is the wall-clock
-     *  instant the entry was first cached so the TTL check can run
-     *  without per-entry timer threads. */
+    /** Cooldown applied to a member whose rank did NOT resolve, so a
+     *  "Waiting" row costs at most one lookup per cooldown window
+     *  instead of one per roster push.
+     *
+     *  <p>Sized to {@link #RANK_RETRY_INTERVAL_MS} because that ticker
+     *  is what owns recovery for these rows: anything shorter just
+     *  re-asks ahead of the retry pass, anything longer would leave
+     *  the row stale past the point the retry would have fixed it.
+     *
+     *  <p><b>Why this exists.</b> Enrichment requests unresolved rows
+     *  with {@code bypassCache=true}, which skips both of
+     *  {@link PvPDataService}'s protective layers (the positive shard
+     *  cache and the {@code missingPlayerUntilMs} negative cache),
+     *  and the {@code /user} fallback behind a shard miss doesn't
+     *  cache soft-404s either. With the server re-broadcasting the
+     *  full roster on every join/leave (~8 s on a busy lobby), each
+     *  unresolved row was therefore worth one uncacheable CDN GET
+     *  plus one uncacheable API GET every 8 seconds indefinitely —
+     *  a steady request stream on a half-unresolved roster, which is
+     *  enough to get the client blocked by the API's WAF. */
+    private static final long UNRESOLVED_RANK_COOLDOWN_MS = RANK_RETRY_INTERVAL_MS;
+
+    /** Resolved-rank cache entry, covering both outcomes:
+     *  {@code rankIdx >= 0} is a resolved rank held for
+     *  {@link #RESOLVED_RANK_CACHE_TTL_MS}, and {@code rankIdx < 0} is
+     *  the "we asked and got nothing" cooldown held for the shorter
+     *  {@link #UNRESOLVED_RANK_COOLDOWN_MS}. Callers must therefore
+     *  check {@code rankIdx} before treating a fresh entry as a rank —
+     *  a cooldown entry means "skip the network, render Waiting", not
+     *  "this player's rank is -1".
+     *
+     *  <p>{@code resolvedAtMs} is the wall-clock instant the entry was
+     *  cached so the TTL check can run without per-entry timers. */
     private static final class ResolvedRankEntry
     {
         final int rankIdx;
@@ -142,9 +167,15 @@ public class WebSocketLobbyService implements LobbyService
             this.resolvedAtMs = resolvedAtMs;
         }
 
+        boolean isResolved()
+        {
+            return rankIdx >= 0;
+        }
+
         boolean isFresh(long nowMs)
         {
-            return (nowMs - resolvedAtMs) < RESOLVED_RANK_CACHE_TTL_MS;
+            long ttl = isResolved() ? RESOLVED_RANK_CACHE_TTL_MS : UNRESOLVED_RANK_COOLDOWN_MS;
+            return (nowMs - resolvedAtMs) < ttl;
         }
     }
 
@@ -674,7 +705,32 @@ public class WebSocketLobbyService implements LobbyService
         SwingUtilities.invokeLater(l::onJoinedEcho);
     }
 
+    /** Read-thread watchdog. Everything in {@link #handleRoster} runs
+     *  synchronously on OkHttp's WebSocket read loop, so time spent
+     *  here is time the socket isn't reading — a sustained stall is how
+     *  a client becomes a slow consumer and gets dropped. Silent unless
+     *  the budget is blown; see {@link SlowPathMonitor}. */
+    private final SlowPathMonitor rosterHandlerMonitor =
+        new SlowPathMonitor("WebSocketLobbyService: lobby/roster handler (socket read thread)",
+            50L, 60_000L);
+
     private void handleRoster(JsonObject data)
+    {
+        long startNanos = System.nanoTime();
+        try
+        {
+            handleRosterTimed(data);
+        }
+        finally
+        {
+            String slow = rosterHandlerMonitor.record(
+                SlowPathMonitor.millisSince(startNanos, System.nanoTime()),
+                System.currentTimeMillis());
+            if (slow != null) log.warn("{}", slow);
+        }
+    }
+
+    private void handleRosterTimed(JsonObject data)
     {
         // Leave-cascade fast-path: server tells us its filtered view
         // is stale and a fresh lobby/join will regenerate it.
@@ -715,24 +771,28 @@ public class WebSocketLobbyService implements LobbyService
         // both in but our slider rejects each other client-side.
         // Logging the full members list here makes (a) and (b)
         // trivially diagnosable.
-        if (log.isDebugEnabled())
+        // Per-row detail sits at TRACE, not DEBUG. This runs on the
+        // WebSocket read thread, and the server re-broadcasts the full
+        // roster on any member's join / leave / re-join — a line per
+        // member is console I/O in front of the socket every few
+        // seconds in a busy lobby. Turn the logger up to TRACE when
+        // actually diagnosing one of the cases above.
+        log.debug("WebSocketLobbyService: lobby/roster received raw_count={} parsed_count={}",
+            members.size(), roster.size());
+        if (log.isTraceEnabled())
         {
-            log.debug("WebSocketLobbyService: lobby/roster received raw_count={} parsed_count={}",
-                members.size(), roster.size());
             for (LobbyMember m : roster)
             {
-                log.debug("WebSocketLobbyService:   roster row playerId={} name={} region={} styles={} builds={} isMod={}",
+                log.trace("WebSocketLobbyService:   roster row playerId={} name={} region={} styles={} builds={} isMod={}",
                     m.playerId, m.name, m.region, m.styles, m.builds, m.isMod);
             }
         }
-        LobbyEventListener l = listener;
-        if (l != null)
-        {
-            // Defensive copy: enrichment may rebuild and mutate the
-            // backing list while the panel renders the initial pass.
-            List<LobbyMember> initial = new ArrayList<>(roster);
-            SwingUtilities.invokeLater(() -> l.onRosterSnapshot(initial));
-        }
+        // The unenriched snapshot is published by the enrichment pass
+        // itself, and only when it has to wait on the network — see
+        // enrichRosterWithShardRanks. Publishing it unconditionally here
+        // meant a fully-cached push rendered the roster twice: once with
+        // every row flashed to "Waiting", then again with the ranks it
+        // already had in hand.
         enrichRosterWithShardRanks(roster, version);
     }
 
@@ -760,6 +820,9 @@ public class WebSocketLobbyService implements LobbyService
         if (roster.isEmpty())
         {
             log.debug("WebSocketLobbyService: enrich skipped - empty roster (version={})", version);
+            // Nothing to enrich, but the panel still has to hear it or
+            // the last member to leave stays on screen.
+            publishRawSnapshot(roster);
             return;
         }
         JoinArgs args = lastJoinArgs;
@@ -773,6 +836,12 @@ public class WebSocketLobbyService implements LobbyService
         Map<String, Integer> resolved = new ConcurrentHashMap<>();
         List<CompletableFuture<?>> futures = new ArrayList<>(roster.size());
         int cacheHits = 0;
+        // Members skipped because their last lookup came back empty and
+        // the cooldown hasn't expired. Reported separately from
+        // cacheHits so the log shows the suppression actually working —
+        // this is the number that used to be network calls on every
+        // push. See UNRESOLVED_RANK_COOLDOWN_MS.
+        int cooldownHits = 0;
         long nowMs = System.currentTimeMillis();
         for (LobbyMember m : roster)
         {
@@ -791,20 +860,33 @@ public class WebSocketLobbyService implements LobbyService
                 // (common during a join/leave cascade) and 60+
                 // members, that orchestration is the bottleneck the
                 // user surfaced as "shard lookups way too frequent".
-                resolved.put(pid, cached.rankIdx);
-                cacheHits++;
+                //
+                // An unresolved entry is a cooldown, not a rank:
+                // leave it out of `resolved` so the row keeps
+                // rendering "Waiting" while still suppressing the
+                // network call. retryUnresolvedRanks owns recovery.
+                if (cached.isResolved())
+                {
+                    resolved.put(pid, cached.rankIdx);
+                    cacheHits++;
+                }
+                else
+                {
+                    cooldownHits++;
+                }
                 continue;
             }
             // bypassCache=true: roster enrichment is one of the two
             // explicit-freshness paths defined by the 2026-05-24
             // backend handoff (DynamoDB-stream-driven incremental
-            // shard writer, ≈30 s propagation). The local
-            // resolvedRankCache (1-h TTL) above already prevents
-            // per-push duplicate fetches; we only land here on a
-            // first-time-seen member or after retryUnresolvedRanks
-            // evicted a "Waiting" row — both cases want the
-            // freshest shard the writer has produced, not a 60-min
-            // stale PvPDataService positive-cache entry.
+            // shard writer, ≈30 s propagation). We only land here on a
+            // first-time-seen member, an expired resolved entry, or
+            // after retryUnresolvedRanks evicted a "Waiting" row —
+            // all three want the freshest shard the writer has
+            // produced, not a 60-min stale positive-cache entry.
+            // Repeat pushes for an already-asked row are absorbed by
+            // the cooldown above, so the bypass can't turn into a
+            // per-push network hammer.
             CompletableFuture<ShardRank> lookup = pvpDataService.getShardRankByName(mname, bucket, true);
             if (lookup == null) continue;
             futures.add(lookup.thenCompose(sr ->
@@ -826,14 +908,18 @@ public class WebSocketLobbyService implements LobbyService
                     }
                     else
                     {
+                        // Shard AND /user both came back empty. Start
+                        // the cooldown so the next roster push doesn't
+                        // re-run this same pair of requests.
+                        markRankUnresolved(cacheKey);
                         log.debug("WebSocketLobbyService:   rank lookup name={} bucket={} -> null (shard + /user)",
                             mname, bucket);
                     }
                 });
             }));
         }
-        log.debug("WebSocketLobbyService: enrich kicking off bucket={} members={} version={} cacheHits={} cacheMisses={}",
-            bucket, roster.size(), version, cacheHits, futures.size());
+        log.debug("WebSocketLobbyService: enrich bucket={} members={} version={} warmCache={} cooldown={} lookups={}",
+            bucket, roster.size(), version, cacheHits, cooldownHits, futures.size());
         if (futures.isEmpty())
         {
             // Every member served from the resolved-rank cache —
@@ -843,18 +929,43 @@ public class WebSocketLobbyService implements LobbyService
             // every row is warm-cached (the prior implementation
             // returned early here, which only worked because the old
             // code ALWAYS dispatched a future per member).
-            if (cacheHits > 0)
+            // Cooldown rows count here too: they're members we chose not
+            // to look up, not members we couldn't identify, so they go
+            // through the same publish path (and keep rosterByPlayerId
+            // rebuilt) rather than the un-lookupable fallback below.
+            if (cacheHits + cooldownHits > 0)
             {
                 publishEnrichedSnapshot(roster, resolved, version, bucket);
             }
             else
             {
                 log.debug("WebSocketLobbyService: enrich skipped - no lookups queued (version={})", version);
+                // No cache hits and no lookups means nothing here is
+                // resolvable (members without a usable name). Publish
+                // what the server sent so those rows still render.
+                publishRawSnapshot(roster);
             }
             return;
         }
+        // At least one rank has to come off the network. Show the roster
+        // now — rows appear immediately with a "Waiting" rank chip — and
+        // render again when the lookups settle. That second render is
+        // the cost of not making the user stare at an empty lobby, and
+        // is why the fully-cached case above deliberately skips it.
+        publishRawSnapshot(roster);
         CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).whenComplete((v, ex) ->
             publishEnrichedSnapshot(roster, resolved, version, bucket));
+    }
+
+    /** Publishes the server's roster to the panel as-is, without waiting
+     *  on rank resolution. Defensive-copies because enrichment may
+     *  rebuild the backing list while the panel renders this pass. */
+    private void publishRawSnapshot(List<LobbyMember> roster)
+    {
+        LobbyEventListener l = listener;
+        if (l == null) return;
+        List<LobbyMember> copy = new ArrayList<>(roster);
+        SwingUtilities.invokeLater(() -> l.onRosterSnapshot(copy));
     }
 
     /** Cache key for {@link #resolvedRankCache}: canonical name +
@@ -874,7 +985,9 @@ public class WebSocketLobbyService implements LobbyService
                                   String cacheKey)
     {
         int idx = RankUtils.rankIndexForTier(tier);
-        log.debug("WebSocketLobbyService:   rank lookup name={} bucket={} -> tier={} rankIdx={} source={}",
+        // Per-member, on the read thread — see the roster-row dump in
+        // handleRoster for why this isn't at DEBUG.
+        log.trace("WebSocketLobbyService:   rank lookup name={} bucket={} -> tier={} rankIdx={} source={}",
             mname, bucket, tier, idx, source);
         if (idx >= 0)
         {
@@ -882,6 +995,20 @@ public class WebSocketLobbyService implements LobbyService
             resolvedRankCache.put(cacheKey,
                 new ResolvedRankEntry(idx, System.currentTimeMillis()));
         }
+        else
+        {
+            // A tier string we can't map to an index is as unresolved
+            // as a missing one — cool it down rather than re-asking
+            // for the same unmappable answer on every push.
+            markRankUnresolved(cacheKey);
+        }
+    }
+
+    /** Starts the {@link #UNRESOLVED_RANK_COOLDOWN_MS} window for a
+     *  (player, bucket) whose rank lookup came back empty. */
+    private void markRankUnresolved(String cacheKey)
+    {
+        resolvedRankCache.put(cacheKey, new ResolvedRankEntry(-1, System.currentTimeMillis()));
     }
 
     /** Single exit point for an enrichment pass: applies the
@@ -961,8 +1088,13 @@ public class WebSocketLobbyService implements LobbyService
      *
      *  <p>Runs on the {@link #scheduler} thread; the enrichment pass
      *  it triggers handles its own EDT marshalling. Cheap no-op when
-     *  the roster is empty or every member is already resolved. */
-    private void retryUnresolvedRanks()
+     *  the roster is empty or every member is already resolved.
+     *
+     *  <p>Package-private rather than private so the unit test can
+     *  drive a retry tick directly: the production trigger is the
+     *  {@link #scheduler} ticker, which the test constructor doesn't
+     *  wire up. */
+    void retryUnresolvedRanks()
     {
         try
         {
@@ -975,11 +1107,14 @@ public class WebSocketLobbyService implements LobbyService
                 if (m.name == null || m.name.isEmpty()) continue;
                 unresolved.add(m);
                 pvpDataService.clearShardNegativeCache(m.name);
-                // No resolvedRankCache eviction here — we don't cache
-                // unresolved rows in the first place, so there's
-                // nothing to remove. The shard generator catching up
-                // will populate the entry on the next enrichment.
             }
+            // Drop every cooldown entry. Roster pushes deliberately
+            // skip the network for these rows, so this tick is the
+            // only thing that lets a caught-up shard publication
+            // reach them — without the eviction the enrichment below
+            // would serve the cooldown straight back and the row
+            // would read "Waiting" for the rest of the session.
+            resolvedRankCache.values().removeIf(e -> !e.isResolved());
             if (unresolved.isEmpty()) return;
             // Bump the version BEFORE re-enriching so the new pass
             // supersedes any in-flight enrichment from the prior

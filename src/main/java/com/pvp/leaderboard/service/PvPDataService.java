@@ -9,6 +9,7 @@ import com.pvp.leaderboard.cache.MatchesCacheEntry;
 import com.pvp.leaderboard.cache.ShardEntry;
 import com.pvp.leaderboard.cache.UserStatsCache;
 import com.pvp.leaderboard.config.PvPLeaderboardConfig;
+import com.pvp.leaderboard.util.HttpVolumeMonitor;
 import com.pvp.leaderboard.util.NameUtils;
 import com.pvp.leaderboard.util.RankUtils;
 import lombok.extern.slf4j.Slf4j;
@@ -67,6 +68,23 @@ public class PvPDataService
 	// In-flight request deduplication for getShardRankByName
 	private final ConcurrentHashMap<String, CompletableFuture<ShardRank>> inFlightLookups = new ConcurrentHashMap<>();
 
+	/** DIAGNOSTIC (see PERF_CHANGES.txt Part A) — one summary line per
+	 *  minute of the plugin's outbound request rate, so the caching and
+	 *  cooldown fixes are verifiable rather than assumed. Silent while
+	 *  idle. */
+	private final HttpVolumeMonitor httpVolume = new HttpVolumeMonitor(60_000L);
+
+	/** Single funnel for every outbound call in this class, so the
+	 *  volume tally can't silently miss a path that gets added later. */
+	private void enqueueCounted(Request request, Callback callback)
+	{
+		String report = httpVolume.record(
+			HttpVolumeMonitor.endpointLabel(request.url().toString()),
+			System.currentTimeMillis());
+		if (report != null) log.debug("{}", report);
+		okHttpClient.newCall(request).enqueue(callback);
+	}
+
 	private final Map<String, ShardEntry> shardCache = Collections.synchronizedMap(
 		new LinkedHashMap<String, ShardEntry>(128, 0.75f, true)
 		{
@@ -79,6 +97,27 @@ public class PvPDataService
 	);
 
 	private final ConcurrentHashMap<String, Long> shardFailUntil = new ConcurrentHashMap<>();
+
+	/** In-flight GETs keyed by URL, so concurrent readers of one
+	 *  artifact share a single request instead of each issuing their own.
+	 *
+	 *  <p>The positive cache in {@link #fetchCachedJson} can only help
+	 *  callers that arrive AFTER a response lands. Rank shards are
+	 *  published per 3-char name prefix, so a lobby roster enriched in
+	 *  one pass has many members resolving out of the same file at the
+	 *  same instant — all of them miss the not-yet-populated cache and
+	 *  each issues its own GET. That made CDN request volume scale with
+	 *  roster size rather than with distinct shard count, which is how a
+	 *  large roster reaches the CloudFront firewall's per-IP rate
+	 *  limit. Collapsing here keeps the fan-out proportional to
+	 *  the number of distinct shards.
+	 *
+	 *  <p>Keyed by URL rather than by player: the name+bucket dedup in
+	 *  {@link #getShardRankByName(String, String, boolean)} does nothing
+	 *  for two different players who happen to share a prefix, which is
+	 *  the entire population this collapses. */
+	private final ConcurrentHashMap<String, CompletableFuture<JsonObject>> inFlightJsonFetches =
+		new ConcurrentHashMap<>();
 	
     // Negative cache for specific players/accounts to avoid re-checking shards
 	private final ConcurrentHashMap<String, Long> missingPlayerUntilMs = new ConcurrentHashMap<>();
@@ -111,6 +150,37 @@ public class PvPDataService
      *  at a time. */
     private final ConcurrentHashMap<String, CompletableFuture<ShardRank>> inFlightProfileRankLookups =
         new ConcurrentHashMap<>();
+
+    /** How long {@code /user} requests are suppressed after the API
+     *  signals throttling. Matches {@link #SHARD_FAIL_BACKOFF_MS} so
+     *  both halves of a rank lookup back off on the same clock. */
+    private static final long API_THROTTLE_BACKOFF_MS = 60L * 1000L;
+
+    /** Epoch ms until which {@code /user} calls are answered locally
+     *  instead of hitting the network; {@code 0} when open.
+     *
+     *  <p>Endpoint-wide rather than per-player on purpose: a WAF block
+     *  is issued against the client, so retrying under a different
+     *  {@code player_id} is the same violation and would keep the
+     *  block alive.
+     *
+     *  <p>This is the API-side counterpart to the CDN's
+     *  {@code shardFailUntil}. Without it a rate-limited client kept
+     *  calling at its callers' full tick rate — the lobby's roster
+     *  enrichment re-asked on every roster push (~8 s) and the join
+     *  gate every 60 s — which turns a decaying soft limit into a
+     *  sustained one. */
+    private final java.util.concurrent.atomic.AtomicLong userApiBlockedUntilMs =
+        new java.util.concurrent.atomic.AtomicLong(0L);
+
+    /** Statuses that mean "you are sending too much / you are blocked"
+     *  as opposed to "that player doesn't exist". Only these arm
+     *  {@link #userApiBlockedUntilMs} — arming on a 404 would let one
+     *  lookup of an unknown name stall the endpoint for every caller. */
+    private static boolean isThrottleStatus(int code)
+    {
+        return code == 403 || code == 429 || code == 503;
+    }
 
     // Matches Caching
     private static final long MATCHES_CACHE_TTL_MS = 1L * 60L * 1000L; // 1 minute
@@ -188,7 +258,7 @@ public class PvPDataService
 		
 		Request request = requestBuilder.build();
 
-		okHttpClient.newCall(request).enqueue(new Callback()
+		enqueueCounted(request, new Callback()
 		{
 			@Override
 			public void onFailure(Call call, IOException e)
@@ -323,7 +393,7 @@ public class PvPDataService
 		log.debug("[MatchesAPI] acct request URL: {} bypassCache={}", request.url(), bypassCache);
 		final long reqStart = System.nanoTime();
 
-		okHttpClient.newCall(request).enqueue(new Callback()
+		enqueueCounted(request, new Callback()
 		{
 			@Override
 			public void onFailure(Call call, IOException e)
@@ -509,6 +579,17 @@ public class PvPDataService
         return "user:" + canonicalUserCacheKey(playerName);
     }
 
+	/** Kill-streak box (BOARD row 33): the cached {@code /user} profile of
+	 *  {@code playerName} exactly as the last fetch left it, or {@code null}
+	 *  when none is cached. A peek only, never a fetch: the box follows the
+	 *  fetches the login init, the post-fight tier refresh and the lobby gate
+	 *  already make. The entry's timestamp tells a caller whether it changed. */
+	public UserStatsCache peekUserProfile(String playerName)
+	{
+		if (playerName == null) return null;
+		return userStatsCache.get(userProfileCacheKey(playerName));
+	}
+
 	public CompletableFuture<JsonObject> getUserProfile(String playerName, String clientUniqueId, boolean forceRefresh)
 	{
 		CompletableFuture<JsonObject> future = new CompletableFuture<>();
@@ -517,6 +598,25 @@ public class PvPDataService
 		UserStatsCache cached = userStatsCache.get(cacheKey);
 		if (!forceRefresh && cached != null && System.currentTimeMillis() - cached.getTimestamp() <= USER_CACHE_TTL_MS) {
 			future.complete(cached.getStats().deepCopy());
+			return future;
+		}
+
+		// Throttle backoff. Checked after the positive-cache read above
+		// so a warm entry still serves — the goal is to stop new
+		// traffic, not to blank the UI. Deliberately fails rather than
+		// completing null: null is this endpoint's "no such player"
+		// answer and callers act on it destructively (the lobby join
+		// gate zeroes the user's match counts), so reporting a block
+		// that way would lock a legitimate player out of the lobby.
+		long blockedUntil = userApiBlockedUntilMs.get();
+		if (System.currentTimeMillis() < blockedUntil) {
+			UserStatsCache stale = userStatsCache.get(cacheKey);
+			if (stale != null) {
+				future.complete(stale.getStats().deepCopy());
+				return future;
+			}
+			future.completeExceptionally(new IOException(
+				"user API backing off for " + (blockedUntil - System.currentTimeMillis()) + "ms"));
 			return future;
 		}
 
@@ -541,7 +641,7 @@ public class PvPDataService
 		
 		Request request = requestBuilder.build();
 
-		okHttpClient.newCall(request).enqueue(new Callback()
+		enqueueCounted(request, new Callback()
 		{
 			@Override
 			public void onFailure(Call call, IOException e)
@@ -564,6 +664,12 @@ public class PvPDataService
 						if (res.code() == 404) {
 							future.complete(null);
 							return;
+						}
+						if (isThrottleStatus(res.code())) {
+							userApiBlockedUntilMs.set(
+								System.currentTimeMillis() + API_THROTTLE_BACKOFF_MS);
+							log.warn("[API] /user returned {} - backing off for {}ms",
+								res.code(), API_THROTTLE_BACKOFF_MS);
 						}
 						future.completeExceptionally(new IOException("API error: " + res.code()));
 						return;
@@ -1098,8 +1204,6 @@ public class PvPDataService
 		Map<String, ShardEntry> cache, ConcurrentHashMap<String, Long> failUntil,
 		long ttlMs, boolean bypassCache)
 	{
-		CompletableFuture<JsonObject> future = new CompletableFuture<>();
-
         long now = System.currentTimeMillis();
 
         // 1. Check Memory Cache — bypassed when bypassCache=true so an
@@ -1108,8 +1212,7 @@ public class PvPDataService
         if (!bypassCache) {
             ShardEntry cached = cache.get(url);
             if (cached != null && (now - cached.getTimestamp() < ttlMs)) {
-                future.complete(cached.getPayload());
-                return future;
+                return CompletableFuture.completedFuture(cached.getPayload());
             }
         }
 
@@ -1119,14 +1222,29 @@ public class PvPDataService
         // refresh shouldn't be a thundering-herd vector.
         Long failAt = failUntil.get(url);
         if (failAt != null && now < failAt) {
-            future.complete(null);
-            return future;
+            return CompletableFuture.completedFuture(null);
         }
 
-        // 3. Download
+        // 3. Join an in-flight fetch for this URL if one exists. A
+        // bypassing caller may join too: the request it would join is
+        // already on its way to the origin, so its result is exactly as
+        // fresh as one this caller issued itself. See
+        // {@link #inFlightJsonFetches} for why this matters at roster scale.
+        CompletableFuture<JsonObject> future = new CompletableFuture<>();
+        CompletableFuture<JsonObject> alreadyRunning = inFlightJsonFetches.putIfAbsent(url, future);
+        if (alreadyRunning != null) {
+            return alreadyRunning;
+        }
+        // The owner gets a future that only settles once the in-flight
+        // entry has been cleared, so a caller acting on the result can
+        // immediately issue a follow-up fetch without racing our cleanup.
+        CompletableFuture<JsonObject> owned =
+            future.whenComplete((v, ex) -> inFlightJsonFetches.remove(url, future));
+
+        // 4. Download
 		Request request = new Request.Builder().url(url).get().build();
 
-		okHttpClient.newCall(request).enqueue(new Callback()
+		enqueueCounted(request, new Callback()
 		{
 			@Override
 			public void onFailure(Call call, IOException e)
@@ -1177,7 +1295,7 @@ public class PvPDataService
                 }
 			}
 		});
-		return future;
+		return owned;
 	}
 
     // Retained for compatibility if needed, but not used by new flow
@@ -1215,7 +1333,7 @@ public class PvPDataService
 	 * @param bucket one of {@code overall|nh|veng|multi|dmm}; null/blank
 	 *               defaults to {@code overall}.
 	 * @return the parsed histogram, or {@code null} if it could not be
-	 *         fetched/parsed (callers render "No one currently here").
+	 *         fetched/parsed (callers render "No one yet").
 	 */
 	public CompletableFuture<JsonObject> getRankHistogram(String bucket)
 	{
@@ -1345,7 +1463,7 @@ public class PvPDataService
      *
      *     log.debug("[DMM] Fetching DMM worlds from {}", url);
      *
-     *     okHttpClient.newCall(request).enqueue(new Callback()
+     *     enqueueCounted(request, new Callback()
      *     {
      *         @Override
      *         public void onFailure(Call call, IOException e)

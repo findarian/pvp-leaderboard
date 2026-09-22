@@ -328,7 +328,7 @@ public class RankUtils
      * ({@code rank_hist/<bucket>.json}, produced by the infra-side
      * {@code backend/core/rank_histogram.py}). Returns {@code 0} for a
      * {@code null}, empty, or malformed histogram so callers can render
-     * "No one currently here" without special-casing failures.
+     * "No one yet" without special-casing failures.
      */
     public static long histogramTotal(JsonObject hist)
     {
@@ -397,8 +397,14 @@ public class RankUtils
     /**
      * Human-readable "Top X%" label for a tier, given how many players are
      * at or above that tier and the total population. Returns
-     * {@code "No one currently here"} when the tier is empty (or the
-     * population is unknown), matching the "What are the ranks" design.
+     * {@code "No one yet"} when the tier is empty (or the population is
+     * unknown), matching the "What are the ranks" design.
+     *
+     * <p>The empty-tier label is kept short on purpose: it's the widest
+     * string in that view, and the view sizes all 25 rows to fit its
+     * widest row, so every extra character shrinks every rank name on
+     * screen. The previous "No one currently here" cost ~5pt across the
+     * whole list.
      *
      * <p>Precision scales with the magnitude so the exclusive top tiers stay
      * legible: whole numbers at/above 10%, one decimal in {@code [1%, 10%)},
@@ -409,7 +415,7 @@ public class RankUtils
     {
         if (total <= 0L || countAtOrAbove <= 0L)
         {
-            return "No one currently here";
+            return "No one yet";
         }
         double pct = (double) countAtOrAbove / (double) total * 100.0;
         if (pct >= 10.0)

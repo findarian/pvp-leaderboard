@@ -44,7 +44,11 @@ public class PerformanceStatsPanel extends JPanel
         
         bucketSelectorPanel = new JPanel(new GridLayout(2, 3, 2, 2));
         bucketSelectorPanel.setMaximumSize(new Dimension(Integer.MAX_VALUE, 56));
-        String[] buckets = {"Overall", "NH", "Veng", "Multi", "DMM"};
+        // G-11: the Tournament bucket the website Performance Overview
+        // already offers. Appended after DMM (the rating ROW sits above
+        // Overall; the bucket BARS keep their order and append) — six
+        // buttons fill the existing 2x3 grid exactly.
+        String[] buckets = {"Overall", "NH", "Veng", "Multi", "DMM", "Tournament"};
         for (String b : buckets) {
             JButton btn = new JButton(b);
             btn.setFont(small);
@@ -256,7 +260,7 @@ public class PerformanceStatsPanel extends JPanel
             } else {
                 // Old format: wrap in "overall" and copy to all buckets
                 Map<String, int[]> overall = parseRankStats(opponentStats);
-                for (String b : new String[]{"overall", "nh", "veng", "multi", "dmm"}) {
+                for (String b : new String[]{"overall", "nh", "veng", "multi", "dmm", "tournament"}) {
                     opponentRankStatsByBucket.put(b, overall);
                 }
             }

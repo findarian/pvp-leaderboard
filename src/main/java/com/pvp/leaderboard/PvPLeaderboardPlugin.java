@@ -4,19 +4,28 @@ import com.google.inject.Provides;
 import com.pvp.leaderboard.config.PvPLeaderboardConfig;
 import com.pvp.leaderboard.game.FightMonitor;
 import com.pvp.leaderboard.game.MenuHandler;
+import com.pvp.leaderboard.game.SessionInitTracker;
 import com.pvp.leaderboard.overlay.LobbyInviteNotificationOverlay;
 import com.pvp.leaderboard.overlay.MatchFoundNotificationOverlay;
 import com.pvp.leaderboard.overlay.PluginDisableWarningOverlay;
 import com.pvp.leaderboard.overlay.RankOverlay;
+import com.pvp.leaderboard.overlay.TournamentOpponentOverlay;
+import com.pvp.leaderboard.queue.NoOpQueueService;
+import com.pvp.leaderboard.queue.WebSocketQueueService;
 import com.pvp.leaderboard.service.ClientIdentityService;
 import com.pvp.leaderboard.service.DiscordAuthService;
 import com.pvp.leaderboard.service.MembershipService;
 import com.pvp.leaderboard.service.PvPDataService;
 import com.pvp.leaderboard.service.WhitelistService;
+import com.pvp.leaderboard.tournament.NoOpTournamentService;
+import com.pvp.leaderboard.tournament.TournamentBucketAutoSwitch;
+import com.pvp.leaderboard.tournament.TournamentSessionTracker;
+import com.pvp.leaderboard.tournament.WebSocketTournamentService;
 import com.pvp.leaderboard.ui.DashboardPanel;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
 import javax.inject.Inject;
+import javax.swing.SwingUtilities;
 import lombok.extern.slf4j.Slf4j;
 import net.runelite.api.Client;
 import net.runelite.api.GameState;
@@ -71,6 +80,10 @@ public class PvPLeaderboardPlugin extends Plugin
 	@Inject
 	private PluginDisableWarningOverlay pluginDisableWarningOverlay;
 
+	/** BOARD row 33: the movable kill-streak box (config-gated, off by default). */
+	@Inject
+	private com.pvp.leaderboard.overlay.WinStreakOverlay winStreakOverlay;
+
 	@Inject
 	private ConfigManager configManager;
 
@@ -113,10 +126,36 @@ public class PvPLeaderboardPlugin extends Plugin
 	@Inject
 	private com.pvp.leaderboard.lobby.LobbyPreferences lobbyPreferences;
 
+	// Plan 10 step 7: the matchmaking queue + Swiss tournaments (2026-09-21).
+	@Inject
+	private WebSocketQueueService webSocketQueueService;
+
+	@Inject
+	private WebSocketTournamentService webSocketTournamentService;
+
+	@Inject
+	private TournamentSessionTracker tournamentSessionTracker;
+
+	@Inject
+	private TournamentOpponentOverlay tournamentOpponentOverlay;
+
+	/** Plan 10 F.2: flips to the Tournament bucket when a round opens
+	 *  (config-gated); the switch back is the next ordinary fight. */
+	private final TournamentBucketAutoSwitch tournamentBucketAutoSwitch =
+		new TournamentBucketAutoSwitch(() -> config.autoSwitchTournamentBucket(), this::pinTournamentBucket);
+
 	private DashboardPanel dashboardPanel;
 	private NavigationButton navButton;
 	private int pendingSelfRankLookupTicks = -1;
 	private boolean pendingHeartbeatStart = false;
+
+	/** Gates the once-per-session half of the delayed init below. The
+	 *  same countdown is armed by LOGGED_IN and by HOPPING/LOADING,
+	 *  and LOADING fires on every map region load — see
+	 *  {@link SessionInitTracker} for why re-running the profile
+	 *  fetch and heartbeat restart on those is both pointless and
+	 *  expensive. */
+	private final SessionInitTracker sessionInitTracker = new SessionInitTracker();
 
 	/** Set true when RuneLite fires {@link ClientShutdown} (the whole
 	 *  client is closing). Distinguishes a graceful client exit — which
@@ -192,6 +231,14 @@ public class PvPLeaderboardPlugin extends Plugin
 		// the first frame arrives.
 		clientIdentityService.loadOrGenerateId();
 		webSocketLobbyService.start();
+		// Plan 10 step 7: the queue + tournament transports subscribe to
+		// their pushes (and the reconnect re-sync) the same way. The session
+		// tracker feeds the bucket pin + the opponent outline; the auto-switch
+		// listener flips the bucket when a round opens.
+		webSocketQueueService.start();
+		webSocketTournamentService.start();
+		webSocketTournamentService.addListener(tournamentSessionTracker);
+		webSocketTournamentService.addListener(tournamentBucketAutoSwitch);
 		// Wire the anti-smurf gate's identity suppliers BEFORE the
 		// dashboard ctor so the first listener fire (still empty counts)
 		// triggers the panel's "Loading your match count…" state. The
@@ -200,6 +247,10 @@ public class PvPLeaderboardPlugin extends Plugin
 		lobbyJoinGate.configure(this::getLocalPlayerName, this::getClientUniqueId);
 		dashboardPanel = new DashboardPanel(this, pvpDataService, discordAuthService,
 			webSocketLobbyService, lobbyJoinGate, lobbyPreferences);
+		// Plan 10 step 7: queue section + Tournaments sub-tab, per the two
+		// config flags; the in-combat probe drives tournament/in_combat.
+		applyPlan10Services();
+		dashboardPanel.setTournamentInCombatProvider(fightMonitor::isInCombat);
 
 		navButton = NavigationButton.builder()
 			.tooltip("PvP Leaderboard")
@@ -264,6 +315,21 @@ public class PvPLeaderboardPlugin extends Plugin
 			mouseManager.registerMouseListener(disableWarning);
 		}
 
+		// Plan 10 F.4: yellow outline around the current tournament opponent.
+		// Server-driven only — the tracker returns a name while
+		// tournament/opponent_highlight is in force and null otherwise.
+		final TournamentOpponentOverlay opponentOutline = tournamentOpponentOverlay;
+		if (opponentOutline != null)
+		{
+			opponentOutline.setOpponentSupplier(tournamentSessionTracker::getHighlightedOpponentName);
+			overlayManager.add(opponentOutline);
+		}
+		// Plan 10 F.2 (AS-72): while the player is in a RUNNING tournament the
+		// fight auto-switch lands on the Tournament bucket instead of the
+		// fight's style; once they leave the bracket the next fight switches
+		// back like every bucket.
+		fightMonitor.setTournamentBucketPin(() -> config.autoSwitchTournamentBucket() && tournamentSessionTracker.isActiveParticipant());
+
 		// One-shot startup diagnostic — pins the in-combat suppression
 		// config toggle state + whether each overlay's provider got
 		// wired. The popup-mid-combat bug class has been recurrent
@@ -281,6 +347,17 @@ public class PvPLeaderboardPlugin extends Plugin
 			invitePopup != null,
 			matchFoundPopup != null,
 			matchFoundPopup != null);
+
+		// BOARD row 33: the movable kill-streak box. Config-gated inside the
+		// overlay (off by default). Its "current style" is FightMonitor's
+		// auto-switch target — the same resolution the leaderboard uses — and
+		// its numbers are the cached /user profile (no fetch of its own).
+		final com.pvp.leaderboard.overlay.WinStreakOverlay streakBox = winStreakOverlay;
+		if (streakBox != null)
+		{
+			streakBox.setAutoSwitchTargetSupplier(fightMonitor::getAutoSwitchTarget);
+			overlayManager.add(streakBox);
+		}
 
 		// Init menu handler with RankOverlay
 		menuHandler.init(dashboardPanel, navButton);
@@ -379,6 +456,14 @@ public class PvPLeaderboardPlugin extends Plugin
 			overlayManager.remove(pluginDisableWarningOverlay);
 			pluginDisableWarningOverlay.clear();
 		}
+		// Plan 10 step 7: drop the opponent outline, forget the tournament
+		// session (bucket pin + highlight) and stop the sub-tab's ticker.
+		if (tournamentOpponentOverlay != null)
+		{
+			overlayManager.remove(tournamentOpponentOverlay);
+		}
+		tournamentSessionTracker.clear();
+		if (dashboardPanel != null) dashboardPanel.shutdownTournaments();
 		clientToolbar.removeNavigation(navButton);
 		whitelistService.onLogout();
 		membershipService.onLogout();
@@ -397,6 +482,12 @@ public class PvPLeaderboardPlugin extends Plugin
 		// plugin is gone. Best-effort: never let teardown abort the
 		// rest of the shutdown sequence.
 		try { webSocketLobbyService.stop(); } catch (Exception ignored) { /* hard shutdown */ }
+		// BOARD row 33: drop the kill-streak box and forget its peeked profile.
+		if (winStreakOverlay != null)
+		{
+			overlayManager.remove(winStreakOverlay);
+			winStreakOverlay.clear();
+		}
 		// Hard-close the socket and forbid future reconnects — the
 		// plugin is going away. WebSocketManager.shutdown() is
 		// idempotent + safe to call without ever having connected.
@@ -457,6 +548,34 @@ public class PvPLeaderboardPlugin extends Plugin
 		}
 	}
 
+	/** Plan 10 step 7: hands the queue + tournament transports to the
+	 *  dashboard according to the two config flags — the inert services
+	 *  when a flag is off (the gate hides the queue block, the Tournaments
+	 *  sub-tab greys). EDT-only: the dashboard mutates Swing. */
+	private void applyPlan10Services()
+	{
+		if (dashboardPanel == null) return;
+		dashboardPanel.setQueueService(config.enableQuickMatch() ? webSocketQueueService : new NoOpQueueService());
+		dashboardPanel.setTournamentService(config.enableTournaments() ? webSocketTournamentService : new NoOpTournamentService());
+	}
+
+	/** Plan 10 F.2: the auto-switch's action — pins the side panel + overlay
+	 *  to the Tournament bucket when a round opens with an opponent. The
+	 *  switch back happens at the next ordinary fight through
+	 *  {@link FightMonitor}, like every bucket (AS-72). */
+	private void pinTournamentBucket()
+	{
+		try
+		{
+			if (config.rankBucket() == PvPLeaderboardConfig.RankBucket.TOURNAMENT) return;
+			configManager.setConfiguration("PvPLeaderboard", "rankBucket", PvPLeaderboardConfig.RankBucket.TOURNAMENT.name());
+		}
+		catch (Exception e)
+		{
+			log.debug("[Tournament] bucket auto-switch failed: {}", e.getMessage());
+		}
+	}
+
 	@Subscribe
 	public void onConfigChanged(ConfigChanged event)
 	{
@@ -487,6 +606,14 @@ public class PvPLeaderboardPlugin extends Plugin
 			if ("showRankToOthers".equals(event.getKey()))
 			{
 				webSocketManager.reconnectForConfigChange();
+			}
+
+			// Plan 10 step 7: the queue / tournaments flags re-wire the
+			// dashboard (inert services when off). Marshalled to the EDT —
+			// config events arrive off it and the setters touch Swing.
+			if ("enableQuickMatch".equals(event.getKey()) || "enableTournaments".equals(event.getKey()))
+			{
+				SwingUtilities.invokeLater(this::applyPlan10Services);
 			}
 
 			// "Display other players ranks" toggled: start/stop the
@@ -625,6 +752,14 @@ public class PvPLeaderboardPlugin extends Plugin
 				// the next login (potentially a different character)
 				// doesn't see stale stats.
 				lobbyJoinGate.onLogout();
+				// End the init session — this is the boundary a world
+				// hop deliberately doesn't cross, so logging back in
+				// re-runs the full init while hopping doesn't.
+				sessionInitTracker.onLogout();
+				// Plan 10: forget the tournament session (bucket pin +
+				// opponent outline); tournament/status re-syncs it on the
+				// next socket connect if the player is still in one.
+				tournamentSessionTracker.clear();
 			}
 			else if (gameStateChanged.getGameState() == GameState.HOPPING || gameStateChanged.getGameState() == GameState.LOADING)
 			{
@@ -668,7 +803,13 @@ public class PvPLeaderboardPlugin extends Plugin
 						
 						if (self != null && !self.trim().isEmpty())
 						{
-							log.debug("[Plugin] Init complete for: {}", self);
+							// Everything from here to the fullInit branch is
+							// safe to repeat: the socket connect no-ops on an
+							// unchanged (uuid, name) tuple, and the overlay's
+							// self-rank genuinely does need re-fetching after
+							// resetLookupStateOnWorldHop() cleared it.
+							boolean fullInit = sessionInitTracker.shouldRunFullInit(self);
+							log.debug("[Plugin] Init complete for: {} (fullInit={})", self, fullInit);
 
 							// Re-issue connect(uuid, name) now that the
 							// local player name has resolved. WebSocketManager
@@ -687,38 +828,48 @@ public class PvPLeaderboardPlugin extends Plugin
 							// incorrectly classified because the async fetch hadn't completed yet
 							pvpDataService.refreshDmmWorlds();
 							
-							// Load dashboard data
-							if (dashboardPanel != null)
-							{
-								dashboardPanel.loadMatchHistoryIfNotViewing(self);
-							}
-							
-							// Schedule self rank refresh for overlay
+							// Schedule self rank refresh for overlay. Outside
+							// the fullInit guard on purpose — a world hop
+							// runs resetLookupStateOnWorldHop(), so the
+							// overlay has nothing to draw until this reruns.
 							if (rankOverlay != null)
 							{
 								rankOverlay.scheduleSelfRankRefresh(0L);
 							}
-							
-							// Start heartbeat (fires now, then every 5 mins)
-							if (pendingHeartbeatStart)
+
+							// Everything below re-fetches data that can't
+							// change within a session, so it runs on a
+							// genuine login only — not on the region loads
+							// and world hops that arm the same countdown.
+							if (fullInit)
 							{
-								log.debug("[Plugin] Starting heartbeat for: {}", self);
-								whitelistService.onLogin(self);
-								pendingHeartbeatStart = false;
+								// Load dashboard data
+								if (dashboardPanel != null)
+								{
+									dashboardPanel.loadMatchHistoryIfNotViewing(self);
+								}
+
+								// Start heartbeat (fires now, then every 5 mins)
+								if (pendingHeartbeatStart)
+								{
+									log.debug("[Plugin] Starting heartbeat for: {}", self);
+									whitelistService.onLogin(self);
+									pendingHeartbeatStart = false;
+								}
+
+								// Start the rank-overlay membership feed (idempotent;
+								// self-gates on enableWhitelistRanks()).
+								membershipService.onLogin();
+
+								// Kick the anti-smurf gate now that the local
+								// player name resolves. We delay this 10 ticks
+								// instead of firing on LOGGED_IN directly so
+								// the name supplier (client.getLocalPlayer().
+								// getName()) has actually populated — firing
+								// at LOGGED_IN would bail with the empty-name
+								// branch.
+								lobbyJoinGate.onLogin();
 							}
-
-							// Start the rank-overlay membership feed (idempotent;
-							// self-gates on enableWhitelistRanks()).
-							membershipService.onLogin();
-
-							// Kick the anti-smurf gate now that the local
-							// player name resolves. We delay this 10 ticks
-							// instead of firing on LOGGED_IN directly so
-							// the name supplier (client.getLocalPlayer().
-							// getName()) has actually populated — firing
-							// at LOGGED_IN would bail with the empty-name
-							// branch.
-							lobbyJoinGate.onLogin();
 						}
 					}
 				}
