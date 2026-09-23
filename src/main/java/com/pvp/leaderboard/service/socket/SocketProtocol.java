@@ -84,6 +84,7 @@ public final class SocketProtocol
         s.add("tournament/in_combat");
         s.add("tournament/round_end_reply");
         s.add("tournament/report_problem");
+        s.add("tournament/gear_status");
         ALLOWED_OUTGOING = Collections.unmodifiableSet(s);
     }
 

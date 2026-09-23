@@ -80,9 +80,11 @@ public class PvPLeaderboardPlugin extends Plugin
 	@Inject
 	private PluginDisableWarningOverlay pluginDisableWarningOverlay;
 
-	/** BOARD row 33: the movable kill-streak box (config-gated, off by default). */
 	@Inject
 	private com.pvp.leaderboard.overlay.WinStreakOverlay winStreakOverlay;
+
+	@Inject
+	private com.pvp.leaderboard.service.WinStreakTracker winStreakTracker;
 
 	@Inject
 	private ConfigManager configManager;
@@ -143,6 +145,35 @@ public class PvPLeaderboardPlugin extends Plugin
 	 *  (config-gated); the switch back is the next ordinary fight. */
 	private final TournamentBucketAutoSwitch tournamentBucketAutoSwitch =
 		new TournamentBucketAutoSwitch(() -> config.autoSwitchTournamentBucket(), this::pinTournamentBucket);
+
+	@Inject
+	private net.runelite.client.game.ItemManager itemManager;
+
+	@Inject
+	private com.pvp.leaderboard.game.ArenaKitStore arenaKitStore;
+
+	@Inject
+	private com.pvp.leaderboard.game.DuelKitReader duelKitReader;
+
+	@Inject
+	private com.pvp.leaderboard.game.GearWatcher gearWatcher;
+
+	@Inject
+	private com.pvp.leaderboard.game.RunePouchRunes runePouchRunes;
+
+	@Inject
+	private com.pvp.leaderboard.game.ArenaLocator arenaLocator;
+
+	@Inject
+	private com.pvp.leaderboard.game.GearSearchHelper gearSearchHelper;
+
+	@Inject
+	private com.pvp.leaderboard.overlay.ArenaGearOverlay arenaGearOverlay;
+
+	private com.pvp.leaderboard.tournament.GearEventTracker gearEventTracker;
+	private com.pvp.leaderboard.tournament.GearStatusReporter gearStatusReporter;
+	private com.pvp.leaderboard.ui.TournamentGearCard tournamentGearCard;
+	private javax.swing.Timer gearTicker;
 
 	private DashboardPanel dashboardPanel;
 	private NavigationButton navButton;
@@ -324,6 +355,7 @@ public class PvPLeaderboardPlugin extends Plugin
 			opponentOutline.setOpponentSupplier(tournamentSessionTracker::getHighlightedOpponentName);
 			overlayManager.add(opponentOutline);
 		}
+		fightMonitor.setCombatSink(this::onOwnHit);
 		// Plan 10 F.2 (AS-72): while the player is in a RUNNING tournament the
 		// fight auto-switch lands on the Tournament bucket instead of the
 		// fight's style; once they leave the bracket the next fight switches
@@ -349,15 +381,14 @@ public class PvPLeaderboardPlugin extends Plugin
 			matchFoundPopup != null);
 
 		// BOARD row 33: the movable kill-streak box. Config-gated inside the
-		// overlay (off by default). Its "current style" is FightMonitor's
-		// auto-switch target — the same resolution the leaderboard uses — and
-		// its numbers are the cached /user profile (no fetch of its own).
 		final com.pvp.leaderboard.overlay.WinStreakOverlay streakBox = winStreakOverlay;
 		if (streakBox != null)
 		{
 			streakBox.setAutoSwitchTargetSupplier(fightMonitor::getAutoSwitchTarget);
 			overlayManager.add(streakBox);
 		}
+		dashboardPanel.setWinStreakTracker(winStreakTracker);
+		fightMonitor.setStreakSink(this::onFightStreak);
 
 		// Init menu handler with RankOverlay
 		menuHandler.init(dashboardPanel, navButton);
@@ -400,6 +431,7 @@ public class PvPLeaderboardPlugin extends Plugin
 			fightMonitor.showPendingFreezeLogMmrNotification();
 		}
 
+		startGearCheck();
 		log.debug("PvP Leaderboard started!");
 	}
 
@@ -434,6 +466,7 @@ public class PvPLeaderboardPlugin extends Plugin
 			log.debug("[LMSFreeze] shutdown freeze-log detection failed: {}", e.getMessage());
 		}
 
+		stopGearCheck();
 		menuHandler.shutdown();
 		if (rankOverlay != null)
 		{
@@ -462,6 +495,7 @@ public class PvPLeaderboardPlugin extends Plugin
 		{
 			overlayManager.remove(tournamentOpponentOverlay);
 		}
+		fightMonitor.setCombatSink(null);
 		tournamentSessionTracker.clear();
 		if (dashboardPanel != null) dashboardPanel.shutdownTournaments();
 		clientToolbar.removeNavigation(navButton);
@@ -482,12 +516,13 @@ public class PvPLeaderboardPlugin extends Plugin
 		// plugin is gone. Best-effort: never let teardown abort the
 		// rest of the shutdown sequence.
 		try { webSocketLobbyService.stop(); } catch (Exception ignored) { /* hard shutdown */ }
-		// BOARD row 33: drop the kill-streak box and forget its peeked profile.
 		if (winStreakOverlay != null)
 		{
 			overlayManager.remove(winStreakOverlay);
 			winStreakOverlay.clear();
 		}
+		fightMonitor.setStreakSink(null);
+		winStreakTracker.clear();
 		// Hard-close the socket and forbid future reconnects — the
 		// plugin is going away. WebSocketManager.shutdown() is
 		// idempotent + safe to call without ever having connected.
@@ -559,6 +594,13 @@ public class PvPLeaderboardPlugin extends Plugin
 		dashboardPanel.setTournamentService(config.enableTournaments() ? webSocketTournamentService : new NoOpTournamentService());
 	}
 
+	private void onFightStreak(String bucketKey, String result)
+	{
+		winStreakTracker.onFight(bucketKey, result);
+		DashboardPanel panel = dashboardPanel;
+		if (panel != null) panel.refreshStreakLine(bucketKey);
+	}
+
 	/** Plan 10 F.2: the auto-switch's action — pins the side panel + overlay
 	 *  to the Tournament bucket when a round opens with an opponent. The
 	 *  switch back happens at the next ordinary fight through
@@ -574,6 +616,12 @@ public class PvPLeaderboardPlugin extends Plugin
 		{
 			log.debug("[Tournament] bucket auto-switch failed: {}", e.getMessage());
 		}
+	}
+
+	private void onOwnHit(String playerName, int world)
+	{
+		if (!tournamentSessionTracker.isAwaitingCombat()) return;
+		SwingUtilities.invokeLater(() -> tournamentSessionTracker.onCombatWith(playerName, world));
 	}
 
 	@Subscribe
@@ -715,6 +763,7 @@ public class PvPLeaderboardPlugin extends Plugin
 				fightMonitor.handleLogoutFreezeLog("logout");
 				// Fully clear fight state on logout
 				fightMonitor.resetFightState();
+				arenaKitStore.clearSession();
 				// Symmetric refresh: GameState dropped to LOGIN_SCREEN,
 				// flip the lobby gate notice back to the pre-login
 				// copy without waiting for lobbyJoinGate.onLogout()
@@ -758,7 +807,6 @@ public class PvPLeaderboardPlugin extends Plugin
 				sessionInitTracker.onLogout();
 				// Plan 10: forget the tournament session (bucket pin +
 				// opponent outline); tournament/status re-syncs it on the
-				// next socket connect if the player is still in one.
 				tournamentSessionTracker.clear();
 			}
 			else if (gameStateChanged.getGameState() == GameState.HOPPING || gameStateChanged.getGameState() == GameState.LOADING)
@@ -902,5 +950,140 @@ public class PvPLeaderboardPlugin extends Plugin
 	public Client getClient()
 	{
 		return client;
+	}
+
+	private void startGearCheck()
+	{
+		final com.pvp.leaderboard.tournament.GearEventTracker tracker = new com.pvp.leaderboard.tournament.GearEventTracker(webSocketTournamentService::status);
+		final com.pvp.leaderboard.tournament.GearStatusReporter reporter = new com.pvp.leaderboard.tournament.GearStatusReporter(webSocketTournamentService, tracker,
+			new com.pvp.leaderboard.game.GearKitRouter(arenaKitStore, duelKitReader, gearWatcher, arenaLocator),
+			new com.pvp.leaderboard.tournament.GearMatcher(runePouchRunes::isRune), fightMonitor::isInCombat,
+			System::currentTimeMillis);
+		gearEventTracker = tracker;
+		gearStatusReporter = reporter;
+		webSocketTournamentService.addListener(tracker);
+		webSocketTournamentService.addListener(reporter);
+		gearWatcher.setActive(() ->
+		{
+			com.pvp.leaderboard.tournament.GearEventTracker.GearEvent e = tracker.current();
+			return e != null && !e.arena;
+		});
+		duelKitReader.setActive(() ->
+		{
+			com.pvp.leaderboard.tournament.GearEventTracker.GearEvent e = tracker.current();
+			return e != null && e.arena;
+		});
+		gearSearchHelper.setMissingSupplier(this::gearMissingOutsideTheArena);
+		eventBus.register(duelKitReader);
+		eventBus.register(gearWatcher);
+		eventBus.register(runePouchRunes);
+		eventBus.register(arenaLocator);
+		eventBus.register(gearSearchHelper);
+		eventBus.register(arenaGearOverlay);
+		arenaGearOverlay.setViewSupplier(reporter::view);
+		overlayManager.add(arenaGearOverlay);
+		tournamentGearCard = new com.pvp.leaderboard.ui.TournamentGearCard(this::applyItemIcon, new com.pvp.leaderboard.ui.TournamentGearCard.Actions()
+		{
+			@Override
+			public void findItem(int itemId, java.util.List<Integer> altIds, String name)
+			{
+				gearSearchHelper.onItemClicked(itemId, altIds, name);
+			}
+
+			@Override
+			public void copySetup(com.pvp.leaderboard.tournament.GearKit kit)
+			{
+				copyToClipboard(com.pvp.leaderboard.tournament.GearCapture.toCatalogJson(kit));
+			}
+
+			@Override
+			public void showMissingInBank(java.util.List<Integer> itemIds)
+			{
+				gearSearchHelper.showMissingInBank(itemIds);
+			}
+
+			@Override
+			public void openPanel()
+			{
+				openTournamentsPanel();
+			}
+		}, () -> config.gearAutoOpenPanel());
+		reporter.addViewListener(tournamentGearCard::render);
+		dashboardPanel.setTournamentGearCard(tournamentGearCard);
+		gearTicker = new javax.swing.Timer(1000, e -> reporter.tick());
+		gearTicker.setRepeats(true);
+		gearTicker.start();
+	}
+
+	private void stopGearCheck()
+	{
+		if (gearTicker != null) gearTicker.stop();
+		gearTicker = null;
+		if (gearStatusReporter != null) webSocketTournamentService.removeListener(gearStatusReporter);
+		if (gearEventTracker != null) webSocketTournamentService.removeListener(gearEventTracker);
+		eventBus.unregister(duelKitReader);
+		eventBus.unregister(gearWatcher);
+		eventBus.unregister(runePouchRunes);
+		eventBus.unregister(arenaLocator);
+		eventBus.unregister(gearSearchHelper);
+		eventBus.unregister(arenaGearOverlay);
+		overlayManager.remove(arenaGearOverlay);
+		arenaGearOverlay.setViewSupplier(null);
+		duelKitReader.setActive(null);
+		gearWatcher.setActive(null);
+		gearSearchHelper.setMissingSupplier(null);
+		if (dashboardPanel != null) dashboardPanel.setTournamentGearCard(null);
+		arenaKitStore.clearSession();
+		gearStatusReporter = null;
+		gearEventTracker = null;
+		tournamentGearCard = null;
+	}
+
+	private java.util.Collection<Integer> gearMissingOutsideTheArena()
+	{
+		com.pvp.leaderboard.tournament.GearStatusReporter reporter = gearStatusReporter;
+		if (reporter == null) return java.util.Collections.emptyList();
+		com.pvp.leaderboard.tournament.GearStatusReporter.View v = reporter.view();
+		return v.event != null && !v.event.arena ? v.missingIds() : java.util.Collections.<Integer>emptyList();
+	}
+
+	private void applyItemIcon(javax.swing.JLabel label, int itemId, int qty, boolean stackable)
+	{
+		try
+		{
+			net.runelite.client.util.AsyncBufferedImage image = itemManager.getImage(itemId, qty, stackable);
+			if (image != null) image.addTo(label);
+		}
+		catch (RuntimeException e)
+		{
+			log.debug("[Gear] item icon {} failed: {}", itemId, e.getMessage());
+		}
+	}
+
+	private void copyToClipboard(String text)
+	{
+		if (text == null) return;
+		try
+		{
+			java.awt.Toolkit.getDefaultToolkit().getSystemClipboard().setContents(new java.awt.datatransfer.StringSelection(text), null);
+		}
+		catch (RuntimeException e)
+		{
+			log.debug("[Gear] clipboard copy failed: {}", e.getMessage());
+		}
+	}
+
+	private void openTournamentsPanel()
+	{
+		if (navButton == null || dashboardPanel == null || !config.enableTournaments()) return;
+		try
+		{
+			clientToolbar.openPanel(navButton);
+		}
+		catch (RuntimeException | AssertionError e)
+		{
+			log.debug("[Gear] openPanel failed: {}", e.getMessage());
+		}
+		dashboardPanel.showTournamentsTab();
 	}
 }

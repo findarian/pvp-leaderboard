@@ -8,21 +8,14 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
 
-/**
- * The per-bucket win streaks of one /user profile (BOARD row 33, 2026-09-21):
- * {@code buckets.<key>.streak} (current) and {@code buckets.<key>.best_streak}
- * (longest), read with the same lenient helper and the same keys the Player
- * Lookup streak line uses ({@code DashboardPanel.applyBucketStatsFromUser}),
- * so the kill-streak box and the side panel can never disagree on a number.
- * A bucket that is absent, JSON null or not an object (the {@code tournament}
- * bucket of a player who never entered one) reads 0 / 0; nothing is ever
- * negative. Immutable; parsed once per cached profile, never per frame.
- */
 public final class WinStreaks
 {
 	public static final WinStreaks EMPTY = new WinStreaks(Collections.emptyMap());
 
-	/** bucket key → {current, best}. */
+	private static final int CURRENT = 0;
+	private static final int BEST = 1;
+	private static final int NOT_SENT = -1;
+
 	private final Map<String, int[]> byBucket;
 
 	private WinStreaks(Map<String, int[]> byBucket)
@@ -39,24 +32,42 @@ public final class WinStreaks
 		{
 			JsonObject bucket = JsonLenient.optObject(buckets, e.getKey());
 			if (bucket == null) continue;
-			out.put(e.getKey(), new int[]{
-				Math.max(0, JsonLenient.optInt(bucket, "streak", 0)),
-				Math.max(0, JsonLenient.optInt(bucket, "best_streak", 0))});
+			out.put(e.getKey(), new int[]{sent(bucket, "streak"), sent(bucket, "best_streak")});
 		}
 		return out.isEmpty() ? EMPTY : new WinStreaks(out);
+	}
+
+	private static int sent(JsonObject bucket, String key)
+	{
+		Integer v = JsonLenient.optInteger(bucket, key);
+		return v == null || v < 0 ? NOT_SENT : v;
 	}
 
 	/** The current win streak in {@code bucketKey}; 0 when unknown. */
 	public int current(String bucketKey)
 	{
-		int[] v = bucketKey == null ? null : byBucket.get(bucketKey);
-		return v == null ? 0 : v[0];
+		return Math.max(0, raw(bucketKey, CURRENT));
 	}
 
 	/** The longest win streak in {@code bucketKey}; 0 when unknown. */
 	public int best(String bucketKey)
 	{
+		return Math.max(0, raw(bucketKey, BEST));
+	}
+
+	public boolean hasStreak(String bucketKey)
+	{
+		return raw(bucketKey, CURRENT) != NOT_SENT;
+	}
+
+	public boolean hasBest(String bucketKey)
+	{
+		return raw(bucketKey, BEST) != NOT_SENT;
+	}
+
+	private int raw(String bucketKey, int index)
+	{
 		int[] v = bucketKey == null ? null : byBucket.get(bucketKey);
-		return v == null ? 0 : v[1];
+		return v == null ? NOT_SENT : v[index];
 	}
 }

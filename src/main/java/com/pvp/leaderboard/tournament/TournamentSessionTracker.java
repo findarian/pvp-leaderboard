@@ -1,29 +1,13 @@
 package com.pvp.leaderboard.tournament;
 
 import com.google.gson.JsonObject;
+import com.pvp.leaderboard.util.NameUtils;
 
 import javax.inject.Inject;
 import javax.inject.Singleton;
 import java.util.List;
 import java.util.function.LongSupplier;
 
-/**
- * Pure, thread-safe memory of the local player's tournament participation
- * (Plan 10 F.2 / F.4, 2026-09-21), fed by the {@link TournamentEventListener}
- * pushes and read by:
- * <ul>
- *   <li>the bucket auto-switch ({@link #isActiveParticipant()} pins the
- *       Tournament bucket while the player is in a running tournament,
- *       AS-72: the switch back happens at the next fight like every bucket);</li>
- *   <li>the opponent outline overlay ({@link #getHighlightedOpponentName()},
- *       driven only by {@code tournament/opponent_highlight} / the assigned
- *       series, cleared by {@code _clear}, removal, cancel, finish, or the
- *       {@code until} deadline);</li>
- *   <li>the in-combat signal ({@link #getActiveSeries()}).</li>
- * </ul>
- * Fields are volatile: the listener writes on the EDT, the overlay reads
- * on the render thread.
- */
 @Singleton
 public class TournamentSessionTracker implements TournamentEventListener
 {
@@ -32,7 +16,10 @@ public class TournamentSessionTracker implements TournamentEventListener
     private volatile String activeTournamentName;
     private volatile TournamentSeries activeSeries;
     private volatile String highlightName;
+    private volatile String highlightKey;
     private volatile long highlightUntilEpochS;
+    private volatile String foughtKey;
+    private volatile String foughtSeriesId;
 
     @Inject
     public TournamentSessionTracker()
@@ -67,14 +54,38 @@ public class TournamentSessionTracker implements TournamentEventListener
         return activeSeries;
     }
 
-    /** The opponent to outline in yellow right now, or {@code null}. */
     public String getHighlightedOpponentName()
     {
         String name = highlightName;
         if (name == null) return null;
         long until = highlightUntilEpochS;
         if (until > 0 && nowEpochMs.getAsLong() / 1000L >= until) return null;
+        String fought = foughtKey;
+        if (fought != null && fought.equals(highlightKey)) return null;
         return name;
+    }
+
+    public boolean isAwaitingCombat()
+    {
+        String wanted = highlightKey;
+        return wanted != null && !wanted.equals(foughtKey);
+    }
+
+    public void onCombatWith(String playerName, int localWorld)
+    {
+        String wanted = highlightKey;
+        if (wanted == null || wanted.equals(foughtKey)) return;
+        if (playerName == null || !wanted.equals(NameUtils.canonicalKey(playerName))) return;
+        TournamentSeries s = activeSeries;
+        if (!onAssignedWorld(s, localWorld)) return;
+        foughtSeriesId = s == null ? null : s.seriesId;
+        foughtKey = wanted;
+    }
+
+    private static boolean onAssignedWorld(TournamentSeries s, int localWorld)
+    {
+        int assigned = s == null ? 0 : s.worldNumber();
+        return assigned == 0 || assigned == localWorld;
     }
 
     public void clear()
@@ -82,15 +93,54 @@ public class TournamentSessionTracker implements TournamentEventListener
         activeTournamentId = null;
         activeTournamentName = null;
         activeSeries = null;
-        highlightName = null;
-        highlightUntilEpochS = 0L;
+        setHighlight(null, null, 0L);
+    }
+
+    private void endSession()
+    {
+        clear();
+        forgetCombat();
     }
 
     private void clearIf(String tournamentId)
     {
         String active = activeTournamentId;
         if (active == null) return;
-        if (tournamentId == null || tournamentId.isEmpty() || tournamentId.equals(active)) clear();
+        if (tournamentId == null || tournamentId.isEmpty() || tournamentId.equals(active)) endSession();
+    }
+
+    private void setHighlight(String name, String key, long untilEpochS)
+    {
+        highlightName = null;
+        highlightUntilEpochS = untilEpochS;
+        highlightKey = key;
+        highlightName = name;
+    }
+
+    private void assign(String seriesId, String opponentName, long untilEpochS)
+    {
+        String key = opponentName == null ? "" : NameUtils.canonicalKey(opponentName);
+        boolean otherPairing = isOtherPairing(seriesId, key.isEmpty() ? null : key);
+        if (key.isEmpty()) setHighlight(null, null, 0L);
+        else setHighlight(opponentName, key, untilEpochS);
+        if (otherPairing) forgetCombat();
+        else if (foughtKey != null && foughtSeriesId == null && seriesId != null) foughtSeriesId = seriesId;
+    }
+
+    private boolean isOtherPairing(String seriesId, String opponentKey)
+    {
+        String fought = foughtKey;
+        if (fought == null) return false;
+        String foughtSeries = foughtSeriesId;
+        boolean otherSeries = foughtSeries != null && seriesId != null && !foughtSeries.equals(seriesId);
+        boolean otherOpponent = opponentKey != null && !fought.equals(opponentKey);
+        return otherSeries || otherOpponent;
+    }
+
+    private void forgetCombat()
+    {
+        foughtKey = null;
+        foughtSeriesId = null;
     }
 
     // ---- listener ----
@@ -99,23 +149,16 @@ public class TournamentSessionTracker implements TournamentEventListener
     {
         if (active == null || !active.isRunning())
         {
-            clear();
+            endSession();
             return;
         }
         activeTournamentId = active.tournamentId;
         activeTournamentName = active.name;
         TournamentSeries s = active.series != null && active.series.isOpen() ? active.series : null;
         activeSeries = s;
-        if (s != null && s.opponentName != null)
-        {
-            highlightName = s.opponentName;
-            highlightUntilEpochS = s.deadlineAt;
-        }
-        else
-        {
-            highlightName = null;
-            highlightUntilEpochS = 0L;
-        }
+        if (s == null) setHighlight(null, null, 0L);
+        else assign(s.seriesId, s.hasNamedOpponent() ? s.opponentName : null, s.deadlineAt);
+        if (active.bye) forgetCombat();
     }
 
     @Override
@@ -124,24 +167,21 @@ public class TournamentSessionTracker implements TournamentEventListener
         if (series == null) return;
         activeTournamentId = series.tournamentId;
         activeSeries = series;
-        highlightName = series.opponentName;
-        highlightUntilEpochS = series.deadlineAt;
+        assign(series.seriesId, series.hasNamedOpponent() ? series.opponentName : null, series.deadlineAt);
     }
 
     @Override
     public void onOpponentHighlight(String tournamentId, String opponentName, String opponentAcctSha, long untilEpochS)
     {
-        if (opponentName == null || opponentName.isEmpty()) return;
+        if (opponentName == null || NameUtils.canonicalKey(opponentName).isEmpty()) return;
         if (tournamentId != null && !tournamentId.isEmpty()) activeTournamentId = tournamentId;
-        highlightName = opponentName;
-        highlightUntilEpochS = untilEpochS;
+        assign(null, opponentName, untilEpochS);
     }
 
     @Override
     public void onOpponentHighlightClear(String tournamentId, String seriesId)
     {
-        highlightName = null;
-        highlightUntilEpochS = 0L;
+        setHighlight(null, null, 0L);
         TournamentSeries s = activeSeries;
         if (s != null && (seriesId == null || seriesId.isEmpty() || seriesId.equals(s.seriesId))) activeSeries = null;
     }
@@ -151,8 +191,8 @@ public class TournamentSessionTracker implements TournamentEventListener
     {
         if (tournamentId != null && !tournamentId.isEmpty()) activeTournamentId = tournamentId;
         activeSeries = null;
-        highlightName = null;
-        highlightUntilEpochS = 0L;
+        setHighlight(null, null, 0L);
+        forgetCombat();
     }
 
     @Override

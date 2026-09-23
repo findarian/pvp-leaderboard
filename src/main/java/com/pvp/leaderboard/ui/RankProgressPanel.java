@@ -176,11 +176,9 @@ public class RankProgressPanel extends JPanel
                     progressBars[idx].setString(Math.round(pct) + "%");
                     progressBars[idx].setForeground(rankColor);
                 }
-                if (streak >= 0 && bestStreak >= 0 && streakLabels[idx] != null)
+                if (streak >= 0 && bestStreak >= 0)
                 {
-                    boolean show = streak > 0 || bestStreak > 0;
-                    streakLabels[idx].setText(show ? streakText(streak, bestStreak) : " ");
-                    streakLabels[idx].setVisible(show);
+                    setStreakLine(idx, streak, false, bestStreak);
                 }
                 if (idx == TOURNAMENT_IDX)
                 {
@@ -190,10 +188,30 @@ public class RankProgressPanel extends JPanel
         }
     }
 
+    public void updateStreak(String bucket, int streak, boolean plus, int bestStreak)
+    {
+        int idx = getBucketIndex(bucket);
+        if (idx < 0) return;
+        SwingUtilities.invokeLater(() -> setStreakLine(idx, streak, plus, bestStreak));
+    }
+
+    private void setStreakLine(int idx, int streak, boolean plus, int bestStreak)
+    {
+        if (streakLabels[idx] == null) return;
+        boolean show = streak > 0 || bestStreak > 0;
+        streakLabels[idx].setText(show ? streakText(streak, plus, bestStreak) : " ");
+        streakLabels[idx].setVisible(show);
+    }
+
     /** {@code "Current Winstreak 4 · Longest Streak 12"} (BOARD row 33 wording, mockup v4). */
     static String streakText(int streak, int bestStreak)
     {
-        return "Current Winstreak " + Math.max(0, streak) + " · Longest Streak " + Math.max(0, bestStreak);
+        return streakText(streak, false, bestStreak);
+    }
+
+    static String streakText(int streak, boolean plus, int bestStreak)
+    {
+        return "Current Winstreak " + Math.max(0, streak) + (plus ? "+" : "") + " · Longest Streak " + Math.max(0, bestStreak);
     }
 
     public void reset()

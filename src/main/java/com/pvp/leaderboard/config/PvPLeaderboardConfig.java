@@ -409,6 +409,37 @@ public interface PvPLeaderboardConfig extends Config
 		return true;
 	}
 
+	@ConfigSection(
+		name = "Tournament Gear",
+		description = "The required-kit check of tournaments that set one (PvP Arena Unranked Duels)",
+		position = 6
+	)
+	String tournamentGearSection = "tournamentGear";
+
+	@ConfigItem(
+		keyName = "gearAutoOpenPanel",
+		name = "Open the panel for the kit check",
+		description = "When a tournament's kit check starts (and when the event starts) while your kit does not match, open this plugin's panel on the Tournaments tab - once per check",
+		section = tournamentGearSection,
+		position = 0
+	)
+	default boolean gearAutoOpenPanel()
+	{
+		return true;
+	}
+
+	@ConfigItem(
+		keyName = "gearAutoFilterBank",
+		name = "Filter the bank to missing kit items",
+		description = "During a tournament kit check outside the PvP Arena, filter the bank to the items your kit is missing when you open it",
+		section = tournamentGearSection,
+		position = 1
+	)
+	default boolean gearAutoFilterBank()
+	{
+		return true;
+	}
+
 	// ==================== Whitelist Settings ====================
 
 	@ConfigItem(
@@ -442,7 +473,7 @@ public interface PvPLeaderboardConfig extends Config
 
 	@ConfigSection(
 		name = "Kill Streak Box",
-		description = "A movable box with your current kill streak in the style you are fighting in (off by default)",
+		description = "A movable counter of your current kill streak in the style you are fighting in",
 		position = 5
 	)
 	String killStreakSection = "killStreak";
@@ -450,13 +481,14 @@ public interface PvPLeaderboardConfig extends Config
 	@ConfigItem(
 		keyName = "showKillStreakBox",
 		name = "Show kill streak box",
-		description = "Show a movable box reading '<style> Current Kill Streak: N' (Alt+drag to move it). Off by default.",
+		description = "Show a movable counter reading '<style> Kill Streak: N' (Alt+drag to move it). "
+			+ "'N+' means your streak is longer than the loaded match history.",
 		section = killStreakSection,
 		position = 0
 	)
 	default boolean showKillStreakBox()
 	{
-		return false;
+		return true;
 	}
 
 	@ConfigItem(
@@ -486,11 +518,35 @@ public interface PvPLeaderboardConfig extends Config
 	@ConfigItem(
 		keyName = "killStreakBoxShowLongest",
 		name = "Show longest streak",
-		description = "Add a second line with your longest kill streak in that style",
+		description = "Add a line with your longest kill streak in that style",
 		section = killStreakSection,
 		position = 3
 	)
 	default boolean killStreakBoxShowLongest()
+	{
+		return true;
+	}
+
+	@ConfigItem(
+		keyName = "killStreakBoxShowWinLoss",
+		name = "Show win / loss",
+		description = "Add a line with your wins and losses in that style",
+		section = killStreakSection,
+		position = 4
+	)
+	default boolean killStreakBoxShowWinLoss()
+	{
+		return false;
+	}
+
+	@ConfigItem(
+		keyName = "killStreakBoxShowPeak",
+		name = "Show peak rank",
+		description = "Add a line with your peak rank in that style (nothing when you have none)",
+		section = killStreakSection,
+		position = 5
+	)
+	default boolean killStreakBoxShowPeak()
 	{
 		return false;
 	}

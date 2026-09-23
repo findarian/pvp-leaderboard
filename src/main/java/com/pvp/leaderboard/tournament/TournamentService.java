@@ -13,6 +13,8 @@ public interface TournamentService
     /** Longest {@code tournament/report_problem} text the server accepts. */
     int REPORT_MAX_CHARS = 280;
 
+    java.util.List<String> GEAR_CAPS = java.util.Collections.singletonList("gear1");
+
     void addListener(TournamentEventListener listener);
 
     void removeListener(TournamentEventListener listener);
@@ -45,6 +47,8 @@ public interface TournamentService
 
     /** {@code tournament/report_problem} (text truncated to {@link #REPORT_MAX_CHARS}). */
     void reportProblem(String tournamentId, String text);
+
+    default void gearStatus(String tournamentId, String digest, GearDiff diff, String source, boolean ok) {}
 
     /** {@code true} for a real transport (the sub-tab is enabled). */
     default boolean isAvailable() { return true; }

@@ -632,6 +632,10 @@ public class PvPDataService
 
 		Request.Builder requestBuilder = new Request.Builder().url(url).get();
 		
+		if (forceRefresh) {
+			requestBuilder.cacheControl(CacheControl.FORCE_NETWORK);
+		}
+		
 		// Add client UUID header for API authentication/tracking
 		String clientUuid = clientIdentityService != null ? clientIdentityService.getClientUniqueId() : null;
 		if (clientUuid != null && !clientUuid.isEmpty())

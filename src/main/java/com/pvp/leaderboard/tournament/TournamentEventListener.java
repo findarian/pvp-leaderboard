@@ -64,4 +64,8 @@ public interface TournamentEventListener
      *  listeners from the manager's connect hook, on the EDT, so a panel
      *  that asked for the list while the socket was down asks again. */
     default void onSocketConnected() {}
+
+    default void onGearCheck(String tournamentId, int round, long untilEpochS) {}
+
+    default void onGearAck(String tournamentId, boolean ok, long receivedAt) {}
 }

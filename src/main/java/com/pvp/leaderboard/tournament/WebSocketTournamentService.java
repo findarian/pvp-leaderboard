@@ -16,21 +16,6 @@ import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.function.Consumer;
 
-/**
- * {@link TournamentService} over the plugin's WebSocket (Plan 10 Part C /
- * F.3, 2026-09-21). Encodes the nine {@code tournament/*} cmds
- * (WEBSOCKET_PROTOCOL.md § 6.3) and turns the fourteen server pushes +
- * {@code error/tournament} into EDT-delivered
- * {@link TournamentEventListener} callbacks, fanned out to every
- * registered listener (the sub-tab, the {@link TournamentSessionTracker},
- * the plugin's bucket auto-switch hook).
- *
- * <p>Reconnect: the server keeps the registration / series rows, so a
- * socket re-open re-asks {@code tournament/status} and re-issues the
- * last {@code tournament/subscribe} (viewer rows are per connection).
- *
- * <p>No UUIDs anywhere on this path (AS-97).
- */
 @Slf4j
 @Singleton
 public class WebSocketTournamentService implements TournamentService
@@ -80,6 +65,8 @@ public class WebSocketTournamentService implements TournamentService
         bus.register("tournament/cancelled", this::handleCancelled);
         bus.register("tournament/finished", this::handleFinished);
         bus.register("tournament/problem_ack", this::handleProblemAck);
+        bus.register("tournament/gear_check", this::handleGearCheck);
+        bus.register("tournament/gear_ack", this::handleGearAck);
         bus.register("error/tournament", this::handleError);
         socket.addConnectListener(this::onReconnect);
     }
@@ -119,12 +106,20 @@ public class WebSocketTournamentService implements TournamentService
         socket.send("tournament/list", new JsonObject());
     }
 
+    private static JsonArray caps()
+    {
+        JsonArray a = new JsonArray();
+        for (String cap : GEAR_CAPS) a.add(cap);
+        return a;
+    }
+
     @Override
     public void register(String tournamentId, String region)
     {
         if (blank(tournamentId)) return;
         JsonObject d = withId(tournamentId);
         if (!blank(region)) d.addProperty("region", region);
+        d.add("caps", caps());
         socket.send("tournament/register", d);
     }
 
@@ -138,7 +133,9 @@ public class WebSocketTournamentService implements TournamentService
     @Override
     public void status()
     {
-        socket.send("tournament/status", new JsonObject());
+        JsonObject d = new JsonObject();
+        d.add("caps", caps());
+        socket.send("tournament/status", d);
     }
 
     @Override
@@ -184,6 +181,28 @@ public class WebSocketTournamentService implements TournamentService
         JsonObject d = withId(tournamentId);
         d.addProperty("text", trimmed);
         socket.send("tournament/report_problem", d);
+    }
+
+    private static void putVerdict(JsonObject d, GearDiff diff, boolean ok)
+    {
+        d.addProperty("ok", ok);
+        d.addProperty("build_ok", diff.buildOk);
+        d.addProperty("missing", diff.missingCount());
+        d.addProperty("extra", diff.extraCount());
+        d.addProperty("spellbook_ok", diff.spellbookOk);
+        JsonArray triples = diff.wireDiff();
+        if (triples.size() > 0) d.add("diff", triples);
+    }
+
+    @Override
+    public void gearStatus(String tournamentId, String digest, GearDiff diff, String source, boolean ok)
+    {
+        if (blank(tournamentId) || blank(digest) || diff == null) return;
+        JsonObject d = withId(tournamentId);
+        d.addProperty("digest", digest);
+        putVerdict(d, diff, ok);
+        d.addProperty("source", blank(source) ? GearKit.SOURCE_CONTAINERS : source);
+        socket.send("tournament/gear_status", d);
     }
 
     // ---- inbound ----
@@ -313,6 +332,24 @@ public class WebSocketTournamentService implements TournamentService
     {
         String tid = JsonLenient.optString(d, "tournament_id", "");
         fire(l -> l.onProblemAck(tid));
+    }
+
+    private void handleGearCheck(JsonObject d)
+    {
+        String tid = JsonLenient.optString(d, "tournament_id", "");
+        if (tid.isEmpty()) return;
+        int round = JsonLenient.optInt(d, "round", 0);
+        long until = JsonLenient.optLong(d, "until", 0L);
+        fire(l -> l.onGearCheck(tid, round, until));
+    }
+
+    private void handleGearAck(JsonObject d)
+    {
+        String tid = JsonLenient.optString(d, "tournament_id", "");
+        if (tid.isEmpty()) return;
+        boolean ok = JsonLenient.optBool(d, "ok", false);
+        long receivedAt = JsonLenient.optLong(d, "received_at", 0L);
+        fire(l -> l.onGearAck(tid, ok, receivedAt));
     }
 
     private void handleError(JsonObject d)

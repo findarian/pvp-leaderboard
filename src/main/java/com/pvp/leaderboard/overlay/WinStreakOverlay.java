@@ -4,9 +4,11 @@ import com.pvp.leaderboard.cache.UserStatsCache;
 import com.pvp.leaderboard.config.PvPLeaderboardConfig;
 import com.pvp.leaderboard.config.StreakBucket;
 import com.pvp.leaderboard.service.PvPDataService;
-import com.pvp.leaderboard.service.WinStreaks;
+import com.pvp.leaderboard.service.WinLossPeak;
+import com.pvp.leaderboard.service.WinStreakTracker;
 import net.runelite.api.Client;
 import net.runelite.api.Player;
+import net.runelite.client.ui.FontManager;
 import net.runelite.client.ui.overlay.Overlay;
 import net.runelite.client.ui.overlay.OverlayPanel;
 import net.runelite.client.ui.overlay.OverlayPosition;
@@ -15,41 +17,17 @@ import net.runelite.client.ui.overlay.components.LineComponent;
 import javax.inject.Inject;
 import javax.inject.Singleton;
 import java.awt.Dimension;
+import java.awt.Font;
+import java.awt.FontMetrics;
 import java.awt.Graphics2D;
+import java.awt.Point;
+import java.awt.Rectangle;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.function.LongSupplier;
 import java.util.function.Supplier;
 
-/**
- * The movable kill-streak box (BOARD row 33, 2026-09-21): one line reading
- * {@code "<NH|Veng|Multi|DMM|Event> Current Kill Streak: N"}, plus
- * {@code "Longest: M"} when the config asks for it. A standard RuneLite
- * {@link OverlayPanel}: Alt+drag moves it and RuneLite persists the position.
- *
- * <p><b>Off by default</b> ({@code showKillStreakBox}); while off a frame
- * costs one config read and draws nothing.
- *
- * <p><b>Which style:</b> with {@code killStreakBoxAutoSwitch} (default on) the
- * box follows {@code FightMonitor.getAutoSwitchTarget()} — the same
- * resolution the leaderboard auto-switch and the Plan 10 tournament pin use,
- * wired by the plugin as a supplier — so "the style you are in" has one
- * source of truth. Before the first fight of a session it falls back to the
- * leaderboard bucket the config holds (the auto-switch persisted it last
- * session), then NH. With auto-switch off it shows
- * {@code killStreakBoxBucket} and ignores the fights.
- *
- * <p><b>Which numbers:</b> the cached /user profile the plugin already
- * fetches for the local player (login init, the 5-s post-fight tier refresh,
- * the lobby gate), peeked through {@link PvPDataService#peekUserProfile} at
- * most once per {@link #PROFILE_PEEK_INTERVAL_MS} and re-parsed only when the
- * cache entry changes. The box never fetches. Until a profile is cached
- * nothing is drawn — a stale 0 at login would read as a lost streak.
- *
- * <p>Renders on the client thread only; a throwing supplier or config never
- * reaches RuneLite's renderer.
- */
 @Singleton
 public class WinStreakOverlay extends OverlayPanel
 {
@@ -57,10 +35,14 @@ public class WinStreakOverlay extends OverlayPanel
 	 *  canonicalisation): the render loop runs ~50 times a second, the
 	 *  profile changes a few times a session. */
 	static final long PROFILE_PEEK_INTERVAL_MS = 1_000L;
+	static final int BORDER_PX = 2;
+	static final int GAP_PX = 1;
+	private static final int SHADOW_PX = 1;
 
 	private final Client client;
 	private final PvPLeaderboardConfig config;
 	private final PvPDataService pvpDataService;
+	private final WinStreakTracker tracker;
 	private final LongSupplier nowMs;
 
 	/** Wired by the plugin to {@code FightMonitor::getAutoSwitchTarget}. */
@@ -70,30 +52,42 @@ public class WinStreakOverlay extends OverlayPanel
 	private String peekedSelf;
 	private long nextPeekAtMs;
 	private long peekedProfileTs = Long.MIN_VALUE;
-	private WinStreaks streaks;
+	private WinLossPeak winLossPeak;
 	private volatile List<String> lastLines = Collections.emptyList();
 
 	@Inject
-	public WinStreakOverlay(Client client, PvPLeaderboardConfig config, PvPDataService pvpDataService)
+	public WinStreakOverlay(Client client, PvPLeaderboardConfig config, PvPDataService pvpDataService,
+		WinStreakTracker tracker)
 	{
-		this(client, config, pvpDataService, System::currentTimeMillis);
+		this(client, config, pvpDataService, tracker, System::currentTimeMillis);
 	}
 
-	WinStreakOverlay(Client client, PvPLeaderboardConfig config, PvPDataService pvpDataService, LongSupplier nowMs)
+	WinStreakOverlay(Client client, PvPLeaderboardConfig config, PvPDataService pvpDataService,
+		WinStreakTracker tracker, LongSupplier nowMs)
 	{
 		this.client = client;
 		this.config = config;
 		this.pvpDataService = pvpDataService;
+		this.tracker = tracker;
 		this.nowMs = nowMs;
 		// A positioned (non-DYNAMIC) overlay is movable + snappable through
 		// RuneLite's standard Alt+drag; TOP_LEFT is only where it starts.
 		setPosition(OverlayPosition.TOP_LEFT);
 		setPriority(Overlay.PRIORITY_LOW);
+		setResizable(false);
+		panelComponent.setBorder(new Rectangle(BORDER_PX, BORDER_PX, BORDER_PX, BORDER_PX));
+		panelComponent.setGap(new Point(0, GAP_PX));
 	}
 
 	public void setAutoSwitchTargetSupplier(Supplier<PvPLeaderboardConfig.RankBucket> supplier)
 	{
 		this.autoSwitchTarget = supplier == null ? () -> null : supplier;
+	}
+
+	@Override
+	public Dimension getPreferredSize()
+	{
+		return null;
 	}
 
 	/** Forget the peeked profile and the last frame (plugin shutdown) so a
@@ -103,7 +97,7 @@ public class WinStreakOverlay extends OverlayPanel
 		peekedSelf = null;
 		nextPeekAtMs = 0L;
 		peekedProfileTs = Long.MIN_VALUE;
-		streaks = null;
+		winLossPeak = null;
 		lastLines = Collections.emptyList();
 		panelComponent.getChildren().clear();
 	}
@@ -124,13 +118,19 @@ public class WinStreakOverlay extends OverlayPanel
 			if (!config.showKillStreakBox()) return null;
 			String self = localPlayerName();
 			if (self == null) return null;
-			WinStreaks known = streaksFor(self);
-			if (known == null) return null;
-			List<String> lines = linesFor(resolveBucket(), known, config.killStreakBoxShowLongest());
+			WinLossPeak profile = profileFor(self);
+			if (!tracker.isKnown()) return null;
+			List<String> lines = linesFor(resolveBucket(), tracker, profile, config.killStreakBoxShowLongest(),
+				config.killStreakBoxShowWinLoss(), config.killStreakBoxShowPeak());
+			Font font = FontManager.getRunescapeSmallFont();
+			FontMetrics fm = graphics.getFontMetrics(font);
+			int widest = 0;
 			for (String line : lines)
 			{
-				panelComponent.getChildren().add(LineComponent.builder().left(line).build());
+				panelComponent.getChildren().add(LineComponent.builder().left(line).leftFont(font).rightFont(font).build());
+				widest = Math.max(widest, fm.stringWidth(line));
 			}
+			panelComponent.setPreferredSize(new Dimension(widest + 2 * BORDER_PX + SHADOW_PX, 0));
 			lastLines = lines;
 			return super.render(graphics);
 		}
@@ -159,27 +159,27 @@ public class WinStreakOverlay extends OverlayPanel
 		return persisted == null ? StreakBucket.NH : persisted;
 	}
 
-	/** {@code "<label> Current Kill Streak: N"} and, when asked, {@code "Longest: M"}. */
-	static List<String> linesFor(StreakBucket bucket, WinStreaks streaks, boolean showLongest)
+	static List<String> linesFor(StreakBucket bucket, WinStreakTracker tracker, WinLossPeak profile,
+		boolean showLongest, boolean showWinLoss, boolean showPeak)
 	{
-		List<String> lines = new ArrayList<>(2);
-		lines.add(bucket.label + " Current Kill Streak: " + streaks.current(bucket.bucketKey));
-		if (showLongest) lines.add("Longest: " + streaks.best(bucket.bucketKey));
+		String key = bucket.bucketKey;
+		List<String> lines = new ArrayList<>(4);
+		lines.add(bucket.label + " Kill Streak: " + tracker.text(key));
+		if (showLongest) lines.add("Longest: " + tracker.longest(key));
+		if (showWinLoss && profile != null) lines.add("W/L: " + profile.wins(key) + "-" + profile.losses(key));
+		String peak = showPeak && profile != null ? profile.peak(key) : null;
+		if (peak != null) lines.add("Peak: " + peak);
 		return lines;
 	}
 
-	/** The parsed streaks for {@code self}: re-peeked from the profile cache at
-	 *  most once per {@link #PROFILE_PEEK_INTERVAL_MS} (at once for a new
-	 *  character) and re-parsed only when the cache entry changed;
-	 *  {@code null} until a profile has been cached. */
-	WinStreaks streaksFor(String self)
+	WinLossPeak profileFor(String self)
 	{
 		if (!self.equals(peekedSelf))
 		{
 			peekedSelf = self;
 			nextPeekAtMs = 0L;
 			peekedProfileTs = Long.MIN_VALUE;
-			streaks = null;
+			winLossPeak = null;
 		}
 		long now = nowMs.getAsLong();
 		if (now >= nextPeekAtMs)
@@ -188,11 +188,12 @@ public class WinStreakOverlay extends OverlayPanel
 			UserStatsCache cached = pvpDataService.peekUserProfile(self);
 			if (cached != null && cached.getTimestamp() != peekedProfileTs)
 			{
-				streaks = WinStreaks.fromProfile(cached.getStats());
 				peekedProfileTs = cached.getTimestamp();
+				tracker.observeProfile(cached);
+				winLossPeak = WinLossPeak.fromProfile(cached.getStats());
 			}
 		}
-		return streaks;
+		return winLossPeak;
 	}
 
 	private String localPlayerName()

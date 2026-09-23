@@ -8,19 +8,6 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Locale;
 
-/**
- * One tournament as the server lists it (Plan 10 Part C / F.3,
- * 2026-09-21): the public event fields of {@code tournament/list_response}
- * plus the caller's own {@code my_status}; the trimmed rows of
- * {@code tournament/state.registrations} parse into the same type with
- * the fields the server omits left at their neutral values. acct_sha /
- * display names only — no UUIDs on the socket path.
- *
- * <p>Set 6 (2026-09-22, the info card): {@code creator_name} (the host),
- * {@code rank_limits} (per-bucket rank indices) and the optional
- * {@code rules} block ({@link TournamentRules}) are read too — all
- * additive, each neutral when the row does not carry it.
- */
 public final class TournamentSummary
 {
     public final String tournamentId;
@@ -57,6 +44,9 @@ public final class TournamentSummary
     public final List<RankLimit> rankLimits;
     /** The optional {@code rules} block; {@code null} = absent or junk, so the plugin uses {@link #rulesUrl}. */
     public final TournamentRules rules;
+    public final GearSet gearSet;
+    public final int gearPrepSec;
+    public final String location;
 
     /** One bucket's entry of {@code rank_limits}: rank indices (0 = Bronze 3 … 24 = 3rd Age), {@code -1} = that bound is not set. */
     public static final class RankLimit
@@ -89,6 +79,17 @@ public final class TournamentSummary
                              long prizePoolGp, String description, boolean pluginRequired, boolean midEventJoins, int minGames, int roundLengthSec,
                              String creatorName, List<RankLimit> rankLimits, TournamentRules rules)
     {
+        this(tournamentId, name, status, format, category, style, maxPlayers, registrationClosesAt, startsAt, rounds, currentRound, registeredCount,
+            myStatus, rulesUrl, buyInGp, prizeMode, prizeTopX, prizeRandomY, prizePoolGp, description, pluginRequired, midEventJoins, minGames, roundLengthSec,
+            creatorName, rankLimits, rules, null, 0, null);
+    }
+
+    public TournamentSummary(String tournamentId, String name, String status, String format, String category, String style,
+                             int maxPlayers, long registrationClosesAt, long startsAt, int rounds, int currentRound, int registeredCount,
+                             String myStatus, String rulesUrl, long buyInGp, String prizeMode, int prizeTopX, int prizeRandomY,
+                             long prizePoolGp, String description, boolean pluginRequired, boolean midEventJoins, int minGames, int roundLengthSec,
+                             String creatorName, List<RankLimit> rankLimits, TournamentRules rules, GearSet gearSet, int gearPrepSec, String location)
+    {
         this.tournamentId = tournamentId;
         this.name = name;
         this.status = status;
@@ -116,6 +117,9 @@ public final class TournamentSummary
         this.creatorName = creatorName;
         this.rankLimits = rankLimits == null ? Collections.<RankLimit>emptyList() : Collections.unmodifiableList(new ArrayList<>(rankLimits));
         this.rules = rules;
+        this.gearSet = gearSet;
+        this.gearPrepSec = Math.max(0, gearPrepSec);
+        this.location = location;
     }
 
     /** {@code null} when the object has no {@code tournament_id}. */
@@ -151,7 +155,18 @@ public final class TournamentSummary
             JsonLenient.optInt(o, "round_length_sec", 0),
             JsonLenient.optString(o, "creator_name", null),
             rankLimitsFrom(o),
-            TournamentRules.fromJson(o.get("rules")));
+            TournamentRules.fromJson(o.get("rules")),
+            GearSet.fromJson(o.get("gear_set")),
+            JsonLenient.optInt(o, "gear_prep_sec", 0),
+            textOf(o, "location"));
+    }
+
+    static String textOf(JsonObject o, String key)
+    {
+        com.google.gson.JsonElement e = o == null ? null : o.get(key);
+        if (e == null || !e.isJsonPrimitive() || !e.getAsJsonPrimitive().isString()) return null;
+        String s = e.getAsString().trim();
+        return s.isEmpty() ? null : s;
     }
 
     /** {@code rank_limits: {<bucket>: {min_idx?, max_idx?}}} → one

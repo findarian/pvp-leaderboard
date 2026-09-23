@@ -11,6 +11,8 @@ import com.pvp.leaderboard.util.JsonLenient;
  */
 public final class TournamentSeries
 {
+    public static final String UNKNOWN_OPPONENT = "your opponent";
+
     public final String tournamentId;
     public final String seriesId;
     public final int round;
@@ -64,7 +66,7 @@ public final class TournamentSeries
             JsonLenient.optInt(o, "round", 0),
             JsonLenient.optInt(o, "best_of", 1),
             JsonLenient.optString(o, "status", "open"),
-            JsonLenient.optString(o, "opponent_name", "your opponent"),
+            JsonLenient.optString(o, "opponent_name", UNKNOWN_OPPONENT),
             JsonLenient.optString(o, "opponent_acct_sha", null),
             JsonLenient.optString(o, "opponent_player_id", null),
             JsonLenient.optString(o, "world", null),
@@ -87,5 +89,26 @@ public final class TournamentSeries
         if (world == null || world.trim().isEmpty()) return "?";
         String w = world.trim();
         return w.toUpperCase().startsWith("W") ? w : "W" + w;
+    }
+
+    public boolean hasNamedOpponent()
+    {
+        return opponentName != null && !opponentName.trim().isEmpty() && !UNKNOWN_OPPONENT.equals(opponentName);
+    }
+
+    public int worldNumber()
+    {
+        if (world == null) return 0;
+        String w = world.trim();
+        if (w.startsWith("W") || w.startsWith("w")) w = w.substring(1).trim();
+        try
+        {
+            int n = Integer.parseInt(w);
+            return n > 0 ? n : 0;
+        }
+        catch (NumberFormatException e)
+        {
+            return 0;
+        }
     }
 }

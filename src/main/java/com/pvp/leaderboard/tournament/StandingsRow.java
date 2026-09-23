@@ -84,6 +84,7 @@ public final class StandingsRow
             case "kicked": return "kicked";
             case "withdrawn": return "withdrew";
             case "dropped_unpaid": return "dropped";
+            case "dropped_gear": return "gear";
             default: return "";
         }
     }

@@ -48,6 +48,17 @@ public enum StreakBucket
 		}
 	}
 
+	public static StreakBucket fromBucketKey(String key)
+	{
+		if (key == null) return null;
+		String k = key.trim().toLowerCase(java.util.Locale.ROOT);
+		for (StreakBucket b : values())
+		{
+			if (b.bucketKey.equals(k)) return b;
+		}
+		return null;
+	}
+
 	@Override
 	public String toString()
 	{

@@ -114,6 +114,7 @@ final class TournamentInfoCard extends JPanel
         String ranks = rankLimitsLine(t);
         if (!ranks.isEmpty()) addLine("tournament-ranks-", ranks, MUTED);
         if (t.creatorName != null && !t.creatorName.trim().isEmpty()) addLine("tournament-host-", "Host: " + t.creatorName.trim(), MUTED);
+        if (t.gearSet != null) addLine("tournament-kit-", kitLine(t), INFO);
         when.setName("tournament-when-" + t.tournamentId);
         when.setAlignmentX(LEFT_ALIGNMENT);
         add(when);
@@ -314,6 +315,17 @@ final class TournamentInfoCard extends JPanel
             else if (l.maxIdx >= 0) parts.add("max rank " + label + " " + rankLabel(l.maxIdx));
         }
         return capitalise(String.join(" · ", parts));
+    }
+
+    static String kitLine(TournamentSummary t)
+    {
+        List<String> parts = new ArrayList<>();
+        parts.add("Kit: " + t.gearSet.name);
+        parts.add(t.gearSet.buildLabel);
+        if (t.gearSet.spellbookLabel != null) parts.add(t.gearSet.spellbookLabel);
+        String where = t.location == null ? "" : t.location.trim().toLowerCase(java.util.Locale.ROOT);
+        if (where.isEmpty() || where.contains("arena")) parts.add("PvP Arena duels");
+        return String.join(" · ", parts);
     }
 
     /** {@code 18} → {@code "Rune 3"}, {@code 24} → {@code "3rd Age"}, out of range → {@code "?"}

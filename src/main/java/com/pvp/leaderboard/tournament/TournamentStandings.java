@@ -29,9 +29,16 @@ public final class TournamentStandings
     public final long updatedAt;
     /** The prize draw once finished ({@code {top[], random[], seed}}), else {@code null}. */
     public final JsonObject winners;
+    public final long gearCheckUntil;
 
     public TournamentStandings(String tournamentId, String name, String status, int round, int rounds, long deadlineAt, int etaS,
                                long breakUntil, int extended, List<StandingsRow> rows, long updatedAt, JsonObject winners)
+    {
+        this(tournamentId, name, status, round, rounds, deadlineAt, etaS, breakUntil, extended, rows, updatedAt, winners, 0L);
+    }
+
+    public TournamentStandings(String tournamentId, String name, String status, int round, int rounds, long deadlineAt, int etaS,
+                               long breakUntil, int extended, List<StandingsRow> rows, long updatedAt, JsonObject winners, long gearCheckUntil)
     {
         this.tournamentId = tournamentId;
         this.name = name;
@@ -45,6 +52,7 @@ public final class TournamentStandings
         this.rows = rows;
         this.updatedAt = updatedAt;
         this.winners = winners;
+        this.gearCheckUntil = Math.max(0L, gearCheckUntil);
     }
 
     /** {@code null} without a {@code tournament_id}. */
@@ -66,7 +74,8 @@ public final class TournamentStandings
             JsonLenient.optInt(o, "extended", 0),
             StandingsRow.fromArray(JsonLenient.optArray(o, "standings")),
             JsonLenient.optLong(o, "updated_at", 0L),
-            JsonLenient.optObject(o, "winners"));
+            JsonLenient.optObject(o, "winners"),
+            JsonLenient.optLong(o, "gear_check_until", 0L));
     }
 
     public boolean isFinished()

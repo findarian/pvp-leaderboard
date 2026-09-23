@@ -100,6 +100,10 @@ public class TournamentsPanel extends JPanel implements TournamentEventListener
     static final String REPORT_LOGIN_HINT = "Log in with Discord to contact the host.";
     /** The backend's per-player-per-event rate limit on reports. */
     static final String REPORT_RATE_LIMITED_TEXT = "You have already reported this tournament recently.";
+    public static final String NAME_LIST_GEAR_SLOT = "tournaments-list-gear-slot";
+    public static final String NAME_ACTIVE_GEAR_SLOT = "tournaments-active-gear-slot";
+    static final String GEAR_STATUS_CMD = "tournament/gear_status";
+    static final String UPDATE_REQUIRED_TEXT = "This tournament needs a newer PvP Leaderboard plugin — update it to register.";
     static final long IN_COMBAT_MIN_INTERVAL_MS = 30_000L;
     private static final int STANDINGS_MAX_ROWS = 40;
     private static final Color GREEN = new Color(0x3e, 0xcf, 0x8e);
@@ -147,6 +151,9 @@ public class TournamentsPanel extends JPanel implements TournamentEventListener
     /** The open Rules dialog, if any, and the card to return to from it. */
     private TournamentRulesDialog rulesDialog;
     private String rulesReturnCard = CARD_LIST;
+    private final JPanel listGearSlot = new JPanel(new BorderLayout());
+    private final JPanel activeGearSlot = new JPanel(new BorderLayout());
+    private javax.swing.JComponent gearCard;
     /** The panel's side of every card's buttons — one implementation for all cards. */
     private final TournamentInfoCard.Actions cardActions = new TournamentInfoCard.Actions()
     {
@@ -359,6 +366,10 @@ public class TournamentsPanel extends JPanel implements TournamentEventListener
         actions.add(rules);
         actions.add(Box.createHorizontalGlue());
         top.add(actions);
+        listGearSlot.setName(NAME_LIST_GEAR_SLOT);
+        listGearSlot.setOpaque(false);
+        listGearSlot.setAlignmentX(LEFT_ALIGNMENT);
+        top.add(listGearSlot);
         card.add(top, BorderLayout.NORTH);
         listBody.setLayout(new BoxLayout(listBody, BoxLayout.Y_AXIS));
         listBody.setName(NAME_LIST);
@@ -379,6 +390,10 @@ public class TournamentsPanel extends JPanel implements TournamentEventListener
             l.setAlignmentX(LEFT_ALIGNMENT);
             top.add(l);
         }
+        activeGearSlot.setName(NAME_ACTIVE_GEAR_SLOT);
+        activeGearSlot.setOpaque(false);
+        activeGearSlot.setAlignmentX(LEFT_ALIGNMENT);
+        top.add(activeGearSlot, 2);
         activeHeader.setName("tournaments-active-header");
         activeHeader.setFont(activeHeader.getFont().deriveFont(Font.BOLD, 15f));
         activeEta.setName("tournaments-active-eta");
@@ -465,6 +480,26 @@ public class TournamentsPanel extends JPanel implements TournamentEventListener
     {
         currentCard = name;
         cards.show(cardHost, name);
+        placeGearCard();
+    }
+
+    public void setGearCard(javax.swing.JComponent card)
+    {
+        if (gearCard != null && gearCard.getParent() != null) gearCard.getParent().remove(gearCard);
+        gearCard = card;
+        placeGearCard();
+    }
+
+    private void placeGearCard()
+    {
+        if (gearCard == null) return;
+        JPanel slot = active != null ? activeGearSlot : listGearSlot;
+        if (gearCard.getParent() == slot) return;
+        if (gearCard.getParent() != null) gearCard.getParent().remove(gearCard);
+        slot.add(gearCard, BorderLayout.CENTER);
+        listGearSlot.revalidate();
+        activeGearSlot.revalidate();
+        repaint();
     }
 
     private void showBanner(String text)
@@ -995,9 +1030,17 @@ public class TournamentsPanel extends JPanel implements TournamentEventListener
             // G-7: removed_dm's _REMOVED_WORDING["dropped_unpaid"]; without
             // it an unpaid drop read as the generic "You were removed".
             case "dropped_unpaid": what = "You were dropped from the tournament (buy-in not paid)"; break;
+            case "dropped_gear": what = null; break;
             default: what = "You were removed";
         }
-        showBanner(what + (round > 0 ? " in round " + round : "") + (reason == null || reason.isEmpty() ? "." : " — " + escape(reason) + "."));
+        if (what == null)
+        {
+            showBanner("You were removed — your kit didn't match the required set when " + (round > 0 ? "round " + round : "the round") + " started.");
+        }
+        else
+        {
+            showBanner(what + (round > 0 ? " in round " + round : "") + (reason == null || reason.isEmpty() ? "." : " — " + escape(reason) + "."));
+        }
         if (active == null || tournamentId == null || tournamentId.isEmpty() || tournamentId.equals(active.tournamentId)) clearActive();
         service.list();
     }
@@ -1078,6 +1121,7 @@ public class TournamentsPanel extends JPanel implements TournamentEventListener
     @Override
     public void onTournamentError(String code, String message, String cmd)
     {
+        if (GEAR_STATUS_CMD.equals(cmd)) return;
         showBanner(friendlyError(code, message, cmd));
     }
 
@@ -1114,6 +1158,7 @@ public class TournamentsPanel extends JPanel implements TournamentEventListener
             case "TOURNAMENT_BANNED": return "Your account is banned from the PvP Leaderboard. If you believe this is a mistake, DM Toyco.";
             case "TOURNAMENT_NOT_FOUND": return "That tournament does not exist (or is over).";
             case "TOURNAMENT_STATE": return message == null || message.isEmpty() ? "That is not possible right now." : escape(message);
+            case "TOURNAMENT_PLUGIN_UPDATE_REQUIRED": return message == null || message.isEmpty() ? UPDATE_REQUIRED_TEXT : escape(message);
             default: return "Tournaments: " + (message == null || message.isEmpty() ? code : escape(message));
         }
     }

@@ -22,58 +22,18 @@ import java.awt.RenderingHints;
 import java.awt.Stroke;
 import java.util.function.BooleanSupplier;
 
-/**
- * In-game popup notification for the "fight locked in" wire moment —
- * fires on {@code lobby/fight_proposed} (both perspectives: the inviter
- * just had their invite accepted, the invitee just clicked Accept on an
- * incoming invite). Painted with the same OSRS Collection-Log palette
- * and proportions as {@link LobbyInviteNotificationOverlay} so the two
- * popups visually rhyme.
- *
- * <p>Body content branches on who started the fight:
- * <ul>
- *   <li><b>Inviter perspective</b> (you sent the invite, they accepted):
- *       caption is {@code "<opponent> accepted your invite"} with the
- *       opponent's name tinted by their rank colour, and the sub-line
- *       is the style / build / location summary.</li>
- *   <li><b>Invitee perspective</b> (you accepted their invite):
- *       caption is just the opponent's name (rank-tinted, no trailing
- *       phrase — you already saw a "PvP Invite" popup a moment ago,
- *       this one confirms the match locked in). Sub-line is the same
- *       style / build / location summary.</li>
- * </ul>
- *
- * <p>Lifecycle is single-shot: {@link #showMatch} stamps the active
- * notification + start time and {@link #render(Graphics2D)} handles the
- * fade-in / hold / fade-out animation and self-clears when the
- * hardcoded {@link #TOTAL_VISIBLE_MS} window elapses. A second match
- * while one is still on screen replaces the old one.
- *
- * <p><b>Threading:</b> {@link #showMatch} is callable from any thread;
- * the overlay's render runs on the RuneLite game thread. Active-state
- * fields are {@code volatile} so the render path sees the latest stamp
- * without taking a lock.
- *
- * <p><b>Config gate:</b> the overlay short-circuits when
- * {@link PvPLeaderboardConfig#enableMatchFoundNotification()} is false,
- * so users who find it noisy can disable it without unregistering the
- * overlay.
- *
- * <p><b>Duration:</b> hardcoded at 5 s. The user-facing config exposes
- * only an on/off toggle (per the 2026-05-24 product spec — "match
- * found is more important than an invite, fewer knobs, longer hold").
- */
 @Slf4j
 @Singleton
 public final class MatchFoundNotificationOverlay extends Overlay
 {
     /** Fade-in duration at the start of each popup. */
-    private static final long FADE_IN_MS = 200L;
+    static final long FADE_IN_MS = 200L;
     /** Fade-out duration at the end of each popup. */
-    private static final long FADE_OUT_MS = 400L;
+    static final long FADE_OUT_MS = 400L;
     /** Total on-screen window (includes fade in + fade out). Hardcoded
      *  per the product spec — no config slider exposed for this one. */
-    private static final long TOTAL_VISIBLE_MS = 5_000L;
+    static final long TOTAL_VISIBLE_MS = 5_000L;
+    static final float PEAK_ALPHA = 0.8f;
 
     // ---- Collection-Log popup palette (eyedropper from the widget) ----
     /** Frame stone-brown fill — main interior + title bar share this
@@ -93,16 +53,14 @@ public final class MatchFoundNotificationOverlay extends Overlay
     /** Body text — slight cream off-white so it rhymes with OSRS UI. */
     private static final Color BODY_FG = new Color(0xFF, 0xFF, 0xFF);
 
-    // ---- Popup geometry (eyedropper-tuned to mirror the vanilla widget) ----
-    private static final int POPUP_W = 310;
-    private static final int POPUP_H = 132;
+    static final int POPUP_W = 155;
+    static final int POPUP_H = 66;
     /** Title bar height (top section above the separator). */
-    private static final int TITLE_BAR_H = 38;
+    static final int TITLE_BAR_H = 19;
     /** Distance from the top of the viewport. */
-    private static final int POPUP_TOP_OFFSET = 22;
-
-    /** Body text size — caption + sub-line share one bold font. */
-    private static final float BODY_FONT_PT = 16f;
+    static final int POPUP_TOP_OFFSET = 11;
+    static final float TITLE_FONT_PT = 10f;
+    private static final int BODY_SIDE_MARGIN = 6;
 
     private final Client client;
     private final PvPLeaderboardConfig config;
@@ -332,24 +290,7 @@ public final class MatchFoundNotificationOverlay extends Overlay
             this.wasDeferred = false;
         }
 
-        // Three-segment alpha curve: 0 → 1 over FADE_IN_MS, hold,
-        // 1 → 0 over FADE_OUT_MS at the end.
-        float alpha;
-        if (elapsed < FADE_IN_MS)
-        {
-            alpha = (float) elapsed / (float) FADE_IN_MS;
-        }
-        else if (elapsed > (TOTAL_VISIBLE_MS - FADE_OUT_MS))
-        {
-            long fadeStart = TOTAL_VISIBLE_MS - FADE_OUT_MS;
-            alpha = 1f - ((float) (elapsed - fadeStart) / (float) FADE_OUT_MS);
-        }
-        else
-        {
-            alpha = 1f;
-        }
-        if (alpha < 0f) alpha = 0f;
-        if (alpha > 1f) alpha = 1f;
+        float alpha = alphaAt(elapsed);
 
         Dimension canvas = client.getRealDimensions();
         if (canvas == null) return null;
@@ -382,6 +323,32 @@ public final class MatchFoundNotificationOverlay extends Overlay
         return new Dimension(POPUP_W, POPUP_H);
     }
 
+    static float alphaAt(long elapsedMs)
+    {
+        float share;
+        if (elapsedMs < FADE_IN_MS)
+        {
+            share = (float) elapsedMs / (float) FADE_IN_MS;
+        }
+        else if (elapsedMs > (TOTAL_VISIBLE_MS - FADE_OUT_MS))
+        {
+            long fadeStart = TOTAL_VISIBLE_MS - FADE_OUT_MS;
+            share = 1f - ((float) (elapsedMs - fadeStart) / (float) FADE_OUT_MS);
+        }
+        else
+        {
+            share = 1f;
+        }
+        if (share < 0f) share = 0f;
+        if (share > 1f) share = 1f;
+        return share * PEAK_ALPHA;
+    }
+
+    static Font bodyFont()
+    {
+        return FontManager.getRunescapeSmallFont();
+    }
+
     private void paintFrame(Graphics2D g, int x, int y)
     {
         g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_OFF);
@@ -405,22 +372,13 @@ public final class MatchFoundNotificationOverlay extends Overlay
         g.drawLine(x + 2, sepY + 1, x + POPUP_W - 3, sepY + 1);
     }
 
-    /** Paints the title (orange, centred in the title bar) + body's
-     *  two centred lines. Caption layout branches on
-     *  {@link #activeIsInviter} — sender-perspective glues
-     *  {@code " accepted your invite"} onto the opponent name (split
-     *  across two drawString calls so the opponent name keeps its
-     *  rank-tier tint while the trailing phrase stays body off-white).
-     *  Invitee-perspective draws just the rank-tinted opponent name.
-     *  Both body lines use {@link #BODY_FONT_PT} Runescape Bold
-     *  (matches {@link LobbyInviteNotificationOverlay} body styling). */
     private void paintText(Graphics2D g, int x, int y, String opponent)
     {
         g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
         g.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING, RenderingHints.VALUE_TEXT_ANTIALIAS_ON);
 
         // Title — centred in the title bar.
-        Font titleFont = FontManager.getRunescapeBoldFont().deriveFont(20f);
+        Font titleFont = FontManager.getRunescapeBoldFont().deriveFont(TITLE_FONT_PT);
         g.setFont(titleFont);
         FontMetrics tfm = g.getFontMetrics();
         String title = "Match found!";
@@ -430,23 +388,24 @@ public final class MatchFoundNotificationOverlay extends Overlay
         g.setColor(TITLE_FG);
         g.drawString(title, titleX, titleY);
 
-        // Body caption + sub-line — both use the same bold Runescape
-        // font at {@link #BODY_FONT_PT} (matches invite popup styling).
-        Font bodyFont = FontManager.getRunescapeBoldFont().deriveFont(BODY_FONT_PT);
-        g.setFont(bodyFont);
+        g.setFont(bodyFont());
         FontMetrics bodyFm = g.getFontMetrics();
-        boolean inviter = activeIsInviter;
-        String tail = inviter ? " accepted your invite" : "";
-        int opponentW = bodyFm.stringWidth(opponent);
+        int maxBodyW = POPUP_W - 2 * BODY_SIDE_MARGIN;
+        String name = truncateToFit(opponent, bodyFm, maxBodyW);
+        String tail = activeIsInviter ? " accepted your invite" : "";
+        int opponentW = bodyFm.stringWidth(name);
+        tail = tail.isEmpty() ? tail : truncateToFit(tail, bodyFm, maxBodyW - opponentW);
+        if (bodyFm.stringWidth(tail) + opponentW > maxBodyW) tail = "";
         int tailW = bodyFm.stringWidth(tail);
         int captionX = x + (POPUP_W - (opponentW + tailW)) / 2;
         int bodyTop = y + TITLE_BAR_H + 2;
         int bodyBottom = y + POPUP_H;
-        int bodyMidY = (bodyTop + bodyBottom) / 2;
-        int captionY = bodyMidY - (bodyFm.getHeight() / 2);
+        int lineH = bodyFm.getHeight();
+        int blockTop = (bodyTop + bodyBottom - 2 * lineH) / 2;
+        int captionY = blockTop + bodyFm.getAscent();
         Color opponentColor = activeOpponentColor;
         g.setColor(opponentColor != null ? opponentColor : BODY_FG);
-        g.drawString(opponent, captionX, captionY);
+        g.drawString(name, captionX, captionY);
         if (tailW > 0)
         {
             g.setColor(BODY_FG);
@@ -455,9 +414,9 @@ public final class MatchFoundNotificationOverlay extends Overlay
 
         String sub = activeSubtext;
         if (sub == null) sub = "";
-        String trimmed = truncateToFit(sub, bodyFm, POPUP_W - 24);
+        String trimmed = truncateToFit(sub, bodyFm, maxBodyW);
         int subX = x + (POPUP_W - bodyFm.stringWidth(trimmed)) / 2;
-        int subY = captionY + bodyFm.getHeight() - 2;
+        int subY = captionY + lineH;
         g.setColor(BODY_FG);
         g.drawString(trimmed, subX, subY);
     }

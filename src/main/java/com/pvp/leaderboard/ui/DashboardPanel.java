@@ -4,6 +4,7 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import com.pvp.leaderboard.PvPLeaderboardConstants;
 import com.pvp.leaderboard.PvPLeaderboardPlugin;
+import com.pvp.leaderboard.config.StreakBucket;
 import com.pvp.leaderboard.queue.QueueService;
 import com.pvp.leaderboard.tournament.TournamentService;
 import com.pvp.leaderboard.util.JsonLenient;
@@ -12,6 +13,7 @@ import com.pvp.leaderboard.service.DiscordAuthService;
 import com.pvp.leaderboard.service.PvPDataService;
 import com.pvp.leaderboard.service.RankInfo;
 import com.pvp.leaderboard.service.ShardRank;
+import com.pvp.leaderboard.service.WinStreakTracker;
 import com.pvp.leaderboard.util.RankUtils;
 import net.runelite.client.ui.PluginPanel;
 import net.runelite.client.util.LinkBrowser;
@@ -761,6 +763,7 @@ public class DashboardPanel extends PluginPanel
         if (tournamentInCombatProvider != null) tournamentsPanel.setInCombatProvider(tournamentInCombatProvider);
         // Set 6: the Report gate is the same Discord login state onLoginStateChanged() reloads on.
         if (discordAuthService != null) tournamentsPanel.setDiscordLoginProvider(discordAuthService::isLoggedIn);
+        if (tournamentGearCard != null) tournamentsPanel.setGearCard(tournamentGearCard);
         if (tournamentsPlaceholder != null) matchmakingSubCardContainer.remove(tournamentsPlaceholder);
         matchmakingSubCardContainer.add(tournamentsPanel, SUBCARD_TOURNAMENTS);
         subTabTournamentsBtn.setText("Tournaments");
@@ -795,6 +798,22 @@ public class DashboardPanel extends PluginPanel
     public void shutdownTournaments()
     {
         if (tournamentsPanel != null) tournamentsPanel.shutdown();
+    }
+
+    private javax.swing.JComponent tournamentGearCard;
+
+    public void setTournamentGearCard(javax.swing.JComponent card)
+    {
+        tournamentGearCard = card;
+        if (tournamentsPanel != null) tournamentsPanel.setGearCard(card);
+    }
+
+    public void showTournamentsTab()
+    {
+        if (tournamentsPanel == null) return;
+        foldAltViewsToStats();
+        setActiveTab(CARD_MATCHMAKING);
+        setActiveMatchmakingSubTab(SUBCARD_TOURNAMENTS);
     }
     
     // --- UI Creation Helpers ---
@@ -1182,6 +1201,7 @@ public class DashboardPanel extends PluginPanel
 
                 SwingUtilities.invokeLater(() -> {
                     if (gen != loadGeneration) return;
+                    if (isSelf) seedStreaksFromHistory(matches);
                     updateUiWithMatches(matches);
                 });
             }).exceptionally(ex -> {
@@ -1230,6 +1250,7 @@ public class DashboardPanel extends PluginPanel
                 SwingUtilities.invokeLater(() -> {
                     if (gen != loadGeneration) return;
                     updateProgressBars(stats, gen);
+                    if (isShowingSelf()) reconcileStreaksFromProfile(playerId);
                 });
             }).exceptionally(ex -> {
                 return null;
@@ -1237,6 +1258,50 @@ public class DashboardPanel extends PluginPanel
         } catch (Exception ex) {
             // ignored
         }
+    }
+
+    private volatile WinStreakTracker winStreakTracker;
+
+    public void setWinStreakTracker(WinStreakTracker tracker)
+    {
+        this.winStreakTracker = tracker;
+    }
+
+    private void seedStreaksFromHistory(JsonArray matches)
+    {
+        WinStreakTracker tracker = winStreakTracker;
+        if (tracker == null) return;
+        tracker.seedFromHistory(matches);
+        refreshStreakLines();
+    }
+
+    private void reconcileStreaksFromProfile(String playerId)
+    {
+        WinStreakTracker tracker = winStreakTracker;
+        if (tracker == null) return;
+        tracker.observeProfile(pvpDataService.peekUserProfile(playerId));
+        refreshStreakLines();
+    }
+
+    private void refreshStreakLines()
+    {
+        for (StreakBucket b : StreakBucket.values()) refreshStreakLine(b.bucketKey);
+    }
+
+    public void refreshStreakLine(String bucketKey)
+    {
+        WinStreakTracker tracker = winStreakTracker;
+        StreakBucket bucket = StreakBucket.fromBucketKey(bucketKey);
+        if (tracker == null || bucket == null || !isShowingSelf() || !tracker.isKnown()) return;
+        String key = bucket.bucketKey;
+        rankProgressPanel.updateStreak(key, tracker.current(key), tracker.plus(key), tracker.longest(key));
+    }
+
+    private boolean isShowingSelf()
+    {
+        String self = normalizePlayerId(plugin != null ? plugin.getLocalPlayerName() : null);
+        String shown = currentMatchesPlayerId;
+        return self != null && !self.isEmpty() && self.equalsIgnoreCase(shown);
     }
 
     private void updateProgressBars(JsonObject stats, int gen)

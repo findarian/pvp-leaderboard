@@ -254,6 +254,37 @@ public class FightMonitor
         return resolveAutoSwitchTarget(lastFightBucket, tournamentBucketPin.getAsBoolean());
     }
 
+    private volatile java.util.function.BiConsumer<String, String> streakSink;
+
+    public void setStreakSink(java.util.function.BiConsumer<String, String> sink)
+    {
+        this.streakSink = sink;
+    }
+
+    java.util.function.Consumer<JsonObject> streakResolver(String guessBucket, String guessResult)
+    {
+        java.util.concurrent.atomic.AtomicBoolean settled = new java.util.concurrent.atomic.AtomicBoolean();
+        return row -> {
+            java.util.function.BiConsumer<String, String> sink = streakSink;
+            if (sink == null || !settled.compareAndSet(false, true)) return;
+            String bucket = nonBlank(com.pvp.leaderboard.util.JsonLenient.optString(row, "bucket", null), guessBucket);
+            String result = nonBlank(com.pvp.leaderboard.util.JsonLenient.optString(row, "result", null), guessResult);
+            try
+            {
+                sink.accept(bucket, result);
+            }
+            catch (RuntimeException e)
+            {
+                log.debug("[Streak] sink threw for bucket={} result={}: {}", bucket, result, e.getMessage());
+            }
+        };
+    }
+
+    private static String nonBlank(String value, String fallback)
+    {
+        return value == null || value.trim().isEmpty() ? fallback : value;
+    }
+
     /** Recency window (ms) for {@link #isInCombat()}. Matches the GC
      *  threshold inside {@link #handleGameTick} (line ~157) so the
      *  popup-suppression window is coherent with when stale fights
@@ -497,6 +528,32 @@ public class FightMonitor
         }
     }
 
+    private volatile java.util.function.ObjIntConsumer<String> combatSink;
+
+    public void setCombatSink(java.util.function.ObjIntConsumer<String> sink)
+    {
+        this.combatSink = sink;
+    }
+
+    static boolean isOwnHitsplat(int hitsplatType, boolean isMine)
+    {
+        return isMine || hitsplatType == HitsplatID.DAMAGE_ME || hitsplatType == HitsplatID.BLOCK_ME;
+    }
+
+    private void reportOwnHit(String playerName)
+    {
+        java.util.function.ObjIntConsumer<String> sink = combatSink;
+        if (sink == null) return;
+        try
+        {
+            sink.accept(playerName, client.getWorld());
+        }
+        catch (RuntimeException e)
+        {
+            log.debug("[Combat] sink threw for {}: {}", playerName, e.getMessage());
+        }
+    }
+
     public void handleHitsplatApplied(HitsplatApplied event)
     {
         try
@@ -515,6 +572,11 @@ public class FightMonitor
             int amt = hs.getAmount();
             boolean isMine = hs.isMine();
             String hitPlayerName = hitPlayer.getName();
+
+            if (hitPlayer != localPlayer && hitPlayerName != null && isOwnHitsplat(hitsplatType, isMine))
+            {
+                reportOwnHit(hitPlayerName);
+            }
 
             // Only process relevant damage hitsplat types
             if (amt > 0)
@@ -1207,6 +1269,8 @@ public class FightMonitor
         log.debug("[MatchSubmit] Determined bucket: {} (world={} multi={} startSb={} endSb={})", 
             fightBucket, world, wasMulti, startSpellbookName, endSpellbookName);
         recordFightBucket(fightBucket);
+        final java.util.function.Consumer<JsonObject> streakOutcome =
+            streakResolver(tournamentBucketPin.getAsBoolean() ? "tournament" : fightBucket, result);
 
         // Determine which bucket to use for API calls
         // If auto-switch is enabled, use the fight bucket; otherwise use the user's manual selection
@@ -1268,7 +1332,7 @@ public class FightMonitor
         // Async Submission — chain MMR fetch off the 202 response
         final String finalApiRefreshBucket = apiRefreshBucket;
         final boolean finalShowBucketInMmr = showBucketInMmr;
-        submitMatchAndFetchMmr(result, finalEndTs, selfName, resolvedOpponent, world, finalStartTs, startSb, currentSpellbook, wasMulti, dmgOut, finalApiRefreshBucket, finalShowBucketInMmr);
+        submitMatchAndFetchMmr(result, finalEndTs, selfName, resolvedOpponent, world, finalStartTs, startSb, currentSpellbook, wasMulti, dmgOut, finalApiRefreshBucket, finalShowBucketInMmr, streakOutcome);
 
         // Tier refreshes for overlay (don't depend on match being processed)
         scheduleTierRefreshes(resolvedOpponent, apiRefreshBucket);
@@ -1315,7 +1379,8 @@ public class FightMonitor
      */
     private void submitMatchAndFetchMmr(String result, long endTs, String selfName, String opponent, int world,
                                          long startTs, int startSb, int endSb, boolean wasMulti,
-                                         long dmgOut, String displayBucket, boolean showBucketInMmr) {
+                                         long dmgOut, String displayBucket, boolean showBucketInMmr,
+                                         java.util.function.Consumer<JsonObject> streakOutcome) {
         log.debug("[PostFight] Submitting match and chaining MMR fetch for opponent={}", opponent);
 
         CompletableFuture<Boolean> submissionFuture = CompletableFuture.supplyAsync(() -> {
@@ -1332,21 +1397,42 @@ public class FightMonitor
             {
                 scheduleLobbyGateRefresh();
             }
-            if (config.showMmrChangeNotification() && opponent != null && selfName != null) {
-                log.debug("[PostFight] Submission done (success={}), scheduling MMR fetch in 3s for opponent={}", success, opponent);
-                scheduler.schedule(() -> {
-                    fetchMmrDeltaFromMatchHistory(selfName, opponent, displayBucket, showBucketInMmr, 0, endTs, null);
-                }, 3L, java.util.concurrent.TimeUnit.SECONDS);
-            }
+            log.debug("[PostFight] Submission done (success={}) for opponent={}", success, opponent);
+            schedulePostFightFetch(selfName, opponent, displayBucket, showBucketInMmr, endTs, streakOutcome);
         }).exceptionally(ex -> {
             log.debug("[PostFight] Submission future failed, scheduling fallback MMR fetch: {}", ex.getMessage());
-            if (config.showMmrChangeNotification() && opponent != null && selfName != null) {
-                scheduler.schedule(() -> {
-                    fetchMmrDeltaFromMatchHistory(selfName, opponent, displayBucket, showBucketInMmr, 0, endTs, null);
-                }, 3L, java.util.concurrent.TimeUnit.SECONDS);
-            }
+            schedulePostFightFetch(selfName, opponent, displayBucket, showBucketInMmr, endTs, streakOutcome);
             return null;
         });
+    }
+
+    private void schedulePostFightFetch(String selfName, String opponent, String displayBucket,
+                                        boolean showBucketInMmr, long endTs,
+                                        java.util.function.Consumer<JsonObject> streakOutcome)
+    {
+        boolean wanted = config.showMmrChangeNotification() || (config.showKillStreakBox() && streakSink != null);
+        if (!wanted || opponent == null || selfName == null)
+        {
+            settleStreak(streakOutcome, null);
+            return;
+        }
+        log.debug("[PostFight] Scheduling the post-fight match fetch in 3s for opponent={}", opponent);
+        scheduler.schedule(() -> {
+            fetchMmrDeltaFromMatchHistory(selfName, opponent, displayBucket, showBucketInMmr, 0, endTs, null, streakOutcome);
+        }, 3L, java.util.concurrent.TimeUnit.SECONDS);
+    }
+
+    private static void settleStreak(java.util.function.Consumer<JsonObject> streakOutcome, JsonObject row)
+    {
+        if (streakOutcome == null) return;
+        try
+        {
+            streakOutcome.accept(row);
+        }
+        catch (RuntimeException e)
+        {
+            log.debug("[Streak] outcome consumer threw: {}", e.getMessage());
+        }
     }
 
     /** Re-fetch the local player's cumulative_stats for the lobby
@@ -1404,6 +1490,11 @@ public class FightMonitor
      * @param submittedMatchEndTs The fight_end_ts of the submitted match, used to validate we got the correct match
      */
     void fetchMmrDeltaFromMatchHistory(String selfName, String opponentName, String displayBucket, boolean showBucketLabel, int attempt, long submittedMatchEndTs, Runnable onDisplayed) {
+        fetchMmrDeltaFromMatchHistory(selfName, opponentName, displayBucket, showBucketLabel, attempt, submittedMatchEndTs, onDisplayed, null);
+    }
+
+    void fetchMmrDeltaFromMatchHistory(String selfName, String opponentName, String displayBucket, boolean showBucketLabel, int attempt, long submittedMatchEndTs, Runnable onDisplayed,
+                                       java.util.function.Consumer<JsonObject> onRow) {
         log.debug("[PostFight] Fetching MMR delta from match history: self={} opponent={} showBucket={} attempt={} submittedTs={}", 
             selfName, opponentName, showBucketLabel, attempt, submittedMatchEndTs);
         
@@ -1461,6 +1552,7 @@ public class FightMonitor
                         
                         log.debug("[PostFight] Match timestamp validated: matchWhen={} submittedTs={} diff={}s", 
                             matchWhen, submittedMatchEndTs, timeDiff);
+                        settleStreak(onRow, match);
                         
                         if (match.has("rating_change") && match.get("rating_change").isJsonObject()) {
                             JsonObject ratingChange = match.getAsJsonObject("rating_change");
@@ -1506,27 +1598,30 @@ public class FightMonitor
                 if (attempt < MMR_RETRY_DELAYS.length) {
                     long delay = MMR_RETRY_DELAYS[attempt];
                     log.debug("[PostFight] Match not found in history, retrying in {}s (attempt {})", delay, attempt + 1);
-                    scheduler.schedule(() -> fetchMmrDeltaFromMatchHistory(selfName, opponentName, displayBucket, showBucketLabel, attempt + 1, submittedMatchEndTs, onDisplayed),
+                    scheduler.schedule(() -> fetchMmrDeltaFromMatchHistory(selfName, opponentName, displayBucket, showBucketLabel, attempt + 1, submittedMatchEndTs, onDisplayed, onRow),
                         delay, java.util.concurrent.TimeUnit.SECONDS);
                 } else {
                     log.debug("[PostFight] Match not found in history after all retries, skipping MMR notification");
+                    settleStreak(onRow, null);
                 }
             } else if (attempt < MMR_RETRY_DELAYS.length) {
                 long delay = MMR_RETRY_DELAYS[attempt];
                 log.debug("[PostFight] No matches in response, retrying in {}s (attempt {})", delay, attempt + 1);
-                scheduler.schedule(() -> fetchMmrDeltaFromMatchHistory(selfName, opponentName, displayBucket, showBucketLabel, attempt + 1, submittedMatchEndTs, onDisplayed),
+                scheduler.schedule(() -> fetchMmrDeltaFromMatchHistory(selfName, opponentName, displayBucket, showBucketLabel, attempt + 1, submittedMatchEndTs, onDisplayed, onRow),
                     delay, java.util.concurrent.TimeUnit.SECONDS);
             } else {
                 log.debug("[PostFight] Failed to get matches after all retries");
+                settleStreak(onRow, null);
             }
         }).exceptionally(ex -> {
             if (attempt < MMR_RETRY_DELAYS.length) {
                 long delay = MMR_RETRY_DELAYS[attempt];
                 log.debug("[PostFight] Match history exception: {}, retrying in {}s (attempt {})", ex.getMessage(), delay, attempt + 1);
-                scheduler.schedule(() -> fetchMmrDeltaFromMatchHistory(selfName, opponentName, displayBucket, showBucketLabel, attempt + 1, submittedMatchEndTs, onDisplayed),
+                scheduler.schedule(() -> fetchMmrDeltaFromMatchHistory(selfName, opponentName, displayBucket, showBucketLabel, attempt + 1, submittedMatchEndTs, onDisplayed, onRow),
                     delay, java.util.concurrent.TimeUnit.SECONDS);
             } else {
                 log.debug("[PostFight] Match history failed after all retries: {}", ex.getMessage());
+                settleStreak(onRow, null);
             }
             return null;
         });
@@ -1772,7 +1867,7 @@ public class FightMonitor
         }
     }
 
-    private String getSpellbookName(int spellbook)
+    static String getSpellbookName(int spellbook)
     {
         switch (spellbook) {
             case 0: return "Standard";
@@ -1783,20 +1878,11 @@ public class FightMonitor
         }
     }
 
-    /**
-     * Determine the bucket for a fight based on server-side logic.
-     * Priority: DMM > Multi > Veng > NH
-     * 
-     * Multi-combat classification:
-     * - If YOU (local player) ever entered multi during the fight, it's a "multi" fight
-     * - If you stayed in singles but opponent died in multi, it's still a "singles" kill (NH/Veng)
-     * 
-     * @param world The world number
-     * @param wasInMulti Whether the LOCAL player was ever in multi-combat during this fight
-     * @param startSpellbook The spellbook name at fight start
-     * @param endSpellbook The spellbook name at fight end
-     * @return The bucket name: "dmm", "multi", "veng", or "nh"
-     */
+    private static boolean isLunar(String spellbook)
+    {
+        return spellbook != null && "Lunar".equals(spellbook.trim());
+    }
+
     private String determineBucket(int world, boolean wasInMulti, String startSpellbook, String endSpellbook)
     {
         // 1. DMM check - uses cached DMM worlds from PvPDataService
@@ -1811,8 +1897,7 @@ public class FightMonitor
             return "multi";
         }
 
-        // 3. Veng check - both start AND end spellbook must be Lunar
-        if ("Lunar".equals(startSpellbook) && "Lunar".equals(endSpellbook))
+        if (isLunar(startSpellbook) || isLunar(endSpellbook))
         {
             return "veng";
         }
