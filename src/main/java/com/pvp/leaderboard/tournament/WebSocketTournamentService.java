@@ -301,7 +301,8 @@ public class WebSocketTournamentService implements TournamentService
         int round = JsonLenient.optInt(d, "round", 0);
         String opp = JsonLenient.optString(d, "opponent_name", "your opponent");
         long respondBy = JsonLenient.optLong(d, "respond_by", 0L);
-        fire(l -> l.onRoundEndCheck(tid, round, sid, opp, respondBy));
+        String message = TournamentSummary.textOf(d, "message");
+        fire(l -> l.onRoundEndCheck(tid, round, sid, opp, respondBy, message));
     }
 
     private void handleRemoved(JsonObject d)

@@ -41,45 +41,6 @@ import java.util.function.Consumer;
 import java.util.function.LongSupplier;
 import java.util.function.Supplier;
 
-/**
- * The Tournaments sub-tab (Plan 10 F.3, mockup v4 card 4, 2026-09-21).
- *
- * <p>Two cards: the <b>event list</b> (open / running events with
- * Register / Withdraw, the rules link) and the <b>active tournament
- * view</b> — header with the round, the estimated time left in the round
- * (1 Hz, from the server's ETA at receipt so a skewed client clock cannot
- * lie), "Your match vs X" with world + meeting place, the combat status,
- * the round-end check with <b>I'm here</b>, the live leaderboard
- * (subscribed while the card is visible, own row highlighted and scrolled
- * into view), Rules and Report a problem. The default card is the active
- * view whenever the player is in a running tournament.
- *
- * <p>Times are Discord-style (operator decision 2026-09-22): the list card
- * renders {@code registration_closes_at} / {@code starts_at} — epochs the
- * {@code tournament/list_response} already carries — through
- * {@link TimestampText} as the viewer's local time plus a relative phrase
- * ("Registration closes today 18:30 · in 12 min"), and the same 1 Hz
- * ticker that drives the round ETA re-renders the phrase, so no push and
- * no re-fetch is needed for a closing window.
- *
- * <p>Set 6 (operator request 2026-09-22): each listed event is a
- * {@link TournamentInfoCard} modelled on the lobby's player card; its
- * <b>Rules</b> button opens the in-panel {@link TournamentRulesDialog}
- * ({@link #CARD_RULES}) when the entry carries a {@code rules} block and
- * falls back to {@code rules_url} in the browser otherwise; its
- * <b>Report an issue</b> button sends the existing
- * {@code tournament/report_problem} (one dialog + one sender shared with
- * the active footer) and is enabled only while the player is logged in
- * with Discord — the backend's gate — through the supplier the dashboard
- * wires with {@link #setDiscordLoginProvider}.
- *
- * <p>The panel only renders server events and sends cmds through
- * {@link TournamentService}; it holds no identity beyond the local display
- * name (for the "(you)" row). The in-combat signal is sent automatically
- * from the {@link BooleanSupplier} the plugin wires
- * ({@code FightMonitor::isInCombat}), at most once per
- * {@link #IN_COMBAT_MIN_INTERVAL_MS} while a series is open.
- */
 @Slf4j
 public class TournamentsPanel extends JPanel implements TournamentEventListener
 {
@@ -104,6 +65,7 @@ public class TournamentsPanel extends JPanel implements TournamentEventListener
     public static final String NAME_ACTIVE_GEAR_SLOT = "tournaments-active-gear-slot";
     static final String GEAR_STATUS_CMD = "tournament/gear_status";
     static final String UPDATE_REQUIRED_TEXT = "This tournament needs a newer PvP Leaderboard plugin — update it to register.";
+    static final String ROUND_END_SUBMIT_TEXT = "Please submit within 30 seconds or the match will be counted as did not complete and you may be removed from the tournament.";
     static final long IN_COMBAT_MIN_INTERVAL_MS = 30_000L;
     private static final int STANDINGS_MAX_ROWS = 40;
     private static final Color GREEN = new Color(0x3e, 0xcf, 0x8e);
@@ -138,11 +100,6 @@ public class TournamentsPanel extends JPanel implements TournamentEventListener
     private final JLabel activeStatus = new JLabel(" ");
     private final JPanel roundEndBox = new JPanel();
     private final JLabel roundEndLabel = new JLabel(" ");
-    /** G-5: the mockup's signed-off pair. Both send the one
-     *  {@code tournament/round_end_reply} the wire has — the server treats
-     *  either as "present", exactly as the Discord DM's two buttons do. */
-    private final JButton roundEndBtn = new JButton("Still fighting");
-    private final JButton roundEndDoneBtn = new JButton("I'm done");
     private final JPanel standingsBody = new JPanel();
     private final JButton withdrawActiveBtn = new JButton("Withdraw");
     /** The active footer's report button — gated like every card's (set 6). */
@@ -172,8 +129,8 @@ public class TournamentsPanel extends JPanel implements TournamentEventListener
     private long roundEndsAtMs;
     private long breakUntilS;
     private boolean bye;
-    private String roundEndSeriesId;
     private long roundEndRespondByMs;
+    private int roundExtensions;
     private long lastInCombatSentMs;
     private boolean showing;
     private String subscribedId;
@@ -411,21 +368,9 @@ public class TournamentsPanel extends JPanel implements TournamentEventListener
         roundEndBox.setBorder(BorderFactory.createEmptyBorder(6, 6, 6, 6));
         roundEndBox.setAlignmentX(LEFT_ALIGNMENT);
         roundEndLabel.setForeground(AMBER);
+        roundEndLabel.setFont(roundEndLabel.getFont().deriveFont(Font.PLAIN, 11f));
         roundEndLabel.setAlignmentX(LEFT_ALIGNMENT);
         roundEndBox.add(roundEndLabel);
-        roundEndBtn.setName("tournaments-round-end-reply");
-        roundEndBtn.setBackground(GREEN);
-        roundEndBtn.setForeground(Color.BLACK);
-        roundEndBtn.setAlignmentX(LEFT_ALIGNMENT);
-        roundEndBtn.addActionListener(e -> onRoundEndReply());
-        roundEndBox.add(roundEndBtn);
-        // G-5: the second signed-off label. Same one reply — the server has
-        // no discriminator and counts both as present, so this is a wording
-        // parity fix, not a new outcome.
-        roundEndDoneBtn.setName("tournaments-round-end-done");
-        roundEndDoneBtn.setAlignmentX(LEFT_ALIGNMENT);
-        roundEndDoneBtn.addActionListener(e -> onRoundEndReply());
-        roundEndBox.add(roundEndDoneBtn);
         roundEndBox.setVisible(false);
         top.add(roundEndBox);
 
@@ -639,10 +584,29 @@ public class TournamentsPanel extends JPanel implements TournamentEventListener
         if (roundEndsAtMs > 0)
         {
             long left = Math.max(0L, (roundEndsAtMs - now) / 1000L);
-            activeEta.setText(mmss(left) + " est. remaining in round");
+            activeEta.setText(mmss(left) + " est. remaining in round" + extendedText(roundExtensions));
             return;
         }
         activeEta.setText("Between rounds");
+    }
+
+    static String extendedText(int extensions)
+    {
+        return extensions > 0 ? " (extended ×" + extensions + ")" : "";
+    }
+
+    static String pointsText(double points)
+    {
+        if (Double.isNaN(points) || Double.isInfinite(points)) return "0";
+        if (points == Math.rint(points) && Math.abs(points) < 1e15) return Long.toString((long) points);
+        return java.math.BigDecimal.valueOf(points).stripTrailingZeros().toPlainString();
+    }
+
+    static String standingsScore(StandingsRow r)
+    {
+        if (r == null) return "0";
+        String score = pointsText(r.points);
+        return r.draws > 0 ? score + " · " + r.draws + (r.draws == 1 ? " draw" : " draws") : score;
     }
 
     static String mmss(long seconds)
@@ -704,7 +668,7 @@ public class TournamentsPanel extends JPanel implements TournamentEventListener
             }
             String label = r.rank + " · " + r.displayName + (me ? " (you)" : "");
             String removed = r.removedLabel();
-            String right = removed.isEmpty() ? Integer.toString(r.points) : removed;
+            String right = removed.isEmpty() ? standingsScore(r) : removed;
             JLabel left = new JLabel(label);
             if (me) left.setFont(left.getFont().deriveFont(Font.BOLD));
             if (!removed.isEmpty()) left.setForeground(MUTED);
@@ -725,26 +689,6 @@ public class TournamentsPanel extends JPanel implements TournamentEventListener
     }
 
     // ---------------------------------------------------------------- actions
-    private void onRoundEndReply()
-    {
-        if (active == null || roundEndSeriesId == null) return;
-        // G-5: whichever of the two buttons was pressed, one reply goes out
-        // and both go dead — a second press must not re-send.
-        if (!roundEndBtn.isEnabled() && !roundEndDoneBtn.isEnabled()) return;
-        service.roundEndReply(active.tournamentId, roundEndSeriesId);
-        // discord_bot_tournaments._tournament_round_end_reply, emoji dropped.
-        roundEndLabel.setText("Noted — you are counted as present for the round-end check.");
-        setRoundEndButtonsEnabled(false);
-    }
-
-    /** G-5: the two signed-off labels are one control — they arm and
-     *  disarm together. */
-    private void setRoundEndButtonsEnabled(boolean enabled)
-    {
-        roundEndBtn.setEnabled(enabled);
-        roundEndDoneBtn.setEnabled(enabled);
-    }
-
     /** The one report dialog, for the active footer and every card's
      *  button alike (set 6): the answer goes out on the existing
      *  {@code tournament/report_problem}. */
@@ -854,11 +798,6 @@ public class TournamentsPanel extends JPanel implements TournamentEventListener
             if (roundEndBox.isVisible() && roundEndRespondByMs > 0)
             {
                 long left = Math.max(0L, (roundEndRespondByMs - nowMs.getAsLong()) / 1000L);
-                if (roundEndBtn.isEnabled())
-                {
-                    roundEndLabel.setText("<html>Round " + active.round + " has ended — your match vs " + escape(series == null ? "your opponent" : series.opponentName)
-                        + " is not finished.<br>Reply within " + left + " s or you will be removed (DNF).</html>");
-                }
                 if (left == 0) roundEndBox.setVisible(false);
             }
         }
@@ -947,6 +886,7 @@ public class TournamentsPanel extends JPanel implements TournamentEventListener
         breakUntilS = standings.breakUntil;
         if (standings.etaS >= 0) roundEndsAtMs = nowMs.getAsLong() + standings.etaS * 1000L;
         else if (standings.breakUntil > 0) roundEndsAtMs = 0L;
+        roundExtensions = Math.max(0, standings.extended);
         int myRank = -1;
         String self = selfNameSupplier.get();
         String selfKey = self == null ? null : NameUtils.canonicalKey(self);
@@ -981,9 +921,8 @@ public class TournamentsPanel extends JPanel implements TournamentEventListener
         bye = false;
         breakUntilS = 0L;
         roundEndsAtMs = s.deadlineAt > 0 ? s.deadlineAt * 1000L : 0L;
+        roundExtensions = 0;
         roundEndBox.setVisible(false);
-        setRoundEndButtonsEnabled(true);
-        roundEndSeriesId = null;
         showBanner("⚔ Round " + s.round + ": you face " + escape(s.opponentName) + " on " + s.worldLabel() + " at " + escape(s.meetingPlace == null ? "the arranged spot" : s.meetingPlace));
         renderActive();
         resubscribe();
@@ -996,6 +935,7 @@ public class TournamentsPanel extends JPanel implements TournamentEventListener
         if (active == null || !active.tournamentId.equals(tournamentId)) return;
         series = null;
         bye = true;
+        roundExtensions = 0;
         // G-7: bye_dm says "(no rating change)" and so must the plugin —
         // a bye is a point, never a rated game.
         showBanner("🎟 Round " + round + ": you have a bye — it counts as a win (no rating change).");
@@ -1003,18 +943,22 @@ public class TournamentsPanel extends JPanel implements TournamentEventListener
     }
 
     @Override
-    public void onRoundEndCheck(String tournamentId, int round, String seriesId, String opponentName, long respondByEpochS)
+    public void onRoundEndCheck(String tournamentId, int round, String seriesId, String opponentName, long respondByEpochS, String message)
     {
         if (active == null || !active.tournamentId.equals(tournamentId)) return;
-        roundEndSeriesId = seriesId;
         roundEndRespondByMs = respondByEpochS > 0 ? respondByEpochS * 1000L : nowMs.getAsLong() + 30_000L;
-        setRoundEndButtonsEnabled(true);
-        long left = Math.max(0L, (roundEndRespondByMs - nowMs.getAsLong()) / 1000L);
-        roundEndLabel.setText("<html>Round " + round + " has ended — your match vs " + escape(opponentName) + " is not finished.<br>Reply within " + left + " s or you will be removed (DNF).</html>");
+        String sentence = message == null || message.trim().isEmpty() ? ROUND_END_SUBMIT_TEXT : message.trim();
+        roundEndLabel.setText(TournamentInfoCard.wrapHtml(roundEndTitle(round, opponentName), sentence));
         roundEndBox.setVisible(true);
         showCard(CARD_ACTIVE);
         revalidate();
         repaint();
+    }
+
+    static String roundEndTitle(int round, String opponentName)
+    {
+        String opponent = opponentName == null || opponentName.trim().isEmpty() ? "your opponent" : opponentName;
+        return "Round " + round + " has ended — your match vs " + opponent + " has no result yet";
     }
 
     @Override
@@ -1091,12 +1035,6 @@ public class TournamentsPanel extends JPanel implements TournamentEventListener
         return names;
     }
 
-    /** G-4: the player's own finishing line, read off the pushed standings
-     *  slice exactly as {@code finished_dm} does (it matches on
-     *  {@code acct_sha}; the plugin has only its display name, so it
-     *  matches on the canonical name the standings rows already carry).
-     *  Empty when the player is not in the slice — the push carries the
-     *  top 10 only, so an unplaced player simply gets no line. */
     static String placeText(List<StandingsRow> standings, String selfName)
     {
         String selfKey = NameUtils.canonicalKey(selfName);
@@ -1106,7 +1044,7 @@ public class TournamentsPanel extends JPanel implements TournamentEventListener
             if (r == null || r.displayName == null || r.rank <= 0) continue;
             if (selfKey.equals(NameUtils.canonicalKey(r.displayName)))
             {
-                return " You finished #" + r.rank + " with " + r.points + " point" + (r.points == 1 ? "" : "s") + ".";
+                return " You finished #" + r.rank + " with " + pointsText(r.points) + " point" + (r.points == 1.0 ? "" : "s") + ".";
             }
         }
         return "";
@@ -1171,7 +1109,7 @@ public class TournamentsPanel extends JPanel implements TournamentEventListener
         bye = false;
         breakUntilS = 0L;
         roundEndsAtMs = 0L;
-        roundEndSeriesId = null;
+        roundExtensions = 0;
         roundEndBox.setVisible(false);
         standingsBody.removeAll();
         showCard(CARD_LIST);

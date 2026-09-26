@@ -40,6 +40,7 @@ public final class QueueText
         // strike and the server sends no discriminator.
         m.put("QUEUE_COOLDOWN", "You're on a matchmaking cooldown. Try again later.");
         m.put("QUEUE_INVALID_PREF", "That queue preference is not valid. Pick a wait time from the list and try again.");
+        m.put("QUEUE_STYLE_UNAVAILABLE", "The queue is NH only for now. Pick NH and queue again.");
         QUEUE_ERRORS = Collections.unmodifiableMap(m);
     }
 

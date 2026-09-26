@@ -40,4 +40,8 @@ public class MatchResult
      * only when present.
      */
     private final String lmsFreezeReason;
+
+    private final boolean ffaPortal;
+
+    private final boolean bountyHunter;
 }

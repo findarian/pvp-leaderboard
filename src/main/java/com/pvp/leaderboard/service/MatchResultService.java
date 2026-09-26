@@ -90,17 +90,6 @@ public class MatchResultService
         return overall;
     }
 
-    /**
-     * Builds the {@code POST /matchresult} JSON body. The 12 base fields
-     * are always present and unchanged; the two LMS freeze-log fields are
-     * appended <b>last</b> and only when set, so a normal fight produces a
-     * byte-for-byte identical payload to before this feature existed. The
-     * backend treats {@code lms_freeze_logout} / {@code lms_freeze_reason}
-     * as optional trailing fields.
-     *
-     * <p>Package-private so {@code MatchResultServiceTest} can pin the
-     * serialization contract without a network round-trip.
-     */
     String buildBodyJson(MatchResult match)
     {
         JsonObject body = new JsonObject();
@@ -127,6 +116,16 @@ public class MatchResultService
             {
                 body.addProperty("lms_freeze_reason", reason);
             }
+        }
+
+        if (match.isFfaPortal())
+        {
+            body.addProperty("ffa_portal", true);
+        }
+
+        if (match.isBountyHunter())
+        {
+            body.addProperty("bounty_hunter", true);
         }
 
         return gson.toJson(body);

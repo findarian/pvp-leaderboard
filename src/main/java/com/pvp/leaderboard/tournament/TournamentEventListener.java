@@ -42,8 +42,7 @@ public interface TournamentEventListener
     /** {@code tournament/bye}. */
     default void onBye(String tournamentId, int round) {}
 
-    /** {@code tournament/round_end_check} — reply within 30 s or be DNF'd (C.7). */
-    default void onRoundEndCheck(String tournamentId, int round, String seriesId, String opponentName, long respondByEpochS) {}
+    default void onRoundEndCheck(String tournamentId, int round, String seriesId, String opponentName, long respondByEpochS, String message) {}
 
     /** {@code tournament/removed} — dnf / dq / kicked / withdrawn / dropped_unpaid. */
     default void onRemoved(String tournamentId, String status, String reason, int round) {}

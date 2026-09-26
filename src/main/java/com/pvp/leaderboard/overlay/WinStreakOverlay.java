@@ -25,6 +25,7 @@ import java.awt.Rectangle;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.function.BooleanSupplier;
 import java.util.function.LongSupplier;
 import java.util.function.Supplier;
 
@@ -47,6 +48,8 @@ public class WinStreakOverlay extends OverlayPanel
 
 	/** Wired by the plugin to {@code FightMonitor::getAutoSwitchTarget}. */
 	private volatile Supplier<PvPLeaderboardConfig.RankBucket> autoSwitchTarget = () -> null;
+
+	private volatile BooleanSupplier insideFfaPortal = () -> false;
 
 	// ---- profile-peek state: client thread only ----
 	private String peekedSelf;
@@ -84,6 +87,16 @@ public class WinStreakOverlay extends OverlayPanel
 		this.autoSwitchTarget = supplier == null ? () -> null : supplier;
 	}
 
+	public void setInsideFfaPortalSupplier(BooleanSupplier supplier)
+	{
+		this.insideFfaPortal = supplier == null ? () -> false : supplier;
+	}
+
+	public static boolean isShown(boolean alwaysShow, boolean showInFfaPortal, boolean insideFfaPortal)
+	{
+		return alwaysShow || (showInFfaPortal && insideFfaPortal);
+	}
+
 	@Override
 	public Dimension getPreferredSize()
 	{
@@ -115,7 +128,7 @@ public class WinStreakOverlay extends OverlayPanel
 		{
 			panelComponent.getChildren().clear();
 			lastLines = Collections.emptyList();
-			if (!config.showKillStreakBox()) return null;
+			if (!isShown(config.showKillStreakBox(), config.killStreakBoxInFfaPortal(), insideFfaPortal.getAsBoolean())) return null;
 			String self = localPlayerName();
 			if (self == null) return null;
 			WinLossPeak profile = profileFor(self);

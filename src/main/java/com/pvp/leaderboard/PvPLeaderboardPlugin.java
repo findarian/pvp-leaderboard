@@ -385,6 +385,7 @@ public class PvPLeaderboardPlugin extends Plugin
 		if (streakBox != null)
 		{
 			streakBox.setAutoSwitchTargetSupplier(fightMonitor::getAutoSwitchTarget);
+			streakBox.setInsideFfaPortalSupplier(fightMonitor::isInsideFfaPortal);
 			overlayManager.add(streakBox);
 		}
 		dashboardPanel.setWinStreakTracker(winStreakTracker);

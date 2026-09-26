@@ -5,9 +5,11 @@ import com.pvp.leaderboard.PvPLeaderboardConstants;
 import com.pvp.leaderboard.config.PvPLeaderboardConfig;
 import com.pvp.leaderboard.lobby.UserProfileLobbyJoinGate;
 import com.pvp.leaderboard.overlay.RankOverlay;
+import com.pvp.leaderboard.overlay.WinStreakOverlay;
 import com.pvp.leaderboard.service.ClientIdentityService;
 import com.pvp.leaderboard.service.MatchResult;
 import com.pvp.leaderboard.service.MatchResultService;
+import com.pvp.leaderboard.service.PortalRatingCap;
 import com.pvp.leaderboard.service.PvPDataService;
 import java.util.ArrayList;
 import java.util.List;
@@ -472,6 +474,8 @@ public class FightMonitor
             // tick's position (and so a mid-arena logout has a fresh
             // lastInLmsAreaMs to read after the player object is gone).
             updateLmsAreaState();
+            updateFfaPortalState();
+            updateBountyHunterState();
 
             // Handle GC (every 33 ticks approx 20s)
             gcTicksCounter++;
@@ -715,6 +719,8 @@ public class FightMonitor
                 if (fe != null)
                 {
                     int currentTick = client.getTickCount();
+                    fe.markFfaPortalIfNeeded(insideFfaPortal);
+                    fe.markBountyHunterIfNeeded(insideBountyHunter);
                     
                     // Update combat timestamps for "hide rank out of combat" feature
                     if (rankOverlay != null)
@@ -896,6 +902,57 @@ public class FightMonitor
                                                            boolean hasCurrentAttacker)
     {
         return !hasOtherActiveFights && !hasCurrentAttacker;
+    }
+
+    private volatile boolean insideFfaPortal = false;
+
+    public boolean isInsideFfaPortal()
+    {
+        return insideFfaPortal;
+    }
+
+    static boolean isInFfaPortal(WorldPoint wp)
+    {
+        return wp != null && PvPLeaderboardConstants.isInFfaPortalArea(wp.getX(), wp.getY());
+    }
+
+    private void updateFfaPortalState()
+    {
+        boolean inside = false;
+        try
+        {
+            Player lp = client == null ? null : client.getLocalPlayer();
+            LocalPoint lpnt = lp == null ? null : lp.getLocalLocation();
+            inside = lpnt != null && isInFfaPortal(WorldPoint.fromLocalInstance(client, lpnt));
+        }
+        catch (Exception ignore)
+        {
+            // Defensive: presence tracking must never break the tick loop.
+        }
+        insideFfaPortal = inside;
+    }
+
+    private volatile boolean insideBountyHunter = false;
+
+    static boolean isInBountyHunter(WorldPoint wp)
+    {
+        return wp != null && PvPLeaderboardConstants.isInBountyHunterArea(wp.getX(), wp.getY());
+    }
+
+    private void updateBountyHunterState()
+    {
+        boolean inside = false;
+        try
+        {
+            Player lp = client == null ? null : client.getLocalPlayer();
+            LocalPoint lpnt = lp == null ? null : lp.getLocalLocation();
+            inside = lpnt != null && isInBountyHunter(WorldPoint.fromLocalInstance(client, lpnt));
+        }
+        catch (Exception ignore)
+        {
+            // Defensive: presence tracking must never break the tick loop.
+        }
+        insideBountyHunter = inside;
     }
 
     // ------------------------------------------------------------------
@@ -1257,6 +1314,10 @@ public class FightMonitor
         final long finalEndTs = endTs;
         final int startSb = entry.startSpellbook;
         final boolean wasMulti = entry.wasInMulti;
+        entry.markFfaPortalIfNeeded(insideFfaPortal);
+        final boolean ffaPortal = entry.wasInFfaPortal;
+        entry.markBountyHunterIfNeeded(insideBountyHunter);
+        final boolean bountyHunter = entry.wasInBountyHunter;
 
         final String resolvedOpponent = (opponentName != null) ? opponentName : "Unknown";
         final long dmgOut = entry.damageDealt.get();  // Read from FightEntry
@@ -1264,10 +1325,10 @@ public class FightMonitor
         // Determine the bucket this fight will be classified as (server-side logic)
         final String startSpellbookName = getSpellbookName(startSb);
         final String endSpellbookName = getSpellbookName(currentSpellbook);
-        final String fightBucket = determineBucket(world, wasMulti, startSpellbookName, endSpellbookName);
+        final String fightBucket = determineBucket(world, wasMulti, startSpellbookName, endSpellbookName, bountyHunter);
         
-        log.debug("[MatchSubmit] Determined bucket: {} (world={} multi={} startSb={} endSb={})", 
-            fightBucket, world, wasMulti, startSpellbookName, endSpellbookName);
+        log.debug("[MatchSubmit] Determined bucket: {} (world={} multi={} startSb={} endSb={} bountyHunter={})",
+            fightBucket, world, wasMulti, startSpellbookName, endSpellbookName, bountyHunter);
         recordFightBucket(fightBucket);
         final java.util.function.Consumer<JsonObject> streakOutcome =
             streakResolver(tournamentBucketPin.getAsBoolean() ? "tournament" : fightBucket, result);
@@ -1332,7 +1393,7 @@ public class FightMonitor
         // Async Submission — chain MMR fetch off the 202 response
         final String finalApiRefreshBucket = apiRefreshBucket;
         final boolean finalShowBucketInMmr = showBucketInMmr;
-        submitMatchAndFetchMmr(result, finalEndTs, selfName, resolvedOpponent, world, finalStartTs, startSb, currentSpellbook, wasMulti, dmgOut, finalApiRefreshBucket, finalShowBucketInMmr, streakOutcome);
+        submitMatchAndFetchMmr(result, finalEndTs, selfName, resolvedOpponent, world, finalStartTs, startSb, currentSpellbook, wasMulti, dmgOut, finalApiRefreshBucket, finalShowBucketInMmr, ffaPortal, bountyHunter, streakOutcome);
 
         // Tier refreshes for overlay (don't depend on match being processed)
         scheduleTierRefreshes(resolvedOpponent, apiRefreshBucket);
@@ -1343,7 +1404,8 @@ public class FightMonitor
 
     private CompletableFuture<Boolean> submitMatchResult(String result, long fightEndTime, String playerId, String opponentId, int world,
                                    long fightStartTs, int fightStartSpellbookLocal, int fightEndSpellbookLocal,
-                                   boolean wasInMultiLocal, long damageToOpponentLocal)
+                                   boolean wasInMultiLocal, long damageToOpponentLocal, boolean ffaPortalLocal,
+                                   boolean bountyHunterLocal)
     {
         MatchResult match = MatchResult.builder()
                 .playerId(playerId)
@@ -1357,10 +1419,12 @@ public class FightMonitor
                 .wasInMulti(wasInMultiLocal)
                 .damageToOpponent(damageToOpponentLocal)
                 .clientUniqueId(clientIdentityService.getClientUniqueId())
+                .ffaPortal(ffaPortalLocal)
+                .bountyHunter(bountyHunterLocal)
                 .build();
 
-        log.debug("[MatchSubmit] Submitting: player={} opponent={} result={} world={} startTs={} endTs={} dmgOut={} multi={}",
-                playerId, opponentId, result, world, fightStartTs, fightEndTime, damageToOpponentLocal, wasInMultiLocal);
+        log.debug("[MatchSubmit] Submitting: player={} opponent={} result={} world={} startTs={} endTs={} dmgOut={} multi={} ffaPortal={} bountyHunter={}",
+                playerId, opponentId, result, world, fightStartTs, fightEndTime, damageToOpponentLocal, wasInMultiLocal, ffaPortalLocal, bountyHunterLocal);
 
         return matchResultService.submitMatchResult(match).thenApply(success -> {
             if (success) {
@@ -1380,12 +1444,14 @@ public class FightMonitor
     private void submitMatchAndFetchMmr(String result, long endTs, String selfName, String opponent, int world,
                                          long startTs, int startSb, int endSb, boolean wasMulti,
                                          long dmgOut, String displayBucket, boolean showBucketInMmr,
+                                         boolean ffaPortal,
+                                         boolean bountyHunter,
                                          java.util.function.Consumer<JsonObject> streakOutcome) {
         log.debug("[PostFight] Submitting match and chaining MMR fetch for opponent={}", opponent);
 
         CompletableFuture<Boolean> submissionFuture = CompletableFuture.supplyAsync(() -> {
             try {
-                return submitMatchResult(result, endTs, selfName, opponent, world, startTs, startSb, endSb, wasMulti, dmgOut);
+                return submitMatchResult(result, endTs, selfName, opponent, world, startTs, startSb, endSb, wasMulti, dmgOut, ffaPortal, bountyHunter);
             } catch (Exception e) {
                 log.debug("[MatchSubmit] EXCEPTION in async submission: {}", e.getMessage(), e);
                 return CompletableFuture.completedFuture(false);
@@ -1398,19 +1464,20 @@ public class FightMonitor
                 scheduleLobbyGateRefresh();
             }
             log.debug("[PostFight] Submission done (success={}) for opponent={}", success, opponent);
-            schedulePostFightFetch(selfName, opponent, displayBucket, showBucketInMmr, endTs, streakOutcome);
+            schedulePostFightFetch(selfName, opponent, displayBucket, showBucketInMmr, endTs, ffaPortal, streakOutcome);
         }).exceptionally(ex -> {
             log.debug("[PostFight] Submission future failed, scheduling fallback MMR fetch: {}", ex.getMessage());
-            schedulePostFightFetch(selfName, opponent, displayBucket, showBucketInMmr, endTs, streakOutcome);
+            schedulePostFightFetch(selfName, opponent, displayBucket, showBucketInMmr, endTs, ffaPortal, streakOutcome);
             return null;
         });
     }
 
     private void schedulePostFightFetch(String selfName, String opponent, String displayBucket,
-                                        boolean showBucketInMmr, long endTs,
+                                        boolean showBucketInMmr, long endTs, boolean ffaPortal,
                                         java.util.function.Consumer<JsonObject> streakOutcome)
     {
-        boolean wanted = config.showMmrChangeNotification() || (config.showKillStreakBox() && streakSink != null);
+        boolean wanted = config.showMmrChangeNotification() || (streakSink != null
+            && WinStreakOverlay.isShown(config.showKillStreakBox(), config.killStreakBoxInFfaPortal(), ffaPortal));
         if (!wanted || opponent == null || selfName == null)
         {
             settleStreak(streakOutcome, null);
@@ -1481,14 +1548,6 @@ public class FightMonitor
 
     private static final long[] MMR_RETRY_DELAYS = {5L, 5L};
 
-    /**
-     * Fetch MMR delta from match history API.
-     * Uses account SHA (UUID hash) to ensure ALL matches are returned even after name changes.
-     * Retry schedule: first attempt at 3s post-submit, then 5s, then 10s.
-     * 
-     * @param attempt 0-based attempt index (0 = first try, 1 = retry at 5s, 2 = retry at 10s)
-     * @param submittedMatchEndTs The fight_end_ts of the submitted match, used to validate we got the correct match
-     */
     void fetchMmrDeltaFromMatchHistory(String selfName, String opponentName, String displayBucket, boolean showBucketLabel, int attempt, long submittedMatchEndTs, Runnable onDisplayed) {
         fetchMmrDeltaFromMatchHistory(selfName, opponentName, displayBucket, showBucketLabel, attempt, submittedMatchEndTs, onDisplayed, null);
     }
@@ -1571,11 +1630,16 @@ public class FightMonitor
                                     mmrDelta = -Math.abs(mmrDelta);
                                 }
                                 
-                                log.debug("[PostFight] Found match in history: opponent={} bucket={} mmrDelta={} result={} bucketLabel={}", 
-                                    matchOpponent, matchBucket, mmrDelta, result, bucketLabel);
+                                boolean cappedInPortal = PortalRatingCap.isCapped(match);
+                                log.debug("[PostFight] Found match in history: opponent={} bucket={} mmrDelta={} result={} bucketLabel={} cappedInPortal={}", 
+                                    matchOpponent, matchBucket, mmrDelta, result, bucketLabel, cappedInPortal);
                                 
                                 if (rankOverlay != null) {
-                                    rankOverlay.showMmrDelta(mmrDelta, bucketLabel);
+                                    if (cappedInPortal) {
+                                        rankOverlay.showRatingCappedInPortal(bucketLabel);
+                                    } else {
+                                        rankOverlay.showMmrDelta(mmrDelta, bucketLabel);
+                                    }
                                 }
                                 // Delta surfaced — let the caller finalize.
                                 // The freeze-log login replay uses this to
@@ -1680,15 +1744,25 @@ public class FightMonitor
         long ts = System.currentTimeMillis() / 1000;
         int sb = client.getVarbitValue(Varbits.SPELLBOOK);
         boolean localPlayerInMulti = client.getVarbitValue(Varbits.MULTICOMBAT_AREA) == 1;
+        boolean localPlayerInFfaPortal = insideFfaPortal;
+        boolean localPlayerInBountyHunter = insideBountyHunter;
         int currentTick = client.getTickCount();
         activeFights.compute(opponentName, (k, v) -> {
-            if (v == null) return new FightEntry(ts, sb, localPlayerInMulti, currentTick);
+            if (v == null)
+            {
+                FightEntry created = new FightEntry(ts, sb, localPlayerInMulti, currentTick);
+                created.markFfaPortalIfNeeded(localPlayerInFfaPortal);
+                created.markBountyHunterIfNeeded(localPlayerInBountyHunter);
+                return created;
+            }
             // Update activity timestamps
             v.lastActivityMs = System.currentTimeMillis();
             v.lastActivityTick = currentTick;
             // If LOCAL player is now in multi, mark this fight as multi
             // (only tracks if WE enter multi, not if opponent enters multi)
             v.markMultiIfNeeded(localPlayerInMulti);
+            v.markFfaPortalIfNeeded(localPlayerInFfaPortal);
+            v.markBountyHunterIfNeeded(localPlayerInBountyHunter);
             return v;
         });
 
@@ -1883,7 +1957,8 @@ public class FightMonitor
         return spellbook != null && "Lunar".equals(spellbook.trim());
     }
 
-    private String determineBucket(int world, boolean wasInMulti, String startSpellbook, String endSpellbook)
+    private String determineBucket(int world, boolean wasInMulti, String startSpellbook, String endSpellbook,
+                                   boolean wasInBountyHunter)
     {
         // 1. DMM check - uses cached DMM worlds from PvPDataService
         if (pvpDataService.isDmmWorld(world))
@@ -1891,7 +1966,11 @@ public class FightMonitor
             return "dmm";
         }
 
-        // 2. Multi check
+        if (wasInBountyHunter)
+        {
+            return "veng";
+        }
+
         if (wasInMulti)
         {
             return "multi";
@@ -1902,7 +1981,6 @@ public class FightMonitor
             return "veng";
         }
 
-        // 4. Default to NH
         return "nh";
     }
 
@@ -1947,6 +2025,8 @@ public class FightMonitor
         final long startTs;
         final int startSpellbook;
         volatile boolean wasInMulti;  // Mutable: set true if LOCAL player ever enters multi during this fight
+        volatile boolean wasInFfaPortal;
+        volatile boolean wasInBountyHunter;
         volatile long lastActivityMs;
         volatile int lastActivityTick;  // Track per-opponent combat activity in game ticks
         volatile boolean finalized = false;
@@ -1970,6 +2050,18 @@ public class FightMonitor
         void markMultiIfNeeded(boolean isInMulti) {
             if (isInMulti && !wasInMulti) {
                 wasInMulti = true;
+            }
+        }
+        
+        void markFfaPortalIfNeeded(boolean isInFfaPortal) {
+            if (isInFfaPortal && !wasInFfaPortal) {
+                wasInFfaPortal = true;
+            }
+        }
+
+        void markBountyHunterIfNeeded(boolean isInBountyHunter) {
+            if (isInBountyHunter && !wasInBountyHunter) {
+                wasInBountyHunter = true;
             }
         }
         

@@ -135,6 +135,22 @@ public final class PvPLeaderboardConstants
         return false;
     }
 
+    public static final int[] FFA_PORTAL_AREA = {3263, 4735, 3391, 4864};
+
+    public static boolean isInFfaPortalArea(int x, int y)
+    {
+        int[] r = FFA_PORTAL_AREA;
+        return x >= r[0] && x <= r[2] && y >= r[1] && y <= r[3];
+    }
+
+    public static final int[] BOUNTY_HUNTER_AREA = {3338, 3989, 3501, 4139};
+
+    public static boolean isInBountyHunterArea(int x, int y)
+    {
+        int[] r = BOUNTY_HUNTER_AREA;
+        return x >= r[0] && x <= r[2] && y >= r[1] && y <= r[3];
+    }
+
     private PvPLeaderboardConstants()
     {
     }

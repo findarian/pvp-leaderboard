@@ -20,33 +20,6 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.function.LongSupplier;
 
-/**
- * One tournament's info card on the Tournaments list (plugin set 6,
- * operator request 2026-09-22: "a card of information, similar to the
- * matchmaking player card"). Modelled on the lobby's roster row /
- * incoming-invite card ({@code MatchmakingLobbyPanel.PlayerRow} /
- * {@code IncomingInvitePanel}): the same card background and bottom
- * divider, a bold name row with the registration marker on the right, a
- * chip row (format · category · build in the lobby's white / yellow / cyan),
- * then the facts a player needs to decide — rounds + players registered /
- * max + "plugin required", buy-in + prize (mode with its numbers, pool),
- * rank limits when the event has any, the host — the set-5 Discord-style
- * "Starts …" / "Registration closes …" lines (re-rendered by the panel's
- * 1 Hz tick through {@link #tick()}), and the actions: Register / Withdraw,
- * <b>Rules</b> (the in-panel dialog, or the site) and <b>Report an issue</b>
- * (the existing {@code tournament/report_problem}, enabled only while the
- * player is logged in with Discord — the backend's gate).
- *
- * <p>The chip painter mirrors the lobby's private {@code makeChip}; it is
- * duplicated rather than extracted because {@code MatchmakingLobbyPanel}
- * belongs to two other uncommitted sets (staging map in
- * {@code docs/PLUGIN_PROGRESS.md}). Long lines wrap the way the lobby's
- * labels do: a width-capped {@code <div>} plus literal {@code <br>} breaks,
- * because an auto-wrapped HTML label mis-measures its preferred height as
- * one line and clips (the lobby's 2026-06-03 finding). Every field comes
- * from the {@code tournament/list_response} entry; an optional field that
- * is missing renders nothing.
- */
 final class TournamentInfoCard extends JPanel
 {
     /** The panel's side of the card's buttons. */
@@ -61,6 +34,7 @@ final class TournamentInfoCard extends JPanel
         void report(TournamentSummary t);
     }
 
+    static final String AUTO_ROUNDS_TEXT = "rounds: auto (set at the start)";
     static final String REPORT_LABEL = "Report an issue";
     static final String REPORT_TOOLTIP = "Report an issue with this tournament — the message goes to its host on Discord";
     static final String REPORT_LOGIN_TOOLTIP = "Log in with Discord to contact the host";
@@ -110,7 +84,8 @@ final class TournamentInfoCard extends JPanel
         add(chips());
         add(Box.createVerticalStrut(3));
         addLine("tournament-players-", playersLine(t), INFO);
-        addLine("tournament-prize-", prizeLine(t), INFO);
+        String prize = prizeLine(t);
+        if (!prize.isEmpty()) addLine("tournament-prize-", prize, INFO);
         String ranks = rankLimitsLine(t);
         if (!ranks.isEmpty()) addLine("tournament-ranks-", ranks, MUTED);
         if (t.creatorName != null && !t.creatorName.trim().isEmpty()) addLine("tournament-host-", "Host: " + t.creatorName.trim(), MUTED);
@@ -276,30 +251,36 @@ final class TournamentInfoCard extends JPanel
         return t.format == null || t.format.isEmpty() ? "Swiss" : Character.toUpperCase(t.format.charAt(0)) + t.format.substring(1);
     }
 
-    /** {@code "5 rounds · 17 / 64 players · plugin required"} — only the parts the event has
-     *  ({@code "17 registered"} without a cap). */
     static String playersLine(TournamentSummary t)
     {
         List<String> parts = new ArrayList<>();
-        if (t.rounds > 0) parts.add(t.rounds + (t.rounds == 1 ? " round" : " rounds"));
+        if (t.roundsAuto && t.isOpenForRegistration()) parts.add(AUTO_ROUNDS_TEXT);
+        else if (t.rounds > 0) parts.add(t.rounds + (t.rounds == 1 ? " round" : " rounds"));
         parts.add(t.maxPlayers > 0 ? t.registeredCount + " / " + t.maxPlayers + " players" : t.registeredCount + " registered");
         if (t.pluginRequired) parts.add("plugin required");
-        return String.join(" · ", parts);
+        return capitalise(String.join(" · ", parts));
     }
 
-    /** {@code "Buy-in 2M · prize: top 3 + 2 random full participants · prize pool 10M"} —
-     *  the prize wording of {@code discord_tournament_messages.describe_tournament};
-     *  buy-in and pool only when non-zero. */
     static String prizeLine(TournamentSummary t)
     {
         List<String> parts = new ArrayList<>();
         if (t.buyInGp > 0) parts.add("buy-in " + TournamentsPanel.gp(t.buyInGp));
+        parts.addAll(prizeParts(t));
+        return capitalise(String.join(" · ", parts));
+    }
+
+    static List<String> prizeParts(TournamentSummary t)
+    {
+        String mode = t.prizeMode == null ? "" : t.prizeMode.trim().toLowerCase(java.util.Locale.ROOT);
+        if (mode.isEmpty()) mode = "top_x";
+        List<String> parts = new ArrayList<>();
+        if ("none".equals(mode)) return parts;
         int topX = Math.max(1, t.prizeTopX);
-        parts.add("top_x_random_y".equals(t.prizeMode)
+        parts.add("top_x_random_y".equals(mode)
             ? "prize: top " + topX + " + " + Math.max(0, t.prizeRandomY) + " random full participants"
             : "prize: top " + topX);
         if (t.prizePoolGp > 0) parts.add("prize pool " + TournamentsPanel.gp(t.prizePoolGp));
-        return capitalise(String.join(" · ", parts));
+        return parts;
     }
 
     /** {@code "Rank NH Rune 3 – Dragon 1"} / {@code "Min rank NH Rune 3"} / {@code "Max rank DMM Dragon 1"},
@@ -348,28 +329,31 @@ final class TournamentInfoCard extends JPanel
         return out;
     }
 
-    /** Escaped text broken with a literal {@code <br>} at a space every
-     *  ~{@link #WRAP_CHARS} characters, inside the width-capped {@code <div>}
-     *  the lobby's labels use — see the class Javadoc for why not auto-wrap. */
-    static String wrapHtml(String text)
+    static String wrapHtml(String... paragraphs)
     {
         StringBuilder sb = new StringBuilder("<html><div style='width:170px'>");
-        int col = 0;
-        for (String word : text.split(" "))
+        boolean first = true;
+        for (String text : paragraphs)
         {
-            if (word.isEmpty()) continue;
-            if (col > 0 && col + 1 + word.length() > WRAP_CHARS)
+            if (!first) sb.append("<br>");
+            first = false;
+            int col = 0;
+            for (String word : (text == null ? "" : text).split(" "))
             {
-                sb.append("<br>");
-                col = 0;
+                if (word.isEmpty()) continue;
+                if (col > 0 && col + 1 + word.length() > WRAP_CHARS)
+                {
+                    sb.append("<br>");
+                    col = 0;
+                }
+                else if (col > 0)
+                {
+                    sb.append(' ');
+                    col++;
+                }
+                sb.append(TournamentsPanel.escape(word));
+                col += word.length();
             }
-            else if (col > 0)
-            {
-                sb.append(' ');
-                col++;
-            }
-            sb.append(TournamentsPanel.escape(word));
-            col += word.length();
         }
         return sb.append("</div></html>").toString();
     }

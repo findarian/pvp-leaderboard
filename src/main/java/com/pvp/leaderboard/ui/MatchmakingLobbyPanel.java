@@ -1475,8 +1475,6 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         }
     }
 
-    /** Queue button: exactly one unlocked style + exactly one build; while
-     *  disabled the hint names what is missing ({@link #queueHint}). */
     private void refreshQueueButton()
     {
         if (queueSection == null) return;
@@ -1486,9 +1484,6 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         if (!ok) queueSection.setHint(queueHint(selectedStyles, selectedBuildTypes, counts));
     }
 
-    /** The sentence under a disabled queue button — what to pick or unlock
-     *  (set 7): no / several styles, no / several builds, a locked style
-     *  (with the fights still needed), or counts not loaded yet. Pure. */
     static String queueHint(Set<Style> styles, Set<BuildType> builds, Map<Style, Integer> counts)
     {
         Style style = QueueGateSection.soleStyle(styles);
@@ -1497,6 +1492,7 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
             int n = styles == null ? 0 : styles.size();
             return n == 0 ? "Pick one style to queue." : "Pick exactly one style to queue (" + n + " picked).";
         }
+        if (!QueueGateSection.isQueueStyle(style)) return "The queue is NH only for now. Pick NH to queue.";
         if (QueueGateSection.soleBuild(builds) == null)
         {
             int n = builds == null ? 0 : builds.size();

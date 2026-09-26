@@ -480,13 +480,26 @@ public interface PvPLeaderboardConfig extends Config
 
 	@ConfigItem(
 		keyName = "showKillStreakBox",
-		name = "Show kill streak box",
-		description = "Show a movable counter reading '<style> Kill Streak: N' (Alt+drag to move it). "
+		name = "Always show kill streak box",
+		description = "Show the movable counter '<style> Kill Streak: N' everywhere (Alt+drag to move it). "
+			+ "Off: it only appears inside the FFA portal, while the option below is on. "
 			+ "'N+' means your streak is longer than the loaded match history.",
 		section = killStreakSection,
 		position = 0
 	)
 	default boolean showKillStreakBox()
+	{
+		return false;
+	}
+
+	@ConfigItem(
+		keyName = "killStreakBoxInFfaPortal",
+		name = "Show in the FFA portal",
+		description = "Show the box while you are inside the Clan Wars FFA portal, even with 'Always show' off",
+		section = killStreakSection,
+		position = 1
+	)
+	default boolean killStreakBoxInFfaPortal()
 	{
 		return true;
 	}
@@ -496,7 +509,7 @@ public interface PvPLeaderboardConfig extends Config
 		name = "Auto-switch style",
 		description = "Follow the style of your last fight (NH, Veng, Multi or DMM) and Event while you are in a running tournament. Off: always show the style picked below.",
 		section = killStreakSection,
-		position = 1
+		position = 2
 	)
 	default boolean killStreakBoxAutoSwitch()
 	{
@@ -508,7 +521,7 @@ public interface PvPLeaderboardConfig extends Config
 		name = "Style",
 		description = "The style the box shows while auto-switch is off (Event = tournaments)",
 		section = killStreakSection,
-		position = 2
+		position = 3
 	)
 	default StreakBucket killStreakBoxBucket()
 	{
@@ -520,7 +533,7 @@ public interface PvPLeaderboardConfig extends Config
 		name = "Show longest streak",
 		description = "Add a line with your longest kill streak in that style",
 		section = killStreakSection,
-		position = 3
+		position = 4
 	)
 	default boolean killStreakBoxShowLongest()
 	{
@@ -532,7 +545,7 @@ public interface PvPLeaderboardConfig extends Config
 		name = "Show win / loss",
 		description = "Add a line with your wins and losses in that style",
 		section = killStreakSection,
-		position = 4
+		position = 5
 	)
 	default boolean killStreakBoxShowWinLoss()
 	{
@@ -544,7 +557,7 @@ public interface PvPLeaderboardConfig extends Config
 		name = "Show peak rank",
 		description = "Add a line with your peak rank in that style (nothing when you have none)",
 		section = killStreakSection,
-		position = 5
+		position = 6
 	)
 	default boolean killStreakBoxShowPeak()
 	{

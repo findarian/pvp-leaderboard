@@ -3,6 +3,7 @@ package com.pvp.leaderboard.overlay;
 import com.pvp.leaderboard.cache.MembershipCache;
 import com.pvp.leaderboard.config.PvPLeaderboardConfig;
 import com.pvp.leaderboard.game.PlayerRankEvent;
+import com.pvp.leaderboard.service.PortalRatingCap;
 import com.pvp.leaderboard.service.PvPDataService;
 import com.pvp.leaderboard.util.NameUtils;
 import com.pvp.leaderboard.util.RankUtils;
@@ -111,10 +112,12 @@ public class RankOverlay extends Overlay
     private static class MmrNotification {
         final double delta;
         final String bucketLabel;
+        final boolean cappedInPortal;
         
-        MmrNotification(double delta, String bucketLabel) {
+        MmrNotification(double delta, String bucketLabel, boolean cappedInPortal) {
             this.delta = delta;
             this.bucketLabel = bucketLabel;
+            this.cappedInPortal = cappedInPortal;
         }
     }
     
@@ -289,16 +292,25 @@ public class RankOverlay extends Overlay
      */
     public void showMmrDelta(double mmrDelta, String bucketLabel)
     {
+        queueMmrNotification(new MmrNotification(mmrDelta, bucketLabel, false));
+    }
+
+    public void showRatingCappedInPortal(String bucketLabel)
+    {
+        queueMmrNotification(new MmrNotification(0.0, bucketLabel, true));
+    }
+
+    private void queueMmrNotification(MmrNotification notification)
+    {
         if (!config.showMmrChangeNotification())
         {
             return;
         }
         
         // Add to queue for sequential display
-        MmrNotification notification = new MmrNotification(mmrDelta, bucketLabel);
         mmrNotificationQueue.offer(notification);
-        log.debug("[Overlay] Queued MMR notification: delta={} bucket={} queueSize={}", 
-            mmrDelta, bucketLabel, mmrNotificationQueue.size());
+        log.debug("[Overlay] Queued MMR notification: delta={} bucket={} cappedInPortal={} queueSize={}", 
+            notification.delta, notification.bucketLabel, notification.cappedInPortal, mmrNotificationQueue.size());
         
         // If no notification is currently showing, start this one immediately
         if (currentMmrNotification == null && mmrNotificationStartMs == 0L)
@@ -1100,41 +1112,15 @@ public class RankOverlay extends Overlay
             return;
         }
 
-        double mmrDelta = currentMmrNotification.delta;
-        String bucketLabel = currentMmrNotification.bucketLabel;
+        MmrNotification notification = currentMmrNotification;
 
         // Calculate fade progress
         float progress = (float) elapsed / durationMs;
         int alpha = (int) (255 * (1.0f - progress));
         int floatOffset = (int) (progress * 30); // Float up 30 pixels
 
-        // Format text: +1.3 MMR (NH) when bucket label present (auto-switched)
-        // Otherwise: +1.3 MMR
-        String sign = mmrDelta >= 0 ? "+" : "";
-        String text;
-        if (bucketLabel != null && !bucketLabel.isEmpty())
-        {
-            text = String.format("%s%.1f MMR (%s)", sign, mmrDelta, bucketLabel);
-        }
-        else
-        {
-            text = String.format("%s%.1f MMR", sign, mmrDelta);
-        }
-
-        // Determine color
-        Color baseColor;
-        if (config.colorblindMode())
-        {
-            baseColor = Color.WHITE;
-        }
-        else if (mmrDelta >= 0)
-        {
-            baseColor = new Color(0, 200, 0); // Green for gain
-        }
-        else
-        {
-            baseColor = new Color(229, 57, 53); // Red for loss
-        }
+        String text = mmrNotificationText(notification.delta, notification.bucketLabel, notification.cappedInPortal);
+        Color baseColor = mmrNotificationColor(notification.delta, notification.cappedInPortal, config.colorblindMode());
         Color color = new Color(baseColor.getRed(), baseColor.getGreen(), baseColor.getBlue(), alpha);
 
         // Render with black outline
@@ -1159,6 +1145,37 @@ public class RankOverlay extends Overlay
         // Main colored text
         g.setColor(color);
         g.drawString(text, centerX, drawY);
+    }
+
+    static String mmrNotificationText(double mmrDelta, String bucketLabel, boolean cappedInPortal)
+    {
+        boolean labelled = bucketLabel != null && !bucketLabel.isEmpty();
+        if (cappedInPortal)
+        {
+            return labelled ? String.format("%s (%s)", PortalRatingCap.LABEL, bucketLabel) : PortalRatingCap.LABEL;
+        }
+        String sign = mmrDelta >= 0 ? "+" : "";
+        if (labelled)
+        {
+            return String.format("%s%.1f MMR (%s)", sign, mmrDelta, bucketLabel);
+        }
+        return String.format("%s%.1f MMR", sign, mmrDelta);
+    }
+
+    static Color mmrNotificationColor(double mmrDelta, boolean cappedInPortal, boolean colorblind)
+    {
+        if (colorblind)
+        {
+            return Color.WHITE;
+        }
+        else if (cappedInPortal || mmrDelta >= 0)
+        {
+            return new Color(0, 200, 0); // Green for gain
+        }
+        else
+        {
+            return new Color(229, 57, 53); // Red for loss
+        }
     }
 
     private static String bucketKey(PvPLeaderboardConfig.RankBucket bucket)

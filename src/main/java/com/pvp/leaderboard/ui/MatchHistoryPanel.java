@@ -2,6 +2,7 @@ package com.pvp.leaderboard.ui;
 
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
+import com.pvp.leaderboard.service.PortalRatingCap;
 import com.pvp.leaderboard.util.RankUtils;
 
 import javax.swing.*;
@@ -87,6 +88,10 @@ public class MatchHistoryPanel extends JPanel
 
     private String computeRatingChangePlain(JsonObject match)
     {
+        if (PortalRatingCap.isCapped(match))
+        {
+            return PortalRatingCap.LABEL;
+        }
         if (match.has("rating_change"))
         {
             JsonObject ratingChange = match.getAsJsonObject("rating_change");

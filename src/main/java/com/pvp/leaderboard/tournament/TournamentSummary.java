@@ -47,6 +47,7 @@ public final class TournamentSummary
     public final GearSet gearSet;
     public final int gearPrepSec;
     public final String location;
+    public final boolean roundsAuto;
 
     /** One bucket's entry of {@code rank_limits}: rank indices (0 = Bronze 3 … 24 = 3rd Age), {@code -1} = that bound is not set. */
     public static final class RankLimit
@@ -90,6 +91,18 @@ public final class TournamentSummary
                              long prizePoolGp, String description, boolean pluginRequired, boolean midEventJoins, int minGames, int roundLengthSec,
                              String creatorName, List<RankLimit> rankLimits, TournamentRules rules, GearSet gearSet, int gearPrepSec, String location)
     {
+        this(tournamentId, name, status, format, category, style, maxPlayers, registrationClosesAt, startsAt, rounds, currentRound, registeredCount,
+            myStatus, rulesUrl, buyInGp, prizeMode, prizeTopX, prizeRandomY, prizePoolGp, description, pluginRequired, midEventJoins, minGames, roundLengthSec,
+            creatorName, rankLimits, rules, gearSet, gearPrepSec, location, false);
+    }
+
+    public TournamentSummary(String tournamentId, String name, String status, String format, String category, String style,
+                             int maxPlayers, long registrationClosesAt, long startsAt, int rounds, int currentRound, int registeredCount,
+                             String myStatus, String rulesUrl, long buyInGp, String prizeMode, int prizeTopX, int prizeRandomY,
+                             long prizePoolGp, String description, boolean pluginRequired, boolean midEventJoins, int minGames, int roundLengthSec,
+                             String creatorName, List<RankLimit> rankLimits, TournamentRules rules, GearSet gearSet, int gearPrepSec, String location,
+                             boolean roundsAuto)
+    {
         this.tournamentId = tournamentId;
         this.name = name;
         this.status = status;
@@ -120,6 +133,7 @@ public final class TournamentSummary
         this.gearSet = gearSet;
         this.gearPrepSec = Math.max(0, gearPrepSec);
         this.location = location;
+        this.roundsAuto = roundsAuto;
     }
 
     /** {@code null} when the object has no {@code tournament_id}. */
@@ -158,7 +172,14 @@ public final class TournamentSummary
             TournamentRules.fromJson(o.get("rules")),
             GearSet.fromJson(o.get("gear_set")),
             JsonLenient.optInt(o, "gear_prep_sec", 0),
-            textOf(o, "location"));
+            textOf(o, "location"),
+            isJsonTrue(o, "rounds_auto"));
+    }
+
+    static boolean isJsonTrue(JsonObject o, String key)
+    {
+        com.google.gson.JsonElement e = o == null ? null : o.get(key);
+        return e != null && e.isJsonPrimitive() && e.getAsJsonPrimitive().isBoolean() && e.getAsBoolean();
     }
 
     static String textOf(JsonObject o, String key)

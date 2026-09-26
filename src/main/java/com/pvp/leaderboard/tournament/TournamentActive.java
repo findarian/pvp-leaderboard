@@ -21,20 +21,20 @@ public final class TournamentActive
     public final List<StandingsRow> standings;
     /** -1 when unknown. */
     public final int myRank;
-    public final int myPoints;
+    public final double myPoints;
     public final GearSet gearSet;
     public final int gearPrepSec;
     public final long gearCheckUntil;
     public final String location;
 
     public TournamentActive(String tournamentId, String name, String status, int round, int rounds, long deadlineAt, int etaS,
-                            long breakUntil, TournamentSeries series, boolean bye, List<StandingsRow> standings, int myRank, int myPoints)
+                            long breakUntil, TournamentSeries series, boolean bye, List<StandingsRow> standings, int myRank, double myPoints)
     {
         this(tournamentId, name, status, round, rounds, deadlineAt, etaS, breakUntil, series, bye, standings, myRank, myPoints, null, 0, 0L, null);
     }
 
     public TournamentActive(String tournamentId, String name, String status, int round, int rounds, long deadlineAt, int etaS,
-                            long breakUntil, TournamentSeries series, boolean bye, List<StandingsRow> standings, int myRank, int myPoints,
+                            long breakUntil, TournamentSeries series, boolean bye, List<StandingsRow> standings, int myRank, double myPoints,
                             GearSet gearSet, int gearPrepSec, long gearCheckUntil, String location)
     {
         this.tournamentId = tournamentId;
@@ -65,7 +65,7 @@ public final class TournamentActive
         long deadline = JsonLenient.optLong(o, "deadline_at", 0L);
         Integer eta = JsonLenient.optInteger(o, "eta_s");
         Integer myRank = JsonLenient.optInteger(o, "my_rank");
-        Integer myPoints = JsonLenient.optInteger(o, "my_points");
+        Double myPoints = StandingsRow.pointsOrNull(o.get("my_points"));
         return new TournamentActive(
             id,
             JsonLenient.optString(o, "name", id),

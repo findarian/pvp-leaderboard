@@ -42,7 +42,6 @@ public interface TournamentService
     /** {@code tournament/in_combat} — the round-clock extension signal. */
     void inCombat(String tournamentId, String seriesId);
 
-    /** {@code tournament/round_end_reply} — "I'm here" at the 30 s check. */
     void roundEndReply(String tournamentId, String seriesId);
 
     /** {@code tournament/report_problem} (text truncated to {@link #REPORT_MAX_CHARS}). */

@@ -25,20 +25,6 @@ import java.awt.Insets;
 import java.util.Map;
 import java.util.Set;
 
-/**
- * The queue view's <b>Matchmaking queue</b> block (Plan 10 F.1, mockup v4
- * card 1, 2026-09-21; set 7, operator 2026-09-22): the green <b>Queue for
- * Matchmaking</b> button first, the hint that says what is missing while
- * it is disabled, then a small <b>Options</b> toggle — collapsed by default,
- * its label summarising the picks — over the wait-time picker (30 s / 5 /
- * 10 / 30 min, shared with Discord through the server-side prefs) and the
- * optional rank-range toggle (labelled with the lobby slider's bounds). It
- * persists its two picks through {@link LobbyPreferences} and owns the pure
- * "may queue" rule ({@link #eligible}: exactly one style, exactly one
- * build, that style unlocked); the owning {@code MatchmakingLobbyPanel}
- * supplies the picks, the slider bounds, the hint and the click handler,
- * and hides the whole block while the queue transport is inert.
- */
 public class QueueGateSection extends JPanel
 {
     public static final String NAME_SECTION = "matchmaking-queue-section";
@@ -368,14 +354,17 @@ public class QueueGateSection extends JPanel
 
     // ---------------------------------------------------------------- the rule
 
-    /** Exactly one style, exactly one build, and that style past the
-     *  anti-smurf threshold (a missing count = unknown = locked). */
     public static boolean eligible(Set<Style> styles, Set<BuildType> builds, Map<Style, Integer> counts)
     {
         Style style = soleStyle(styles);
-        if (style == null || soleBuild(builds) == null || counts == null) return false;
+        if (!isQueueStyle(style) || soleBuild(builds) == null || counts == null) return false;
         Integer count = counts.get(style);
         return count != null && LobbyJoinGate.isUnlocked(count);
+    }
+
+    public static boolean isQueueStyle(Style style)
+    {
+        return style == Style.NH;
     }
 
     /** The one selected style, or {@code null} unless exactly one is picked. */
