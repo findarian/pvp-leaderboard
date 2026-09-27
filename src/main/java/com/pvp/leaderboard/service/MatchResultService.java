@@ -22,7 +22,7 @@ public class MatchResultService
 {
     private static final String API_URL = "https://l5xya0wf0d.execute-api.us-east-1.amazonaws.com/prod/matchresult";
     private static final String CLIENT_ID = "runelite";
-    private static final String PLUGIN_VERSION = "1.0.0";
+    private static final String PLUGIN_VERSION = "2.0.0";
     // This is meant to be hardcoded and be this value for everyone. New versions of the plugin will update this on the backend so that it doesn't take matches from old clients if there is an incompatibility added.
     private static final String RUNELITE_CLIENT_SECRET = "7f2f6a0e-2c6b-4b1d-9a39-6f2b2a8a1f3c"; 
     private static final MediaType JSON = MediaType.parse("application/json; charset=utf-8");
