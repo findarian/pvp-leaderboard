@@ -68,11 +68,15 @@ public class TournamentsPanel extends JPanel implements TournamentEventListener
     static final String ROUND_END_SUBMIT_TEXT = "Please submit within 30 seconds or the match will be counted as did not complete and you may be removed from the tournament.";
     static final long IN_COMBAT_MIN_INTERVAL_MS = 30_000L;
     private static final int STANDINGS_MAX_ROWS = 40;
+    /** The standings rows' size: the largest in this range at which every row fits. */
+    static final float STANDINGS_MAX_PT = 16f;
+    static final float STANDINGS_MIN_PT = 12f;
+    static final float HEADER_PT = 16f;
+    static final float BODY_PT = 15f;
     private static final Color GREEN = new Color(0x3e, 0xcf, 0x8e);
     private static final Color AMBER = new Color(0xff, 0xb3, 0x47);
     private static final Color RED = new Color(0x5a, 0x2a, 0x2a);
     private static final Color MUTED = new Color(0x9a, 0x9a, 0x9a);
-    private static final String DEFAULT_RULES = "https://pvp-leaderboard.com/tournament-rules.html";
 
     private final TournamentService service;
     private final Supplier<String> regionSupplier;
@@ -100,10 +104,12 @@ public class TournamentsPanel extends JPanel implements TournamentEventListener
     private final JLabel activeStatus = new JLabel(" ");
     private final JPanel roundEndBox = new JPanel();
     private final JLabel roundEndLabel = new JLabel(" ");
-    private final JPanel standingsBody = new JPanel();
-    private final JButton withdrawActiveBtn = new JButton("Withdraw");
+    private final StandingsBody standingsBody = new StandingsBody();
+    private final JButton withdrawActiveBtn = tabButton("Withdraw");
     /** The active footer's report button — gated like every card's (set 6). */
-    private final JButton reportActiveBtn = smallButton("Report a problem");
+    private final JButton reportActiveBtn = tabButton(TournamentInfoCard.REPORT_LABEL);
+    /** The running event's own Rules; enabled once its list entry is known. */
+    private final JButton activeRulesBtn = tabButton("Rules");
     private final Timer ticker;
     /** The open Rules dialog, if any, and the card to return to from it. */
     private TournamentRulesDialog rulesDialog;
@@ -124,7 +130,6 @@ public class TournamentsPanel extends JPanel implements TournamentEventListener
     private List<TournamentSummary> myRegistrations = Collections.emptyList();
     private TournamentActive active;
     private TournamentSeries series;
-    private String rulesUrl = DEFAULT_RULES;
     /** Local wall-clock ms at which the current round ends (server ETA at receipt), 0 = none. */
     private long roundEndsAtMs;
     private long breakUntilS;
@@ -157,7 +162,7 @@ public class TournamentsPanel extends JPanel implements TournamentEventListener
         setLayout(new BorderLayout());
         setBorder(BorderFactory.createEmptyBorder(4, 4, 4, 4));
         banner.setName(NAME_BANNER);
-        banner.setFont(banner.getFont().deriveFont(Font.BOLD, 12f));
+        banner.setFont(banner.getFont().deriveFont(Font.BOLD, BODY_PT));
         banner.setForeground(AMBER);
         banner.setVisible(false);
         add(banner, BorderLayout.NORTH);
@@ -167,7 +172,7 @@ public class TournamentsPanel extends JPanel implements TournamentEventListener
         showCard(CARD_LIST);
         if (!this.service.isAvailable())
         {
-            listStatus.setText("Tournaments are turned off in the plugin settings.");
+            setWrapped(listStatus, "Tournaments are turned off in the plugin settings.");
         }
         this.service.addListener(this);
         ticker = new Timer(1000, e -> onTick());
@@ -265,7 +270,7 @@ public class TournamentsPanel extends JPanel implements TournamentEventListener
     {
         if (!service.isConnected())
         {
-            listStatus.setText(CONNECTING_TEXT);
+            setWrapped(listStatus, CONNECTING_TEXT);
             return;
         }
         service.status();
@@ -300,29 +305,20 @@ public class TournamentsPanel extends JPanel implements TournamentEventListener
         JPanel top = new JPanel();
         top.setLayout(new BoxLayout(top, BoxLayout.Y_AXIS));
         JLabel title = new JLabel("Tournaments");
-        title.setFont(title.getFont().deriveFont(Font.BOLD, 16f));
+        title.setFont(title.getFont().deriveFont(Font.BOLD, HEADER_PT));
         title.setAlignmentX(LEFT_ALIGNMENT);
         top.add(title);
         listStatus.setName(NAME_LIST_STATUS);
-        listStatus.setFont(listStatus.getFont().deriveFont(Font.PLAIN, 12f));
+        listStatus.setFont(listStatus.getFont().deriveFont(Font.PLAIN, BODY_PT));
         listStatus.setForeground(MUTED);
         listStatus.setAlignmentX(LEFT_ALIGNMENT);
         top.add(listStatus);
-        JPanel actions = new JPanel();
-        actions.setLayout(new BoxLayout(actions, BoxLayout.X_AXIS));
-        actions.setAlignmentX(LEFT_ALIGNMENT);
-        actions.setOpaque(false);
-        JButton refresh = smallButton("Refresh");
+        top.add(Box.createVerticalStrut(6));
+        JButton refresh = tabButton("Refresh");
         refresh.setName("tournaments-refresh");
         refresh.addActionListener(e -> sync());
-        actions.add(refresh);
-        actions.add(Box.createHorizontalStrut(6));
-        JButton rules = smallButton("Rules");
-        rules.setName("tournaments-rules");
-        rules.addActionListener(e -> linkOpener.accept(rulesUrl));
-        actions.add(rules);
-        actions.add(Box.createHorizontalGlue());
-        top.add(actions);
+        top.add(refresh);
+        top.add(Box.createVerticalStrut(6));
         listGearSlot.setName(NAME_LIST_GEAR_SLOT);
         listGearSlot.setOpaque(false);
         listGearSlot.setAlignmentX(LEFT_ALIGNMENT);
@@ -352,14 +348,16 @@ public class TournamentsPanel extends JPanel implements TournamentEventListener
         activeGearSlot.setAlignmentX(LEFT_ALIGNMENT);
         top.add(activeGearSlot, 2);
         activeHeader.setName("tournaments-active-header");
-        activeHeader.setFont(activeHeader.getFont().deriveFont(Font.BOLD, 15f));
+        activeHeader.setFont(activeHeader.getFont().deriveFont(Font.BOLD, HEADER_PT));
         activeEta.setName("tournaments-active-eta");
-        activeEta.setFont(activeEta.getFont().deriveFont(Font.BOLD, 13f));
+        activeEta.setFont(activeEta.getFont().deriveFont(Font.BOLD, HEADER_PT));
         activeEta.setForeground(GREEN);
         activeMatch.setName("tournaments-active-match");
-        activeMatch.setFont(activeMatch.getFont().deriveFont(Font.BOLD, 13f));
+        activeMatch.setFont(activeMatch.getFont().deriveFont(Font.BOLD, HEADER_PT));
         activeWhere.setName("tournaments-active-where");
+        activeWhere.setFont(activeWhere.getFont().deriveFont(Font.PLAIN, BODY_PT));
         activeStatus.setName("tournaments-active-status");
+        activeStatus.setFont(activeStatus.getFont().deriveFont(Font.PLAIN, BODY_PT));
         activeStatus.setForeground(MUTED);
 
         roundEndBox.setLayout(new BoxLayout(roundEndBox, BoxLayout.Y_AXIS));
@@ -368,14 +366,14 @@ public class TournamentsPanel extends JPanel implements TournamentEventListener
         roundEndBox.setBorder(BorderFactory.createEmptyBorder(6, 6, 6, 6));
         roundEndBox.setAlignmentX(LEFT_ALIGNMENT);
         roundEndLabel.setForeground(AMBER);
-        roundEndLabel.setFont(roundEndLabel.getFont().deriveFont(Font.PLAIN, 11f));
+        roundEndLabel.setFont(roundEndLabel.getFont().deriveFont(Font.PLAIN, BODY_PT));
         roundEndLabel.setAlignmentX(LEFT_ALIGNMENT);
         roundEndBox.add(roundEndLabel);
         roundEndBox.setVisible(false);
         top.add(roundEndBox);
 
         JLabel lbTitle = new JLabel("Live leaderboard");
-        lbTitle.setFont(lbTitle.getFont().deriveFont(Font.BOLD, 13f));
+        lbTitle.setFont(lbTitle.getFont().deriveFont(Font.BOLD, HEADER_PT));
         lbTitle.setAlignmentX(LEFT_ALIGNMENT);
         lbTitle.setBorder(BorderFactory.createEmptyBorder(8, 0, 2, 0));
         top.add(lbTitle);
@@ -389,20 +387,17 @@ public class TournamentsPanel extends JPanel implements TournamentEventListener
         card.add(scroll, BorderLayout.CENTER);
 
         JPanel footer = new JPanel();
-        footer.setLayout(new BoxLayout(footer, BoxLayout.X_AXIS));
-        JButton rules = smallButton("Rules");
-        rules.setName("tournaments-active-rules");
-        rules.addActionListener(e -> openRulesForActive());
-        footer.add(rules);
-        footer.add(Box.createHorizontalStrut(4));
+        footer.setLayout(new BoxLayout(footer, BoxLayout.Y_AXIS));
+        footer.setBorder(BorderFactory.createEmptyBorder(6, 0, 0, 0));
+        activeRulesBtn.setName("tournaments-active-rules");
+        activeRulesBtn.addActionListener(e -> openRulesForActive());
+        activeRulesBtn.setEnabled(false);
         reportActiveBtn.setName("tournaments-report");
         reportActiveBtn.addActionListener(e -> { if (active != null) onReportProblem(active.tournamentId); });
         refreshActiveReportGate();
-        footer.add(reportActiveBtn);
-        footer.add(Box.createHorizontalStrut(4));
+        footer.add(TournamentInfoCard.pairRow(reportActiveBtn, activeRulesBtn));
+        footer.add(Box.createVerticalStrut(4));
         withdrawActiveBtn.setName("tournaments-active-withdraw");
-        withdrawActiveBtn.setFont(withdrawActiveBtn.getFont().deriveFont(Font.BOLD, 11f));
-        withdrawActiveBtn.setMargin(new Insets(2, 6, 2, 6));
         withdrawActiveBtn.setBackground(RED);
         withdrawActiveBtn.setForeground(new Color(0xff, 0xb3, 0xb3));
         withdrawActiveBtn.addActionListener(e -> { if (active != null) service.withdraw(active.tournamentId); });
@@ -411,14 +406,26 @@ public class TournamentsPanel extends JPanel implements TournamentEventListener
         return card;
     }
 
-    /** The panel's small bold button — shared with the card and the Rules dialog. */
-    static JButton smallButton(String label)
+    /** The tab's bold button — shared with the cards, the Rules page and the
+     *  kit card — at the side panel's button size and as wide as its column. */
+    static JButton tabButton(String label)
     {
         JButton b = new JButton(label);
-        b.setFont(b.getFont().deriveFont(Font.BOLD, 11f));
-        b.setMargin(new Insets(2, 6, 2, 6));
+        b.setFont(b.getFont().deriveFont(Font.BOLD, TournamentInfoCard.BUTTON_PT));
+        b.setMargin(new Insets(6, 8, 6, 8));
         b.setFocusPainted(false);
+        b.setAlignmentX(LEFT_ALIGNMENT);
+        b.setMaximumSize(new Dimension(Integer.MAX_VALUE, b.getPreferredSize().height));
         return b;
+    }
+
+    /** A line at its label's font, wrapped to the tab's text width; blank
+     *  keeps the line's height. */
+    private static void setWrapped(JLabel label, String plain)
+    {
+        String text = plain == null || plain.trim().isEmpty()
+            ? " " : TournamentInfoCard.wrapHtml(label.getFont(), TournamentInfoCard.TEXT_WIDTH_PX, plain);
+        if (!text.equals(label.getText())) label.setText(text);
     }
 
     private void showCard(String name)
@@ -449,7 +456,7 @@ public class TournamentsPanel extends JPanel implements TournamentEventListener
 
     private void showBanner(String text)
     {
-        banner.setText("<html>" + text + "</html>");
+        banner.setText(TournamentInfoCard.wrapEscaped(banner.getFont(), TournamentInfoCard.TEXT_WIDTH_PX, text));
         banner.setVisible(true);
         revalidate();
         repaint();
@@ -462,15 +469,15 @@ public class TournamentsPanel extends JPanel implements TournamentEventListener
         liveTimes.clear();
         if (!service.isAvailable())
         {
-            listStatus.setText("Tournaments are turned off in the plugin settings.");
+            setWrapped(listStatus, "Tournaments are turned off in the plugin settings.");
         }
         else if (events.isEmpty())
         {
-            listStatus.setText("No open tournaments right now.");
+            setWrapped(listStatus, "No open tournaments right now.");
         }
         else
         {
-            listStatus.setText(events.size() + (events.size() == 1 ? " event" : " events"));
+            setWrapped(listStatus, events.size() + (events.size() == 1 ? " event" : " events"));
         }
         for (TournamentSummary t : events)
         {
@@ -550,26 +557,27 @@ public class TournamentsPanel extends JPanel implements TournamentEventListener
             showCard(CARD_LIST);
             return;
         }
-        activeHeader.setText("<html>" + escape(active.name) + " · Round " + active.round + "/" + active.rounds + "</html>");
+        setWrapped(activeHeader, active.name + " · Round " + active.round + "/" + active.rounds);
         if (series != null)
         {
-            activeMatch.setText("Your match vs " + series.opponentName);
-            activeWhere.setText("World · place: " + series.worldLabel() + " · " + (series.meetingPlace == null ? "?" : series.meetingPlace));
+            setWrapped(activeMatch, "Your match vs " + series.opponentName);
+            setWrapped(activeWhere, "World · place: " + series.worldLabel() + " · " + (series.meetingPlace == null ? "?" : series.meetingPlace));
         }
         else if (bye)
         {
-            activeMatch.setText("Bye this round (counts as a win)");
-            activeWhere.setText(" ");
+            setWrapped(activeMatch, "Bye this round (counts as a win)");
+            setWrapped(activeWhere, " ");
         }
         else
         {
-            activeMatch.setText("Waiting for the next round");
-            activeWhere.setText(" ");
+            setWrapped(activeMatch, "Waiting for the next round");
+            setWrapped(activeWhere, " ");
         }
         withdrawActiveBtn.setVisible(true);
         renderEta();
         renderStatus();
         refreshActiveReportGate();
+        refreshActiveRules();
         showCard(CARD_ACTIVE);
     }
 
@@ -578,16 +586,16 @@ public class TournamentsPanel extends JPanel implements TournamentEventListener
         long now = nowMs.getAsLong();
         if (breakUntilS > 0 && breakUntilS * 1000L > now)
         {
-            activeEta.setText("On a break · next round in " + mmss((breakUntilS * 1000L - now) / 1000L));
+            setWrapped(activeEta, "On a break · next round in " + mmss((breakUntilS * 1000L - now) / 1000L));
             return;
         }
         if (roundEndsAtMs > 0)
         {
             long left = Math.max(0L, (roundEndsAtMs - now) / 1000L);
-            activeEta.setText(mmss(left) + " est. remaining in round" + extendedText(roundExtensions));
+            setWrapped(activeEta, mmss(left) + " est. remaining in round" + extendedText(roundExtensions));
             return;
         }
-        activeEta.setText("Between rounds");
+        setWrapped(activeEta, "Between rounds");
     }
 
     static String extendedText(int extensions)
@@ -619,11 +627,11 @@ public class TournamentsPanel extends JPanel implements TournamentEventListener
     {
         if (series == null)
         {
-            activeStatus.setText(" ");
+            setWrapped(activeStatus, " ");
             return;
         }
         boolean fighting = safeInCombat();
-        activeStatus.setText("Status: " + (fighting ? "in combat (auto)" : "waiting for the fight · hop to " + series.worldLabel()));
+        setWrapped(activeStatus, "Status: " + (fighting ? "in combat (auto)" : "waiting for the fight · hop to " + series.worldLabel()));
     }
 
     private boolean safeInCombat()
@@ -644,9 +652,11 @@ public class TournamentsPanel extends JPanel implements TournamentEventListener
         String self = selfNameSupplier.get();
         String selfKey = self == null ? null : NameUtils.canonicalKey(self);
         Component mine = null;
+        standingsBody.rows.clear();
         if (rows == null || rows.isEmpty())
         {
             JLabel empty = new JLabel("No standings yet.");
+            empty.setFont(empty.getFont().deriveFont(Font.PLAIN, BODY_PT));
             empty.setForeground(MUTED);
             standingsBody.add(empty);
         }
@@ -656,10 +666,9 @@ public class TournamentsPanel extends JPanel implements TournamentEventListener
             if (shown++ >= STANDINGS_MAX_ROWS) break;
             boolean me = (selfKey != null && r.displayName != null && selfKey.equals(NameUtils.canonicalKey(r.displayName)))
                 || (myRank > 0 && r.rank == myRank && selfKey == null);
-            JPanel line = new JPanel(new BorderLayout());
+            JPanel line = new JPanel(new BorderLayout(StandingsBody.GAP, 0));
             line.setName("standings-row-" + r.rank);
             line.setAlignmentX(LEFT_ALIGNMENT);
-            line.setMaximumSize(new Dimension(Integer.MAX_VALUE, 22));
             line.setBorder(BorderFactory.createEmptyBorder(1, 4, 1, 4));
             if (me)
             {
@@ -670,15 +679,16 @@ public class TournamentsPanel extends JPanel implements TournamentEventListener
             String removed = r.removedLabel();
             String right = removed.isEmpty() ? standingsScore(r) : removed;
             JLabel left = new JLabel(label);
-            if (me) left.setFont(left.getFont().deriveFont(Font.BOLD));
             if (!removed.isEmpty()) left.setForeground(MUTED);
             JLabel pts = new JLabel(right);
             pts.setForeground(removed.isEmpty() ? Color.WHITE : MUTED);
             line.add(left, BorderLayout.CENTER);
             line.add(pts, BorderLayout.EAST);
             standingsBody.add(line);
+            standingsBody.rows.add(new StandingsBody.Row(line, left, pts, me));
             if (me) mine = line;
         }
+        standingsBody.applyPt(STANDINGS_MAX_PT);
         standingsBody.revalidate();
         standingsBody.repaint();
         if (mine != null)
@@ -686,6 +696,83 @@ public class TournamentsPanel extends JPanel implements TournamentEventListener
             final Component target = mine;
             javax.swing.SwingUtilities.invokeLater(() -> standingsBody.scrollRectToVisible(target.getBounds()));
         }
+    }
+
+    /** The live leaderboard's rows, as wide as the scroll pane's viewport,
+     *  all at the largest size from {@link #STANDINGS_MAX_PT} down to
+     *  {@link #STANDINGS_MIN_PT} at which every row fits. */
+    static final class StandingsBody extends JPanel implements javax.swing.Scrollable
+    {
+        static final int GAP = 6;
+
+        static final class Row
+        {
+            final JPanel line;
+            final JLabel left;
+            final JLabel right;
+            final boolean me;
+
+            Row(JPanel line, JLabel left, JLabel right, boolean me)
+            {
+                this.line = line;
+                this.left = left;
+                this.right = right;
+                this.me = me;
+            }
+        }
+
+        final List<Row> rows = new ArrayList<>();
+        private final RowTextFit fit = new RowTextFit();
+        private float appliedPt = -1f;
+
+        @Override
+        public void doLayout()
+        {
+            int width = getWidth();
+            if (width > 0 && !rows.isEmpty())
+            {
+                int usable = width - getInsets().left - getInsets().right;
+                int pt = fit.largestFitting((int) STANDINGS_MIN_PT, (int) STANDINGS_MAX_PT, p -> allFit(p, usable));
+                applyPt(pt);
+            }
+            super.doLayout();
+        }
+
+        private boolean allFit(int pt, int usable)
+        {
+            for (Row r : rows)
+            {
+                java.awt.Insets in = r.line.getInsets();
+                int needed = in.left + in.right + GAP + fit.textWidth(r.left.getText(), font(pt, r.me)) + fit.textWidth(r.right.getText(), font(pt, false));
+                if (needed > usable) return false;
+            }
+            return true;
+        }
+
+        void applyPt(float pt)
+        {
+            if (pt == appliedPt && !rows.isEmpty() && rows.get(0).left.getFont().getSize2D() == pt) return;
+            appliedPt = pt;
+            for (Row r : rows)
+            {
+                r.left.setFont(font((int) pt, r.me));
+                r.right.setFont(font((int) pt, false));
+                int height = Math.max(r.left.getPreferredSize().height, r.right.getPreferredSize().height)
+                    + r.line.getInsets().top + r.line.getInsets().bottom;
+                r.line.setMaximumSize(new Dimension(Integer.MAX_VALUE, height));
+            }
+        }
+
+        private static Font font(int pt, boolean bold)
+        {
+            return RowTextFit.baseFont().deriveFont(bold ? Font.BOLD : Font.PLAIN, (float) pt);
+        }
+
+        @Override public Dimension getPreferredScrollableViewportSize() { return getPreferredSize(); }
+        @Override public int getScrollableUnitIncrement(java.awt.Rectangle r, int orientation, int direction) { return 16; }
+        @Override public int getScrollableBlockIncrement(java.awt.Rectangle r, int orientation, int direction) { return 64; }
+        @Override public boolean getScrollableTracksViewportWidth() { return true; }
+        @Override public boolean getScrollableTracksViewportHeight() { return false; }
     }
 
     // ---------------------------------------------------------------- actions
@@ -725,15 +812,16 @@ public class TournamentsPanel extends JPanel implements TournamentEventListener
      *  already read that as absent). */
     void openRules(TournamentSummary t)
     {
-        String url = t == null || t.rulesUrl == null || t.rulesUrl.isEmpty() ? rulesUrl : t.rulesUrl;
-        if (t == null || t.rules == null)
+        if (t == null) return;
+        String url = t.rulesUrl == null ? "" : t.rulesUrl;
+        if (t.rules == null)
         {
-            linkOpener.accept(url);
+            if (!url.isEmpty()) linkOpener.accept(url);
             return;
         }
         if (rulesDialog != null) cardHost.remove(rulesDialog);
         if (!CARD_RULES.equals(currentCard)) rulesReturnCard = currentCard;
-        rulesDialog = new TournamentRulesDialog(t.name, t.rules, this::closeRules, () -> linkOpener.accept(url));
+        rulesDialog = new TournamentRulesDialog(t.name, t.rules, this::closeRules, () -> { if (!url.isEmpty()) linkOpener.accept(url); });
         cardHost.add(rulesDialog, CARD_RULES);
         showCard(CARD_RULES);
         revalidate();
@@ -741,10 +829,16 @@ public class TournamentsPanel extends JPanel implements TournamentEventListener
     }
 
     /** The active footer's Rules: the active event's listed entry, so it
-     *  gets the same dialog; unknown → the rules link as before. */
+     *  gets the same page as its card. */
     private void openRulesForActive()
     {
         openRules(active == null ? null : summaryFor(active.tournamentId));
+    }
+
+    /** The footer's Rules works once the running event's entry is known. */
+    private void refreshActiveRules()
+    {
+        activeRulesBtn.setEnabled(active != null && summaryFor(active.tournamentId) != null);
     }
 
     private void closeRules()
@@ -825,15 +919,8 @@ public class TournamentsPanel extends JPanel implements TournamentEventListener
     public void onTournamentList(List<TournamentSummary> tournaments, long nowEpochS)
     {
         events = tournaments == null ? Collections.<TournamentSummary>emptyList() : new ArrayList<>(tournaments);
-        for (TournamentSummary t : events)
-        {
-            if (t.rulesUrl != null && !t.rulesUrl.isEmpty())
-            {
-                rulesUrl = t.rulesUrl;
-                break;
-            }
-        }
         renderList();
+        refreshActiveRules();
     }
 
     @Override
@@ -894,13 +981,13 @@ public class TournamentsPanel extends JPanel implements TournamentEventListener
         {
             if (selfKey != null && r.displayName != null && selfKey.equals(NameUtils.canonicalKey(r.displayName))) myRank = r.rank;
         }
-        activeHeader.setText("<html>" + escape(active.name) + " · Round " + active.round + "/" + active.rounds + "</html>");
+        setWrapped(activeHeader, active.name + " · Round " + active.round + "/" + active.rounds);
         renderEta();
         renderStandings(standings.rows, myRank > 0 ? myRank : active.myRank);
         if (standings.isFinished() || "cancelled".equals(standings.status))
         {
             // the dedicated finished / cancelled pushes drive the exit; the standings just stop moving
-            activeEta.setText(standings.isFinished() ? "Final standings" : "Cancelled");
+            setWrapped(activeEta, standings.isFinished() ? "Final standings" : "Cancelled");
         }
     }
 
@@ -948,7 +1035,8 @@ public class TournamentsPanel extends JPanel implements TournamentEventListener
         if (active == null || !active.tournamentId.equals(tournamentId)) return;
         roundEndRespondByMs = respondByEpochS > 0 ? respondByEpochS * 1000L : nowMs.getAsLong() + 30_000L;
         String sentence = message == null || message.trim().isEmpty() ? ROUND_END_SUBMIT_TEXT : message.trim();
-        roundEndLabel.setText(TournamentInfoCard.wrapHtml(roundEndTitle(round, opponentName), sentence));
+        roundEndLabel.setText(TournamentInfoCard.wrapHtml(roundEndLabel.getFont(), TournamentInfoCard.TEXT_WIDTH_PX,
+            roundEndTitle(round, opponentName), sentence));
         roundEndBox.setVisible(true);
         showCard(CARD_ACTIVE);
         revalidate();

@@ -46,37 +46,31 @@ public class DashboardPanel extends PluginPanel
     private JScrollPane topPlayersScrollPane;
     private JPanel statsContainer;
 
-    // Top-level navigation (Segment 1.5): Matchmaking + Player Lookup. Two
-    // tabs only so each label has plenty of horizontal room (no cutoff).
+    // Top-level navigation: Matchmaking + Player Lookup on one row, the
+    // Tournaments tab alone on the row below. Each tab shows one card.
     private static final String CARD_MATCHMAKING = "matchmaking";
     private static final String CARD_LOOKUP = "lookup";
+    private static final String CARD_TOURNAMENTS = "tournaments";
     private JButton tabMatchmakingBtn;
     private JButton tabLookupBtn;
+    private JButton tabTournamentsBtn;
     private CardLayout viewCards;
     private JPanel viewContainer;
+    /** The card {@link #showCard} showed last. */
+    private String activeCard = CARD_MATCHMAKING;
 
-    // Matchmaking sub-tabs: the lobby sub-card is the QUEUE VIEW for
-    // everyone (MatchmakingLobbyPanel's gate card with the one "Queue for
-    // Matchmaking" button); the row holds only "Tournaments", stretched over
-    // it and toggling back to the queue view.
-    private static final String SUBCARD_LOBBY = "lobby";
-    private static final String SUBCARD_TOURNAMENTS = "tournaments";
     static final String TOURNAMENTS_OFF_TOOLTIP = "Tournaments are turned off in the plugin settings";
-    private JPanel matchmakingSubNav;
-    private JButton subTabTournamentsBtn;
-    private CardLayout matchmakingSubCards;
-    private JPanel matchmakingSubCardContainer;
     /** Held as a field so the dashboard can wire the profile-click → Player
      *  Lookup tab callback after construction. */
     private MatchmakingLobbyPanel matchmakingLobbyPanel;
 
-    // Plan 10 F.3: the Tournaments sub-tab. The greyed placeholder stays under
-    // SUBCARD_TOURNAMENTS until setTournamentService() wires an available
-    // service, which swaps in the live TournamentsPanel and enables the button.
+    // The Tournaments card: a greyed placeholder until setTournamentService()
+    // wires an available service, which swaps in the live TournamentsPanel
+    // and enables the tab.
     private JPanel tournamentsPlaceholder;
     private TournamentsPanel tournamentsPanel;
-    private boolean tournamentsTabListenerAdded;
-    private String activeMatchmakingSubTab = SUBCARD_LOBBY;
+    /** What {@link #tournamentsPanel} was last told by {@code setShowing}. */
+    private boolean tournamentsShowing;
     private java.util.function.BooleanSupplier tournamentInCombatProvider;
 
     /** Block / Unblock toggle that lives just above {@link #playerNameLabel}.
@@ -201,16 +195,17 @@ public class DashboardPanel extends PluginPanel
         mainPanel.add(communityBox);
         mainPanel.add(Box.createVerticalStrut(8));
 
-        // 2. Two-tab navigation row (Matchmaking / Player Lookup). Tournaments
-        // is now a sub-tab inside Matchmaking, so each top-level button gets
-        // ~half the panel width — no cutoff.
+        // 2. Navigation: Matchmaking / Player Lookup, then Tournaments on its own row.
         JPanel navRow = createTabNavRow();
         navRow.setAlignmentX(LEFT_ALIGNMENT);
         mainPanel.add(navRow);
+        mainPanel.add(Box.createVerticalStrut(4));
+        JPanel tournamentsRow = createTournamentsTabRow();
+        tournamentsRow.setAlignmentX(LEFT_ALIGNMENT);
+        mainPanel.add(tournamentsRow);
         mainPanel.add(Box.createVerticalStrut(6));
 
-        // 3. Card-switched view container. Each tab maps to one card; the
-        // greyed Tournaments tab doesn't have a card and never switches.
+        // 3. Card-switched view container: one card per tab.
         viewCards = new CardLayout();
         viewContainer = new JPanel(viewCards);
         viewContainer.setAlignmentX(LEFT_ALIGNMENT);
@@ -370,16 +365,17 @@ public class DashboardPanel extends PluginPanel
         lookupCard.add(rankTierScrollPane);
         lookupCard.add(topPlayersScrollPane);
 
-        // Matchmaking card hosts its own sub-tab nav + sub-card layout.
         JPanel matchmakingCard = createMatchmakingCard();
+        tournamentsPlaceholder = createTournamentsPlaceholder();
 
         viewContainer.add(matchmakingCard, CARD_MATCHMAKING);
         viewContainer.add(lookupCard, CARD_LOOKUP);
+        viewContainer.add(tournamentsPlaceholder, CARD_TOURNAMENTS);
         mainPanel.add(viewContainer);
 
         // "What are the ranks" / "Top players" behave like top-level tabs: each
         // click reveals its view inside the Player Lookup card AND becomes the
-        // single active underline (deactivating the other three nav buttons).
+        // single active underline (deactivating the other four nav buttons).
         // There's no "Back to stats" — the user returns to stats by clicking
         // Player Lookup (or any other nav button), exactly like switching tabs.
         rankTierToggle.addActionListener(e -> {
@@ -413,9 +409,8 @@ public class DashboardPanel extends PluginPanel
     }
 
     /**
-     * Two-tab nav row (Matchmaking + Player Lookup). Active tab uses a bold
-     * font; inactive uses plain. Tournaments is no longer here — it's a
-     * sub-tab inside Matchmaking now.
+     * Two-tab nav row (Matchmaking + Player Lookup). The Tournaments tab has
+     * its own row below it ({@link #createTournamentsTabRow()}).
      */
     private JPanel createTabNavRow()
     {
@@ -434,6 +429,40 @@ public class DashboardPanel extends PluginPanel
         nav.add(tabLookupBtn);
 
         return nav;
+    }
+
+    /**
+     * The Tournaments tab, alone on its own row under the two top tabs. It
+     * is greyed (with a short "off in plugin settings" flash on click) until
+     * {@link #setTournamentService} wires an available service.
+     */
+    private JPanel createTournamentsTabRow()
+    {
+        JPanel row = new JPanel(new GridLayout(1, 1, 4, 0));
+        row.setName("tournaments-tab-nav");
+        row.setMaximumSize(new Dimension(Integer.MAX_VALUE, 40));
+        row.setPreferredSize(new Dimension(220, 40));
+
+        final String tournamentsDefault = "Tournaments";
+        final String tournamentsClicked = "<html><center>Off in plugin<br>settings</center></html>";
+        tabTournamentsBtn = makeTabButton(tournamentsDefault, false);
+        tabTournamentsBtn.setName("tournaments-tab");
+        tabTournamentsBtn.setEnabled(false);
+        tabTournamentsBtn.setToolTipText(TOURNAMENTS_OFF_TOOLTIP);
+        tabTournamentsBtn.addMouseListener(new java.awt.event.MouseAdapter() {
+            @Override
+            public void mouseClicked(java.awt.event.MouseEvent e) {
+                if (!tabTournamentsBtn.isEnabled() && tabTournamentsBtn.getText().equals(tournamentsDefault)) {
+                    tabTournamentsBtn.setText(tournamentsClicked);
+                    Timer revertTimer = new Timer(15000, ev -> tabTournamentsBtn.setText(tournamentsDefault));
+                    revertTimer.setRepeats(false);
+                    revertTimer.start();
+                }
+            }
+        });
+        tabTournamentsBtn.addActionListener(e -> { foldAltViewsToStats(); setActiveTab(CARD_TOURNAMENTS); });
+        row.add(tabTournamentsBtn);
+        return row;
     }
 
     private static JButton makeTabButton(String label, boolean active)
@@ -477,10 +506,10 @@ public class DashboardPanel extends PluginPanel
      *  exact same height regardless of selection. */
     private static final Color TAB_UNDERLINE_BG = new Color(0x40, 0x40, 0x40);
 
-    /** Single font size shared by every navigation button — top tabs
-     *  ([Matchmaking] / [Player Lookup]) and Matchmaking sub-tabs
-     *  ([Lobby] / [Tournaments]) — and by every community-box button
-     *  ([Discord], [Website], [Top players], [What are the ranks]).
+    /** Single font size shared by every navigation button — the tabs
+     *  ([Matchmaking] / [Player Lookup] / [Tournaments]) — and by every
+     *  community-box button ([Discord], [Website], [Top players],
+     *  [What are the ranks]).
      *  Matches {@code MatchmakingLobbyPanel.GATE_HEADER_PT} so the whole
      *  sidepanel reads as one consistent typographic block.
      *
@@ -510,88 +539,55 @@ public class DashboardPanel extends PluginPanel
     /** Switch the visible top-level card only (no nav re-styling). */
     private void showCard(String key)
     {
+        activeCard = key;
         if (viewCards != null && viewContainer != null) {
             viewCards.show(viewContainer, key);
         }
+        syncTournamentsShowing();
+    }
+
+    /** Tells the live Tournaments panel when it comes on screen (it re-syncs
+     *  and subscribes to the standings) and when it leaves (it unsubscribes). */
+    private void syncTournamentsShowing()
+    {
+        boolean showing = tournamentsPanel != null && CARD_TOURNAMENTS.equals(activeCard);
+        if (tournamentsPanel == null || showing == tournamentsShowing) return;
+        tournamentsShowing = showing;
+        tournamentsPanel.setShowing(showing);
     }
 
     /** Single source of truth for the green active underline: stamps exactly
-     *  one of the four nav buttons (Matchmaking, Player Lookup, Top players,
-     *  What are the ranks) active and the rest inactive — so the accent always
-     *  tracks whatever the user clicked last. */
+     *  one of the five nav buttons (Matchmaking, Player Lookup, Tournaments,
+     *  Top players, What are the ranks) active and the rest inactive — so the
+     *  accent always tracks whatever the user clicked last. */
     private void setActiveNav(JButton active)
     {
         applyTabActiveStyle(tabMatchmakingBtn, active == tabMatchmakingBtn);
         applyTabActiveStyle(tabLookupBtn, active == tabLookupBtn);
+        applyTabActiveStyle(tabTournamentsBtn, active == tabTournamentsBtn);
         applyTabActiveStyle(rankTierToggle, active == rankTierToggle);
         applyTabActiveStyle(topPlayersToggle, active == topPlayersToggle);
     }
 
     /** Switch the visible top-level card and move the active underline to the
-     *  matching top-level tab (Matchmaking or Player Lookup). */
+     *  matching tab (Matchmaking, Player Lookup or Tournaments). */
     private void setActiveTab(String key)
     {
         showCard(key);
-        setActiveNav(CARD_MATCHMAKING.equals(key) ? tabMatchmakingBtn : tabLookupBtn);
+        JButton tab = CARD_MATCHMAKING.equals(key) ? tabMatchmakingBtn
+            : CARD_TOURNAMENTS.equals(key) ? tabTournamentsBtn
+            : tabLookupBtn;
+        setActiveNav(tab);
     }
 
     /**
-     * Matchmaking top-level card. Hosts its own sub-tab row plus a sub-card
-     * layout swapping between the matchmaking panel (the queue view) and
-     * the Tournaments panel (a greyed placeholder until
-     * {@link #setTournamentService} wires a service, or while the flag is
-     * off). The row holds the Tournaments button alone, in one grid cell.
+     * Matchmaking top-level card: the queue view
+     * ({@link MatchmakingLobbyPanel}) filling the card.
      */
     private JPanel createMatchmakingCard()
     {
-        JPanel card = new JPanel();
-        card.setLayout(new BoxLayout(card, BoxLayout.Y_AXIS));
+        JPanel card = new JPanel(new BorderLayout());
         card.setAlignmentX(LEFT_ALIGNMENT);
-
-        // Sub-tab nav row — same 40px height as the top tab nav so the four nav
-        // buttons render at identical heights (they share NAV_FONT_PT).
-        matchmakingSubNav = new JPanel(new GridLayout(1, 1, 4, 0));
-        matchmakingSubNav.setName("matchmaking-subtab-nav");
-        matchmakingSubNav.setMaximumSize(new Dimension(Integer.MAX_VALUE, 40));
-        matchmakingSubNav.setBorder(BorderFactory.createEmptyBorder(0, 0, 4, 0));
-        // CRITICAL: every direct child of `card` (BoxLayout.Y_AXIS) must share the
-        // same alignmentX. The sub-card container below is LEFT_ALIGNMENT, so subNav
-        // must match — otherwise BoxLayout's off-axis alignment math right-shifts the
-        // wider sibling (the sub-card container) into a half-width gutter on the right
-        // and leaves the rest of the card empty. This is the SAME failure mode that
-        // bit MatchmakingLobbyPanel.buildUi() — see leftAlignedStrut() there.
-        matchmakingSubNav.setAlignmentX(LEFT_ALIGNMENT);
-
-        final String tournamentsDefault = "Tournaments";
-        // Set 7: the greyed button's click flash says why it is greyed — the
-        // plugin's own setting — never "check Discord" (tournaments live here).
-        final String tournamentsClicked = "<html><center>Off in plugin<br>settings</center></html>";
-        subTabTournamentsBtn = new JButton(tournamentsDefault);
-        subTabTournamentsBtn.setName("matchmaking-tournaments-tab");
-        subTabTournamentsBtn.setMargin(new Insets(1, 4, 1, 4));
-        // Always BOLD — same rationale as the top tab buttons (see makeTabButton).
-        subTabTournamentsBtn.setFont(subTabTournamentsBtn.getFont().deriveFont(Font.BOLD, NAV_FONT_PT));
-        subTabTournamentsBtn.setEnabled(false);
-        subTabTournamentsBtn.setFocusPainted(false);
-        applyTabActiveStyle(subTabTournamentsBtn, false);
-        subTabTournamentsBtn.setToolTipText(TOURNAMENTS_OFF_TOOLTIP);
-        subTabTournamentsBtn.addMouseListener(new java.awt.event.MouseAdapter() {
-            @Override
-            public void mouseClicked(java.awt.event.MouseEvent e) {
-                if (!subTabTournamentsBtn.isEnabled() && subTabTournamentsBtn.getText().equals(tournamentsDefault)) {
-                    subTabTournamentsBtn.setText(tournamentsClicked);
-                    Timer revertTimer = new Timer(15000, ev -> subTabTournamentsBtn.setText(tournamentsDefault));
-                    revertTimer.setRepeats(false);
-                    revertTimer.start();
-                }
-            }
-        });
-        card.add(matchmakingSubNav);
-
-        // Sub-card container: lobby panel + (currently empty) tournaments placeholder
-        matchmakingSubCards = new CardLayout();
-        matchmakingSubCardContainer = new JPanel(matchmakingSubCards);
-        matchmakingSubCardContainer.setAlignmentX(LEFT_ALIGNMENT);
 
         // Production wiring uses the injected LobbyService (the real
         // WebSocketLobbyService) + the ConfigManager-backed
@@ -619,33 +615,19 @@ public class DashboardPanel extends PluginPanel
             // logged-out prompt during the ~6s startup window.
             matchmakingLobbyPanel.setIsGameLoggedInSupplier(plugin::isGameLoggedIn);
         }
-        matchmakingSubCardContainer.add(matchmakingLobbyPanel, SUBCARD_LOBBY);
-
-        tournamentsPlaceholder = new JPanel();
-        tournamentsPlaceholder.setLayout(new BorderLayout());
-        JLabel tphint = new JLabel(TOURNAMENTS_OFF_TOOLTIP, SwingConstants.CENTER);
-        tphint.setFont(tphint.getFont().deriveFont(Font.ITALIC, 11f));
-        tphint.setForeground(new Color(0x999999));
-        tournamentsPlaceholder.add(tphint, BorderLayout.CENTER);
-        matchmakingSubCardContainer.add(tournamentsPlaceholder, SUBCARD_TOURNAMENTS);
-
-        card.add(matchmakingSubCardContainer);
-        matchmakingSubNav.add(subTabTournamentsBtn);
+        card.add(matchmakingLobbyPanel, BorderLayout.CENTER);
         return card;
     }
 
-    private void setActiveMatchmakingSubTab(String key)
+    /** The Tournaments card while tournaments are off: a one-line hint. */
+    private static JPanel createTournamentsPlaceholder()
     {
-        activeMatchmakingSubTab = key;
-        if (matchmakingSubCards != null && matchmakingSubCardContainer != null) {
-            matchmakingSubCards.show(matchmakingSubCardContainer, key);
-        }
-        // Tournaments only lights up once the live panel exists (Plan 10 F.3);
-        // the greyed placeholder never does.
-        boolean tournamentsActive = tournamentsPanel != null && SUBCARD_TOURNAMENTS.equals(key);
-        applyTabActiveStyle(subTabTournamentsBtn, tournamentsActive);
-        // Shown → re-sync + subscribe to the live standings; hidden → unsubscribe.
-        if (tournamentsPanel != null) tournamentsPanel.setShowing(tournamentsActive);
+        JPanel placeholder = new JPanel(new BorderLayout());
+        JLabel tphint = new JLabel(TOURNAMENTS_OFF_TOOLTIP, SwingConstants.CENTER);
+        tphint.setFont(tphint.getFont().deriveFont(Font.ITALIC, 11f));
+        tphint.setForeground(new Color(0x999999));
+        placeholder.add(tphint, BorderLayout.CENTER);
+        return placeholder;
     }
 
     // -------------------- Plan 10 step 7: queue + tournaments wiring --------------------
@@ -657,31 +639,33 @@ public class DashboardPanel extends PluginPanel
         if (matchmakingLobbyPanel != null) matchmakingLobbyPanel.setQueueService(svc);
     }
 
-    /** Plan 10 F.3: an available service replaces the greyed placeholder
-     *  with the live {@link TournamentsPanel} and enables the sub-tab; an
+    /** An available service replaces the greyed placeholder with the live
+     *  {@link TournamentsPanel} and enables the Tournaments tab; an
      *  unavailable one ({@code enableTournaments} off) restores the greyed
      *  placeholder. Re-entrant: a previous live panel is shut down first. */
     public void setTournamentService(TournamentService svc)
     {
-        if (matchmakingSubCardContainer == null || subTabTournamentsBtn == null) return;
+        if (viewContainer == null || tabTournamentsBtn == null) return;
         if (tournamentsPanel != null)
         {
             tournamentsPanel.shutdown();
-            matchmakingSubCardContainer.remove(tournamentsPanel);
+            viewContainer.remove(tournamentsPanel);
             tournamentsPanel = null;
+            tournamentsShowing = false;
         }
         if (svc == null || !svc.isAvailable())
         {
-            if (tournamentsPlaceholder != null && tournamentsPlaceholder.getParent() != matchmakingSubCardContainer)
+            if (tournamentsPlaceholder != null && tournamentsPlaceholder.getParent() != viewContainer)
             {
-                matchmakingSubCardContainer.add(tournamentsPlaceholder, SUBCARD_TOURNAMENTS);
+                viewContainer.add(tournamentsPlaceholder, CARD_TOURNAMENTS);
             }
-            subTabTournamentsBtn.setEnabled(false);
-            subTabTournamentsBtn.setToolTipText(TOURNAMENTS_OFF_TOOLTIP);
-            // Never leave the user parked on a card that just went away.
-            setActiveMatchmakingSubTab(SUBCARD_TOURNAMENTS.equals(activeMatchmakingSubTab) ? SUBCARD_LOBBY : activeMatchmakingSubTab);
-            matchmakingSubCardContainer.revalidate();
-            matchmakingSubCardContainer.repaint();
+            tabTournamentsBtn.setEnabled(false);
+            tabTournamentsBtn.setToolTipText(TOURNAMENTS_OFF_TOOLTIP);
+            // Never leave the user on a card that just went away.
+            if (CARD_TOURNAMENTS.equals(activeCard)) setActiveTab(CARD_MATCHMAKING);
+            else showCard(activeCard);
+            viewContainer.revalidate();
+            viewContainer.repaint();
             return;
         }
         tournamentsPanel = new TournamentsPanel(svc, () -> lobbyPreferences.getRegion("na-e"));
@@ -690,23 +674,16 @@ public class DashboardPanel extends PluginPanel
         // Set 6: the Report gate is the same Discord login state onLoginStateChanged() reloads on.
         if (discordAuthService != null) tournamentsPanel.setDiscordLoginProvider(discordAuthService::isLoggedIn);
         if (tournamentGearCard != null) tournamentsPanel.setGearCard(tournamentGearCard);
-        if (tournamentsPlaceholder != null) matchmakingSubCardContainer.remove(tournamentsPlaceholder);
-        matchmakingSubCardContainer.add(tournamentsPanel, SUBCARD_TOURNAMENTS);
-        subTabTournamentsBtn.setText("Tournaments");
-        subTabTournamentsBtn.setToolTipText(null);
-        subTabTournamentsBtn.setEnabled(true);
-        if (!tournamentsTabListenerAdded)
-        {
-            // The greyed-state mouse listener is inert once the button is enabled.
-            // A toggle: a second click returns to the queue view.
-            subTabTournamentsBtn.addActionListener(e -> setActiveMatchmakingSubTab(
-                SUBCARD_TOURNAMENTS.equals(activeMatchmakingSubTab) ? SUBCARD_LOBBY : SUBCARD_TOURNAMENTS));
-            tournamentsTabListenerAdded = true;
-        }
-        // Re-assert the current sub-tab so a re-wire while the tab is open shows + syncs the new panel.
-        setActiveMatchmakingSubTab(activeMatchmakingSubTab);
-        matchmakingSubCardContainer.revalidate();
-        matchmakingSubCardContainer.repaint();
+        if (tournamentsPlaceholder != null) viewContainer.remove(tournamentsPlaceholder);
+        viewContainer.add(tournamentsPanel, CARD_TOURNAMENTS);
+        tabTournamentsBtn.setText("Tournaments");
+        tabTournamentsBtn.setToolTipText(null);
+        tabTournamentsBtn.setEnabled(true);
+        // Re-show the current card: the swap can change the visible card, and a
+        // re-wire while the tab is open shows + syncs the new panel.
+        showCard(activeCard);
+        viewContainer.revalidate();
+        viewContainer.repaint();
     }
 
     /** Plan 10 F.3: {@code FightMonitor::isInCombat} — drives the automatic
@@ -744,8 +721,7 @@ public class DashboardPanel extends PluginPanel
     {
         if (tournamentsPanel == null) return;
         foldAltViewsToStats();
-        setActiveTab(CARD_MATCHMAKING);
-        setActiveMatchmakingSubTab(SUBCARD_TOURNAMENTS);
+        setActiveTab(CARD_TOURNAMENTS);
     }
     
     // --- UI Creation Helpers ---

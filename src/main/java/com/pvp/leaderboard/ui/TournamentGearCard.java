@@ -35,6 +35,10 @@ public class TournamentGearCard extends JPanel
     static final String PLACEHOLDER_BANNER = "Placeholder kit — the host's final kit may differ";
     static final String COPIED = "Copied — paste it into gear_sets_catalog.json";
 
+    private static final float LINE_PT = TournamentsPanel.BODY_PT;
+    private static final float ITEM_PT = 14f;
+    /** An item icon's width plus its gap to the text. */
+    private static final int ICON_ROOM_PX = 40;
     private static final Color BG = new Color(0x2b, 0x2b, 0x2b);
     private static final Color DIVIDER = new Color(0x40, 0x40, 0x40);
     private static final Color GREEN = new Color(0x3e, 0xcf, 0x8e);
@@ -153,38 +157,38 @@ public class TournamentGearCard extends JPanel
         GearSet set = v.event.set;
         if (v.verifiedOk())
         {
-            okLine = label("gear-card-ok", "", GREEN, Font.BOLD, 12f);
+            okLine = label("gear-card-ok", "", GREEN, Font.BOLD, LINE_PT);
             add(okLine);
             revalidate();
             repaint();
             return;
         }
-        add(label("gear-card-title", "Required kit: " + escape(set.name), Color.WHITE, Font.BOLD, 13f));
-        if (set.placeholder) add(label("gear-card-placeholder", PLACEHOLDER_BANNER, AMBER, Font.PLAIN, 11f));
-        countdown = label("gear-card-countdown", " ", AMBER, Font.BOLD, 11f);
+        add(label("gear-card-title", "Required kit: " + escape(set.name), Color.WHITE, Font.BOLD, TournamentsPanel.HEADER_PT));
+        if (set.placeholder) add(label("gear-card-placeholder", PLACEHOLDER_BANNER, AMBER, Font.PLAIN, LINE_PT));
+        countdown = label("gear-card-countdown", " ", AMBER, Font.BOLD, LINE_PT);
         add(countdown);
-        if (v.event.arena && !v.atArena) add(label("gear-card-where", AWAY_HINT, MUTED, Font.PLAIN, 11f));
+        if (v.event.arena && !v.atArena) add(label("gear-card-where", AWAY_HINT, MUTED, Font.PLAIN, LINE_PT));
         if (v.kit == null)
         {
-            add(label("gear-card-hint", NEVER_READ_HINT, AMBER, Font.PLAIN, 11f));
+            add(label("gear-card-hint", NEVER_READ_HINT, AMBER, Font.PLAIN, LINE_PT));
             for (GearItem item : set.items)
             {
-                JLabel row = label("gear-card-need-" + item.id, item.qty + " × " + escape(item.name), INFO, Font.PLAIN, 11f);
+                JLabel row = itemLabel("gear-card-need-" + item.id, item.qty + " × " + escape(item.name), "", INFO);
                 icons.apply(row, item.id, item.qty, item.stackable);
                 add(row);
             }
             finish();
             return;
         }
-        if (v.stale()) add(label("gear-card-hint", STALE_HINT, AMBER, Font.PLAIN, 11f));
+        if (v.stale()) add(label("gear-card-hint", STALE_HINT, AMBER, Font.PLAIN, LINE_PT));
         GearDiff d = v.diff;
         add(d.buildOk
-            ? label("gear-card-build", "Build: " + escape(set.buildLabel) + " ✓", GREEN, Font.PLAIN, 11f)
-            : label("gear-card-build", "Pick " + escape(set.buildLabel) + " on the duel screen's Stats tab", RED, Font.BOLD, 11f));
+            ? label("gear-card-build", "Build: " + escape(set.buildLabel) + " ✓", GREEN, Font.PLAIN, LINE_PT)
+            : label("gear-card-build", "Pick " + escape(set.buildLabel) + " on the duel screen's Stats tab", RED, Font.BOLD, LINE_PT));
         for (GearDiff.Row r : d.missing) add(missingRow(r));
         for (GearDiff.Row r : d.extra)
         {
-            JLabel row = label("gear-card-extra-" + r.itemId, "remove: " + (r.need == 0 ? r.have : r.overBy()) + " × " + escape(r.name), AMBER, Font.PLAIN, 11f);
+            JLabel row = itemLabel("gear-card-extra-" + r.itemId, "remove: " + (r.need == 0 ? r.have : r.overBy()) + " × " + escape(r.name), "", AMBER);
             icons.apply(row, r.itemId, Math.max(1, r.need == 0 ? r.have : r.overBy()), r.stackable);
             add(row);
         }
@@ -192,16 +196,16 @@ public class TournamentGearCard extends JPanel
         {
             String book = set.spellbookLabel == null ? set.spellbook : set.spellbookLabel;
             add(d.spellbookOk
-                ? label("gear-card-spellbook", "Spellbook: " + escape(book) + " ✓", GREEN, Font.PLAIN, 11f)
-                : label("gear-card-spellbook", "Spellbook: " + escape(book) + " — switch it in the kit tab's drop-down", RED, Font.BOLD, 11f));
+                ? label("gear-card-spellbook", "Spellbook: " + escape(book) + " ✓", GREEN, Font.PLAIN, LINE_PT)
+                : label("gear-card-spellbook", "Spellbook: " + escape(book) + " — switch it in the kit tab's drop-down", RED, Font.BOLD, LINE_PT));
         }
-        if (d.pouchUnknown) add(label("gear-card-pouch", POUCH_HINT, AMBER, Font.PLAIN, 11f));
+        if (d.pouchUnknown) add(label("gear-card-pouch", POUCH_HINT, AMBER, Font.PLAIN, LINE_PT));
         finish();
     }
 
     private JLabel missingRow(GearDiff.Row r)
     {
-        JLabel row = label("gear-card-missing-" + r.itemId, escape(r.name) + " <font color='#ff6b6b'>" + r.have + " / " + r.need + "</font>", INFO, Font.PLAIN, 11f);
+        JLabel row = itemLabel("gear-card-missing-" + r.itemId, escape(r.name), " <font color='#ff6b6b'>" + r.have + " / " + r.need + "</font>", INFO);
         icons.apply(row, r.itemId, r.need, r.stackable);
         row.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
         row.setToolTipText("Find it in the kit's supplies list (or the bank)");
@@ -223,21 +227,21 @@ public class TournamentGearCard extends JPanel
     {
         GearStatusReporter.View v = current;
         JPanel buttons = new JPanel();
-        buttons.setLayout(new BoxLayout(buttons, BoxLayout.X_AXIS));
+        buttons.setLayout(new BoxLayout(buttons, BoxLayout.Y_AXIS));
         buttons.setOpaque(false);
         buttons.setAlignmentX(LEFT_ALIGNMENT);
         if (v.kit != null)
         {
-            JButton copy = TournamentsPanel.smallButton("Copy my setup");
+            JButton copy = TournamentsPanel.tabButton("Copy my setup");
             copy.setName("gear-card-copy");
             copy.setToolTipText("Copy the kit the plugin read as a gear-set catalog entry");
             copy.addActionListener(e -> onCopy());
             buttons.add(copy);
-            buttons.add(Box.createHorizontalStrut(4));
+            buttons.add(Box.createVerticalStrut(4));
         }
         if (!v.event.arena && v.diff != null && !v.diff.missing.isEmpty())
         {
-            JButton bank = TournamentsPanel.smallButton("Show missing in bank");
+            JButton bank = TournamentsPanel.tabButton("Show missing in bank");
             bank.setName("gear-card-bank");
             bank.addActionListener(e -> { if (actions != null) actions.showMissingInBank(current.missingIds()); });
             buttons.add(bank);
@@ -256,7 +260,7 @@ public class TournamentGearCard extends JPanel
         GearKit kit = current.kit;
         if (kit == null || actions == null) return;
         actions.copySetup(kit);
-        JLabel done = label("gear-card-copied", COPIED, GREEN, Font.PLAIN, 11f);
+        JLabel done = label("gear-card-copied", COPIED, GREEN, Font.PLAIN, LINE_PT);
         for (java.awt.Component c : getComponents())
         {
             if ("gear-card-copied".equals(c.getName())) remove(c);
@@ -274,25 +278,41 @@ public class TournamentGearCard extends JPanel
         String left = prep ? TournamentsPanel.mmss(e.checkUntilEpochS - nowS) : null;
         if (countdown != null)
         {
-            String text = prep ? (e.checkRound > 0 ? "Round " + e.checkRound : "The round") + " starts in " + left + " — your kit must match" : " ";
+            String text = prep ? TournamentInfoCard.wrapEscaped(countdown.getFont(), TournamentInfoCard.TEXT_WIDTH_PX,
+                (e.checkRound > 0 ? "Round " + e.checkRound : "The round") + " starts in " + left + " — your kit must match") : " ";
             if (!text.equals(countdown.getText())) countdown.setText(text);
             countdown.setVisible(prep);
         }
         if (okLine != null)
         {
             String clock = prep ? " · " + (e.checkRound > 0 ? "round " + e.checkRound : "the round") + " starts in " + left : "";
-            String text = "<html>Kit ✓ matches " + escape(e.set.name) + clock + "</html>";
+            String text = TournamentInfoCard.wrapEscaped(okLine.getFont(), TournamentInfoCard.TEXT_WIDTH_PX, "Kit ✓ matches " + escape(e.set.name) + clock);
             if (!text.equals(okLine.getText())) okLine.setText(text);
         }
     }
 
+    /** A line of escaped text, wrapped to the card's width. */
     private static JLabel label(String name, String html, Color fg, int style, float pt)
     {
-        JLabel l = new JLabel("<html>" + html + "</html>");
+        JLabel l = new JLabel();
         l.setName(name);
         l.setForeground(fg);
         l.setFont(l.getFont().deriveFont(style, pt));
         l.setAlignmentX(LEFT_ALIGNMENT);
+        l.setText(TournamentInfoCard.wrapEscaped(l.getFont(), TournamentInfoCard.TEXT_WIDTH_PX, html));
+        return l;
+    }
+
+    /** An item row: escaped text wrapped to the width left beside its item
+     *  icon, then {@code suffix} markup (may be empty) on the last line. */
+    private static JLabel itemLabel(String name, String escaped, String suffix, Color fg)
+    {
+        JLabel l = new JLabel();
+        l.setName(name);
+        l.setForeground(fg);
+        l.setFont(l.getFont().deriveFont(Font.PLAIN, ITEM_PT));
+        l.setAlignmentX(LEFT_ALIGNMENT);
+        l.setText("<html>" + TournamentInfoCard.wrapInner(l.getFont(), TournamentInfoCard.TEXT_WIDTH_PX - ICON_ROOM_PX, escaped) + suffix + "</html>");
         return l;
     }
 

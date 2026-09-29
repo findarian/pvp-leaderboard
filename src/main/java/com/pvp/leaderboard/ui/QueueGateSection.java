@@ -1,7 +1,6 @@
 package com.pvp.leaderboard.ui;
 
 import com.pvp.leaderboard.lobby.BuildType;
-import com.pvp.leaderboard.lobby.LobbyJoinGate;
 import com.pvp.leaderboard.lobby.LobbyPreferences;
 import com.pvp.leaderboard.lobby.Style;
 import com.pvp.leaderboard.queue.QueuePrefs;
@@ -16,44 +15,35 @@ import javax.swing.JComboBox;
 import javax.swing.JComponent;
 import javax.swing.JLabel;
 import javax.swing.JPanel;
-import javax.swing.JToggleButton;
-import javax.swing.SwingConstants;
 import java.awt.Color;
 import java.awt.Dimension;
 import java.awt.Font;
 import java.awt.Insets;
-import java.util.Map;
-import java.util.Set;
 
 public class QueueGateSection extends JPanel
 {
     public static final String NAME_SECTION = "matchmaking-queue-section";
+    public static final String NAME_WAIT_TITLE = "matchmaking-queue-wait-title";
     public static final String NAME_WAIT = "matchmaking-queue-wait";
-    public static final String NAME_RANGE = "matchmaking-queue-range";
+    public static final String NAME_RANGE = QueueRangeSlider.NAME;
     public static final String NAME_BUTTON = "matchmaking-queue-button";
-    public static final String NAME_HINT = "matchmaking-queue-hint";
-    /** Set 7: the Options toggle and the panel it shows / hides. */
-    public static final String NAME_OPTIONS = "matchmaking-queue-options";
-    public static final String NAME_OPTIONS_PANEL = "matchmaking-queue-options-panel";
 
     /** The one matchmaking action (operator 2026-09-22: exactly this text). */
     static final String BUTTON_TEXT = "Queue for Matchmaking";
-    /** The hint under the disabled button until the owner names a cause. */
-    static final String DEFAULT_HINT = "Pick exactly one style and one build to queue.";
+    static final String WAIT_TITLE = "Willing to wait";
+
+    /** Every queue join goes out with this style and build. */
+    public static final Style QUEUE_STYLE = Style.NH;
+    public static final BuildType QUEUE_BUILD = BuildType.MAIN;
 
     /** The wait preference a fresh install queues with (5 min, AS-64). */
     static final int DEFAULT_WAIT_S = 300;
     private static final Color GREEN = new Color(0x2e, 0x7d, 0x32);
-    private static final Color GREY = new Color(0x55, 0x55, 0x55);
-    private static final Color MUTED = new Color(0x9a, 0x9a, 0x9a);
 
     private final LobbyPreferences prefs;
     private final JComboBox<String> waitCombo;
-    private final JToggleButton rangeToggle;
+    private final QueueRangeSlider range;
     private final JButton queueBtn;
-    private final JLabel hint;
-    private final JButton optionsBtn;
-    private final JPanel optionsPanel;
     /** Told after a <b>local</b> wait pick / rank-range pick so the owner
      *  can write that ONE key of the shared row (G-2). Sending only the
      *  key the user touched is what stops a wait change from overwriting a
@@ -61,7 +51,7 @@ public class QueueGateSection extends JPanel
      *  is running. */
     private Runnable onWaitChanged;
     private Runnable onRangeChanged;
-    /** Suppresses {@link #onPrefsChanged} while a server push is applied,
+    /** Suppresses {@link #announce} while a server push is applied,
      *  so a Discord-side change is not immediately echoed back. */
     private boolean applyingPush;
 
@@ -75,14 +65,28 @@ public class QueueGateSection extends JPanel
         // Bottom gap lives inside the block so hiding the block hides the gap too.
         setBorder(BorderFactory.createEmptyBorder(0, 0, 12, 0));
 
-        JLabel header = new JLabel("Matchmaking queue");
-        header.setFont(header.getFont().deriveFont(Font.BOLD, headerPt));
-        header.setAlignmentX(LEFT_ALIGNMENT);
-        add(header);
-        add(strut(6));
+        JLabel waitTitle = new JLabel(WAIT_TITLE);
+        waitTitle.setName(NAME_WAIT_TITLE);
+        waitTitle.setFont(waitTitle.getFont().deriveFont(Font.BOLD, headerPt));
+        waitTitle.setAlignmentX(LEFT_ALIGNMENT);
+        add(waitTitle);
+        add(strut(4));
 
-        // Set 7: the button leads — it is the one matchmaking action.
-        // Same treatment as the gate's "Go to lobby" CTA so the two read as siblings.
+        waitCombo = new JComboBox<>(waitLabels());
+        waitCombo.setName(NAME_WAIT);
+        waitCombo.setSelectedIndex(indexOfWait(this.prefs.getQueueWaitPrefS(DEFAULT_WAIT_S)));
+        waitCombo.setFont(waitCombo.getFont().deriveFont(Font.PLAIN, headerPt));
+        waitCombo.setMaximumSize(new Dimension(Integer.MAX_VALUE, 40));
+        waitCombo.setAlignmentX(LEFT_ALIGNMENT);
+        waitCombo.setToolTipText("Maximum time in the queue — shared with the Discord queue");
+        waitCombo.addActionListener(e ->
+        {
+            this.prefs.setQueueWaitPrefS(waitPrefS());
+            announce(onWaitChanged);
+        });
+        add(waitCombo);
+        add(strut(14));
+
         queueBtn = new JButton(BUTTON_TEXT);
         queueBtn.setName(NAME_BUTTON);
         queueBtn.setFont(queueBtn.getFont().deriveFont(Font.BOLD, 16f));
@@ -91,113 +95,17 @@ public class QueueGateSection extends JPanel
         queueBtn.setMaximumSize(new Dimension(Integer.MAX_VALUE, 44));
         queueBtn.setFocusPainted(false);
         queueBtn.setForeground(Color.WHITE);
+        queueBtn.setBackground(GREEN);
         queueBtn.setOpaque(true);
         queueBtn.setBorderPainted(false);
         queueBtn.addActionListener(e -> { if (onQueue != null) onQueue.run(); });
         add(queueBtn);
-        add(strut(4));
 
-        hint = new JLabel("<html>" + DEFAULT_HINT + "</html>");
-        hint.setName(NAME_HINT);
-        hint.setFont(hint.getFont().deriveFont(Font.PLAIN, 11f));
-        hint.setForeground(MUTED);
-        hint.setAlignmentX(LEFT_ALIGNMENT);
-        add(hint);
-        add(strut(4));
-
-        // Set 7: the two pickers collapse under "Options" so the queue view
-        // stays short; the collapsed label still says what they hold.
-        optionsBtn = new JButton();
-        optionsBtn.setName(NAME_OPTIONS);
-        optionsBtn.setFont(optionsBtn.getFont().deriveFont(Font.PLAIN, 12f));
-        optionsBtn.setMargin(new Insets(2, 6, 2, 6));
-        optionsBtn.setAlignmentX(LEFT_ALIGNMENT);
-        optionsBtn.setMaximumSize(new Dimension(Integer.MAX_VALUE, 26));
-        optionsBtn.setHorizontalAlignment(SwingConstants.LEFT);
-        optionsBtn.setFocusPainted(false);
-        optionsBtn.setToolTipText("Wait time and rank range for the queue");
-        add(optionsBtn);
-
-        optionsPanel = new JPanel();
-        optionsPanel.setName(NAME_OPTIONS_PANEL);
-        optionsPanel.setLayout(new BoxLayout(optionsPanel, BoxLayout.Y_AXIS));
-        optionsPanel.setAlignmentX(LEFT_ALIGNMENT);
-        optionsPanel.setOpaque(false);
-        optionsPanel.setBorder(BorderFactory.createEmptyBorder(6, 0, 0, 0));
-
-        rangeToggle = new JToggleButton("Rank range");
-        rangeToggle.setName(NAME_RANGE);
-        rangeToggle.setSelected(this.prefs.getQueueRangeEnabled());
-        rangeToggle.setFont(rangeToggle.getFont().deriveFont(Font.BOLD, 13f));
-        rangeToggle.setMargin(new Insets(4, 10, 4, 10));
-        rangeToggle.setAlignmentX(LEFT_ALIGNMENT);
-        rangeToggle.setMaximumSize(new Dimension(Integer.MAX_VALUE, 32));
-        rangeToggle.setHorizontalAlignment(SwingConstants.LEFT);
-        rangeToggle.setFocusPainted(false);
-        rangeToggle.setToolTipText("Only match players inside your lobby rank range (the search still widens inside it)");
-        rangeToggle.addActionListener(e ->
-        {
-            this.prefs.setQueueRangeEnabled(rangeToggle.isSelected());
-            refreshOptionsLabel();
-            announce(onRangeChanged);
-        });
-        optionsPanel.add(rangeToggle);
-        optionsPanel.add(strut(4));
-
-        JPanel waitRow = new JPanel();
-        waitRow.setLayout(new BoxLayout(waitRow, BoxLayout.X_AXIS));
-        waitRow.setAlignmentX(LEFT_ALIGNMENT);
-        waitRow.setOpaque(false);
-        waitRow.setMaximumSize(new Dimension(Integer.MAX_VALUE, 32));
-        JLabel waitLabel = new JLabel("Willing to wait ");
-        waitLabel.setFont(waitLabel.getFont().deriveFont(Font.BOLD, 13f));
-        waitRow.add(waitLabel);
-        waitCombo = new JComboBox<>(waitLabels());
-        waitCombo.setName(NAME_WAIT);
-        waitCombo.setSelectedIndex(indexOfWait(this.prefs.getQueueWaitPrefS(DEFAULT_WAIT_S)));
-        waitCombo.setFont(waitCombo.getFont().deriveFont(Font.PLAIN, 13f));
-        waitCombo.setMaximumSize(new Dimension(Integer.MAX_VALUE, 32));
-        waitCombo.setToolTipText("Maximum time in the queue — shared with the Discord queue");
-        waitCombo.addActionListener(e ->
-        {
-            this.prefs.setQueueWaitPrefS(waitPrefS());
-            refreshOptionsLabel();
-            announce(onWaitChanged);
-        });
-        waitRow.add(waitCombo);
-        optionsPanel.add(waitRow);
-        optionsPanel.setVisible(false);
-        add(optionsPanel);
-
-        optionsBtn.addActionListener(e ->
-        {
-            optionsPanel.setVisible(!optionsPanel.isVisible());
-            refreshOptionsLabel();
-            revalidate();
-            repaint();
-        });
-        refreshOptionsLabel();
-
-        setQueueEnabled(false);
-    }
-
-    /** "Options ▾" while the pickers show; collapsed, the label carries the
-     *  two picks ("Options ▸ 5 min · any rank") so hiding them hides nothing. */
-    private void refreshOptionsLabel()
-    {
-        if (optionsPanel.isVisible())
-        {
-            optionsBtn.setText("Options ▾");
-            return;
-        }
-        optionsBtn.setText("Options ▸  " + QueueText.waitLabel(waitPrefS()) + " · "
-            + (rangeToggle.isSelected() ? "rank range on" : "any rank"));
-    }
-
-    /** {@code true} while the wait / range pickers are expanded. */
-    public boolean optionsShown()
-    {
-        return optionsPanel.isVisible();
+        // The owner places the rank-range row (above the gate's title).
+        boolean rangeOn = this.prefs.getQueueRangeEnabled();
+        range = new QueueRangeSlider(rangeOn ? this.prefs.getQueueMinRankIdx(0) : 0,
+            rangeOn ? this.prefs.getQueueMaxRankIdx(-1) : -1);
+        range.setOnCommit(this::onRangeCommitted);
     }
 
     private static JComponent strut(int height)
@@ -234,31 +142,10 @@ public class QueueGateSection extends JPanel
 
     // ---------------------------------------------------------------- state
 
-    /** Relabels the toggle with the lobby slider's current bounds. */
-    public void setRangeLabels(String minLabel, String maxLabel)
+    /** The rank-range row this section keeps in step with the prefs. */
+    public QueueRangeSlider rangeSlider()
     {
-        rangeToggle.setText("Rank range: " + minLabel + " – " + maxLabel);
-    }
-
-    /** Green when the picks allow a queue, grey (with the hint) otherwise. */
-    public void setQueueEnabled(boolean enabled)
-    {
-        queueBtn.setEnabled(enabled);
-        queueBtn.setBackground(enabled ? GREEN : GREY);
-        hint.setVisible(!enabled);
-    }
-
-    /** The reason shown under a disabled button — the owner names what is
-     *  missing (one style, one build, a locked style); {@code null} puts
-     *  the generic sentence back. */
-    public void setHint(String text)
-    {
-        hint.setText("<html>" + (text == null || text.trim().isEmpty() ? DEFAULT_HINT : text) + "</html>");
-    }
-
-    public boolean isQueueEnabled()
-    {
-        return queueBtn.isEnabled();
+        return range;
     }
 
     /** The picked wait preference in seconds (one of the shared choices). */
@@ -269,9 +156,32 @@ public class QueueGateSection extends JPanel
         return QueueService.WAIT_PREF_CHOICES[i];
     }
 
+    /** {@code true} while the slider is narrower than every rank. */
     public boolean rangeEnabled()
     {
-        return rangeToggle.isSelected();
+        return range.narrowed();
+    }
+
+    public int rangeMinIdx()
+    {
+        return range.low();
+    }
+
+    public int rangeMaxIdx()
+    {
+        return range.high();
+    }
+
+    private void onRangeCommitted()
+    {
+        boolean on = range.narrowed();
+        prefs.setQueueRangeEnabled(on);
+        if (on)
+        {
+            prefs.setQueueMinRankIdx(range.low());
+            prefs.setQueueMaxRankIdx(range.high());
+        }
+        announce(onRangeChanged);
     }
 
     // ------------------------------------------------- shared prefs (G-2)
@@ -314,15 +224,18 @@ public class QueueGateSection extends JPanel
             }
             if (incoming.rangeEnabled != null)
             {
-                rangeToggle.setSelected(incoming.rangeEnabled);
                 prefs.setQueueRangeEnabled(incoming.rangeEnabled);
                 if (incoming.rangeEnabled)
                 {
                     prefs.setQueueMinRankIdx(incoming.minRankIdx);
                     prefs.setQueueMaxRankIdx(incoming.maxRankIdx);
+                    range.setRange(incoming.minRankIdx, incoming.maxRankIdx);
+                }
+                else
+                {
+                    range.setRange(0, -1);
                 }
             }
-            refreshOptionsLabel();
         }
         finally
         {
@@ -330,7 +243,7 @@ public class QueueGateSection extends JPanel
         }
     }
 
-    /** Back to the defaults (5 min, range off) — Reset Options wipes the
+    /** Back to the defaults (5 min, every rank) — Reset Options wipes the
      *  persisted prefs, so the widgets and the store are re-aligned here. */
     public void reset()
     {
@@ -341,41 +254,13 @@ public class QueueGateSection extends JPanel
         try
         {
             waitCombo.setSelectedIndex(indexOfWait(DEFAULT_WAIT_S));
-            rangeToggle.setSelected(false);
+            range.setRange(0, -1);
             prefs.setQueueWaitPrefS(DEFAULT_WAIT_S);
             prefs.setQueueRangeEnabled(false);
-            refreshOptionsLabel();
         }
         finally
         {
             applyingPush = false;
         }
-    }
-
-    // ---------------------------------------------------------------- the rule
-
-    public static boolean eligible(Set<Style> styles, Set<BuildType> builds, Map<Style, Integer> counts)
-    {
-        Style style = soleStyle(styles);
-        if (!isQueueStyle(style) || soleBuild(builds) == null || counts == null) return false;
-        Integer count = counts.get(style);
-        return count != null && LobbyJoinGate.isUnlocked(count);
-    }
-
-    public static boolean isQueueStyle(Style style)
-    {
-        return style == Style.NH;
-    }
-
-    /** The one selected style, or {@code null} unless exactly one is picked. */
-    public static Style soleStyle(Set<Style> styles)
-    {
-        return styles != null && styles.size() == 1 ? styles.iterator().next() : null;
-    }
-
-    /** The one selected build, or {@code null} unless exactly one is picked. */
-    public static BuildType soleBuild(Set<BuildType> builds)
-    {
-        return builds != null && builds.size() == 1 ? builds.iterator().next() : null;
     }
 }

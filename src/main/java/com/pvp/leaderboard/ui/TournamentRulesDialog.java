@@ -38,13 +38,15 @@ final class TournamentRulesDialog extends JPanel
         setName(NAME);
         JPanel top = new JPanel();
         top.setLayout(new BoxLayout(top, BoxLayout.Y_AXIS));
-        JLabel title = new JLabel("<html>" + TournamentsPanel.escape(eventName == null ? "" : eventName) + " · Rules</html>");
+        JLabel title = new JLabel();
         title.setName("tournament-rules-title");
-        title.setFont(title.getFont().deriveFont(Font.BOLD, 15f));
+        title.setFont(title.getFont().deriveFont(Font.BOLD, TournamentsPanel.HEADER_PT));
+        title.setText(TournamentInfoCard.wrapEscaped(title.getFont(), TournamentInfoCard.TEXT_WIDTH_PX,
+            TournamentsPanel.escape(eventName == null ? "" : eventName) + " · Rules"));
         title.setAlignmentX(LEFT_ALIGNMENT);
         top.add(title);
         JLabel caption = new JLabel("Version " + rules.version + " · " + rules.sections.size() + (rules.sections.size() == 1 ? " section" : " sections"));
-        caption.setFont(caption.getFont().deriveFont(Font.PLAIN, 11f));
+        caption.setFont(caption.getFont().deriveFont(Font.PLAIN, 14f));
         caption.setForeground(MUTED);
         caption.setAlignmentX(LEFT_ALIGNMENT);
         top.add(caption);
@@ -61,7 +63,7 @@ final class TournamentRulesDialog extends JPanel
             {
                 JLabel heading = new JLabel(s.heading);
                 heading.setName("tournament-rules-heading-" + i);
-                heading.setFont(heading.getFont().deriveFont(Font.BOLD, 13f));
+                heading.setFont(heading.getFont().deriveFont(Font.BOLD, TournamentsPanel.HEADER_PT));
                 heading.setAlignmentX(LEFT_ALIGNMENT);
                 heading.setBorder(BorderFactory.createEmptyBorder(i == 0 ? 0 : 8, 0, 2, 0));
                 body.add(heading);
@@ -76,7 +78,7 @@ final class TournamentRulesDialog extends JPanel
                 lines.setWrapStyleWord(true);
                 lines.setOpaque(false);
                 lines.setForeground(TEXT);
-                lines.setFont(lines.getFont().deriveFont(Font.PLAIN, 12f));
+                lines.setFont(lines.getFont().deriveFont(Font.PLAIN, TournamentsPanel.BODY_PT));
                 lines.setBorder(BorderFactory.createEmptyBorder(0, 0, 0, 0));
                 lines.setAlignmentX(LEFT_ALIGNMENT);
                 body.add(lines);
@@ -91,18 +93,17 @@ final class TournamentRulesDialog extends JPanel
         add(scroll, BorderLayout.CENTER);
 
         JPanel footer = new JPanel();
-        footer.setLayout(new BoxLayout(footer, BoxLayout.X_AXIS));
-        footer.setBorder(BorderFactory.createEmptyBorder(4, 0, 0, 0));
-        JButton back = TournamentsPanel.smallButton("Back");
-        back.setName("tournament-rules-back");
-        back.addActionListener(e -> onBack.run());
-        footer.add(back);
-        footer.add(Box.createHorizontalStrut(4));
-        JButton site = TournamentsPanel.smallButton("Open on the site");
+        footer.setLayout(new BoxLayout(footer, BoxLayout.Y_AXIS));
+        footer.setBorder(BorderFactory.createEmptyBorder(6, 0, 0, 0));
+        JButton site = TournamentsPanel.tabButton("Open on the site");
         site.setName("tournament-rules-open-site");
         site.addActionListener(e -> onOpenSite.run());
         footer.add(site);
-        footer.add(Box.createHorizontalGlue());
+        footer.add(Box.createVerticalStrut(4));
+        JButton back = TournamentsPanel.tabButton("Back");
+        back.setName("tournament-rules-back");
+        back.addActionListener(e -> onBack.run());
+        footer.add(back);
         add(footer, BorderLayout.SOUTH);
     }
 }

@@ -12,46 +12,28 @@ import java.awt.Color;
 import java.awt.Dimension;
 import java.awt.Font;
 import java.awt.Insets;
-import java.util.function.IntFunction;
 
 /**
- * The "Searching…" card of the matchmaking queue (Plan 10 F.1, mockup v4
- * card 2): elapsed / limit, style · build, the rank range when one is set,
- * the current ±rating window with the next expansion, the matches-found
- * counters, and the <b>Expand matchmaking range</b> / <b>Leave queue</b>
- * buttons. Pure rendering of a {@link QueueState}; the owning
- * {@link MatchmakingLobbyPanel} sends the cmds.
+ * The "Searching…" card of the matchmaking queue: the title and the
+ * elapsed / limit clock, then the <b>Expand matchmaking range</b> and
+ * <b>Leave queue</b> buttons. Pure rendering of a {@link QueueState}; the
+ * owning {@link MatchmakingLobbyPanel} sends the cmds.
  */
 public class QueueSearchingPanel extends JPanel
 {
     public static final String NAME_TITLE = "queue-title";
     public static final String NAME_CLOCK = "queue-clock";
-    public static final String NAME_STYLE = "queue-style";
-    public static final String NAME_RANGE = "queue-range";
-    public static final String NAME_WINDOW = "queue-window";
-    public static final String NAME_COUNTERS = "queue-counters";
     public static final String NAME_EXPAND = "queue-expand";
     public static final String NAME_LEAVE = "queue-leave";
 
-    /** The window a fresh waiter searches in — ±100 for the first 30 s
-     *  ({@code matchmaking_queue.window_for_elapsed}); anything wider means
-     *  the schedule has started doubling (G-13). */
-    static final int OPENING_WINDOW = 100;
-
     private final JLabel title = new JLabel("Searching…");
     private final JLabel clock = new JLabel(" ");
-    private final JLabel style = new JLabel(" ");
-    private final JLabel range = new JLabel(" ");
-    private final JLabel window = new JLabel(" ");
-    private final JLabel counters = new JLabel(" ");
     private final JButton expand = new JButton("Expand matchmaking range");
     private final JButton leave = new JButton("Leave queue");
-    private final IntFunction<String> rankLabel;
     private QueueState last;
 
-    public QueueSearchingPanel(IntFunction<String> rankLabel, Runnable onExpand, Runnable onLeave)
+    public QueueSearchingPanel(Runnable onExpand, Runnable onLeave)
     {
-        this.rankLabel = rankLabel == null ? Integer::toString : rankLabel;
         setLayout(new BoxLayout(this, BoxLayout.Y_AXIS));
         setBorder(BorderFactory.createEmptyBorder(18, 8, 18, 8));
         title.setName(NAME_TITLE);
@@ -61,16 +43,6 @@ public class QueueSearchingPanel extends JPanel
         clock.setName(NAME_CLOCK);
         clock.setFont(clock.getFont().deriveFont(Font.BOLD, 16f));
         add(left(clock));
-        add(Box.createVerticalStrut(10));
-        style.setName(NAME_STYLE);
-        add(left(style));
-        range.setName(NAME_RANGE);
-        add(left(range));
-        window.setName(NAME_WINDOW);
-        add(left(window));
-        counters.setName(NAME_COUNTERS);
-        counters.setForeground(new Color(0x9a, 0x9a, 0x9a));
-        add(left(counters));
         add(Box.createVerticalStrut(12));
         expand.setName(NAME_EXPAND);
         expand.setFont(expand.getFont().deriveFont(Font.BOLD, 14f));
@@ -82,10 +54,6 @@ public class QueueSearchingPanel extends JPanel
         expand.setFocusPainted(false);
         expand.addActionListener(e -> { if (onExpand != null) onExpand.run(); });
         add(left(expand));
-        JLabel hint = new JLabel("<html>Opens the search to everyone in your style; can be changed any time.</html>");
-        hint.setFont(hint.getFont().deriveFont(Font.PLAIN, 11f));
-        hint.setForeground(new Color(0x9a, 0x9a, 0x9a));
-        add(left(hint));
         add(Box.createVerticalStrut(10));
         leave.setName(NAME_LEAVE);
         leave.setFont(leave.getFont().deriveFont(Font.BOLD, 14f));
@@ -110,40 +78,11 @@ public class QueueSearchingPanel extends JPanel
     }
 
     /** Re-render from a fresh {@code queue/state}. */
-    public void render(QueueState s, String styleLabel, String buildLabel)
+    public void render(QueueState s)
     {
         last = s;
-        boolean anyone = s.expanded || s.window == null;
-        // G-13: the operator's phrase is for the moment the ±100 window
-        // STARTS DOUBLING (mockup card 2 note), not only for the Expand
-        // button. A rank-range search widens inside the range, so it keeps
-        // the plain title; pressing Expand drops the range, so it wins.
-        boolean widening = s.expanded
-            || (!s.hasRankRange() && (s.window == null || s.window > OPENING_WINDOW));
-        title.setText(widening ? "Expanding matchmaking range…" : "Searching…");
         clock.setText(mmss(s.elapsedS) + " / " + mmss(s.waitPrefS));
-        style.setText("Style " + styleLabel + " · " + buildLabel);
-        if (s.hasRankRange())
-        {
-            range.setText("Looking in " + rankLabel.apply(s.rankMinIdx) + " – " + rankLabel.apply(s.rankMaxIdx));
-            range.setVisible(true);
-        }
-        else
-        {
-            range.setText(" ");
-            range.setVisible(false);
-        }
-        if (anyone)
-        {
-            window.setText("Searching anyone in " + styleLabel);
-        }
-        else
-        {
-            String next = s.nextExpandInS == null ? "" : " (next " + Math.min(s.window * 2, 800) + " in " + s.nextExpandInS + " s)";
-            window.setText("Within " + s.window + " rating" + next);
-        }
-        counters.setText("Matches found " + s.matchesLastHour + " last hour · " + s.matchesToday + " today");
-        expand.setVisible(!anyone);
+        expand.setVisible(!(s.expanded || s.window == null));
         revalidate();
         repaint();
     }

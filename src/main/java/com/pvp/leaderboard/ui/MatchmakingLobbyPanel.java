@@ -33,7 +33,6 @@ import java.awt.event.MouseEvent;
 import java.awt.event.MouseListener;
 import java.util.ArrayList;
 import java.util.Collections;
-import java.util.EnumMap;
 import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -149,10 +148,9 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
     /** Default region used when the user hasn't explicitly picked one yet. */
     private static final String DEFAULT_REGION = "NA-E";
 
-    /** Starts empty so first-time users see every style toggle in the
-     *  "not picked" state. {@link #resetGateOptions()} returns to this
-     *  same empty state; the queue button stays disabled while it is
-     *  empty (see {@link #refreshQueueButton()}). */
+    /** Restored from the prefs; {@link #resetGateOptions()} returns to this
+     *  same empty state. The queue does not read it (every queue join is
+     *  {@link QueueGateSection#QUEUE_STYLE}). */
     private final Set<Style> selectedStyles = EnumSet.noneOf(Style.class);
     /** The user's own region — picked once at the gate. Surfaced as the
      *  region chip on incoming-invite cards' Meet At view (so the receiver
@@ -191,13 +189,8 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
     private JLabel presenceLabel;
     private JLabel currentStyleLabel;
 
-    /** Gate widgets held as fields so {@link #resetGateOptions()} can clear
-     *  their visual state in addition to clearing the backing model. The
-     *  gate panel itself is built once at construction time and re-shown
-     *  via CardLayout, so the toggles persist their selected state across
-     *  visits unless we explicitly desync them. */
-    private final Map<Style, JToggleButton> styleToggles = new EnumMap<>(Style.class);
-    private final Map<BuildType, JToggleButton> buildToggles = new EnumMap<>(BuildType.class);
+    /** Held as a field so {@link #resetGateOptions()} can put the region
+     *  back to the default. */
     private JComboBox<String> regionCombo;
 
     // -------------------- queue view --------------------
@@ -212,9 +205,12 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
      *  one (the plugin does, config-gated); the gate hides the queue block
      *  while it is inert. */
     private QueueService queueService = new NoOpQueueService();
-    /** The gate's queue block (wait picker, rank-range toggle, queue
-     *  button); visibility follows {@link QueueService#isAvailable()}. */
+    /** The gate's queue block (wait picker, queue button); visibility
+     *  follows {@link QueueService#isAvailable()}. */
     private QueueGateSection queueSection;
+    /** Holds the queue section's rank-range slider above the gate title;
+     *  shown with the queue block while logged in. */
+    private JPanel queueRangeHolder;
     /** The {@link #CARD_QUEUE} card; ticked at 1 Hz by
      *  {@link #onFightTick()} while it is the visible card. */
     private QueueSearchingPanel queueCard;
@@ -474,13 +470,6 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
 
     private final Runnable gateListener = this::onJoinGateChanged;
 
-    /** Gate UI elements held as fields so the gate-listener callback can
-     *  re-render them without rebuilding the whole gate panel. Built
-     *  lazily inside {@link #buildStyleGate()}; {@code null} only during
-     *  the brief window before the gate constructs. */
-    private JLabel gateMatchCountStatusLabel;
-    private JButton gateMatchCountRefreshBtn;
-
     /** Notice shown <i>in lieu of</i> the gate when the user isn't
      *  logged into OSRS. Driven by {@link LobbyJoinGate#isLoggedIn()}
      *  via {@link #applyLoginGateState()}; flips on/off whenever the
@@ -488,7 +477,7 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
     private JLabel gateLoggedOutNotice;
 
     /** Sub-panel that holds every gate widget below the title (region
-     *  picker, style/build toggles, smurf-guard row, queue block).
+     *  picker, queue block).
      *  Hidden as one unit when
      *  {@link LobbyJoinGate#isLoggedIn()} is {@code false} so the user
      *  sees a clean "Please log into the game" notice instead of a
@@ -657,8 +646,7 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         rootCardHost.add(fightSetupContainer, CARD_FIGHT);
         // Plan 10 F.1: the queue's Searching card. The two buttons route
         // straight to the transport; the card itself only renders.
-        queueCard = new QueueSearchingPanel(MatchmakingLobbyPanel::rankLabelAt,
-            () -> queueService.expandRange(), () -> queueService.leave());
+        queueCard = new QueueSearchingPanel(() -> queueService.expandRange(), () -> queueService.leave());
         queueCard.setName(CARD_QUEUE);
         rootCardHost.add(queueCard, CARD_QUEUE);
         JPanel centre = new JPanel(new BorderLayout());
@@ -692,15 +680,26 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
     // -------------------- UI construction --------------------
 
     /**
-     * The queue view. The user picks their own region (single-select
-     * dropdown), fight styles and account builds; the queue button stays
-     * disabled until the picks suit the queue.
+     * The queue view: the rank-range slider on top, then "Set up
+     * matchmaking" with the user's region, the wait time and the one queue
+     * button. The queue goes out as {@link QueueGateSection#QUEUE_STYLE} +
+     * {@link QueueGateSection#QUEUE_BUILD}; there is nothing else to pick.
      */
     private JPanel buildStyleGate()
     {
         JPanel gate = new JPanel();
         gate.setLayout(new BoxLayout(gate, BoxLayout.Y_AXIS));
         gate.setBorder(BorderFactory.createEmptyBorder(18, 8, 18, 8));
+
+        // Built first: its rank-range slider sits above the title.
+        queueSection = new QueueGateSection(prefs, GATE_HEADER_PT, this::onQueueClicked);
+        queueRangeHolder = new JPanel(new BorderLayout());
+        queueRangeHolder.setOpaque(false);
+        queueRangeHolder.setAlignmentX(LEFT_ALIGNMENT);
+        queueRangeHolder.setBorder(BorderFactory.createEmptyBorder(0, 0, 12, 0));
+        queueRangeHolder.add(queueSection.rangeSlider(), BorderLayout.CENTER);
+        queueRangeHolder.setMaximumSize(new Dimension(Integer.MAX_VALUE, queueRangeHolder.getPreferredSize().height));
+        gate.add(queueRangeHolder);
 
         JLabel title = new JLabel("Set up matchmaking");
         title.setFont(title.getFont().deriveFont(Font.BOLD, GATE_HEADER_PT));
@@ -774,167 +773,10 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         gateContent.add(regionCombo);
         gateContent.add(leftAlignedStrut(14));
 
-        // ---- Style multi-select ----
-        // Header alone — the "NH is on by default…" subtitle was removed per spec
-        // (the multi-select toggles + the single-style enforcement are obvious
-        // from the highlighted state alone).
-        JLabel styleTitle = new JLabel("Pick your styles");
-        styleTitle.setFont(styleTitle.getFont().deriveFont(Font.BOLD, GATE_HEADER_PT));
-        styleTitle.setAlignmentX(LEFT_ALIGNMENT);
-        gateContent.add(styleTitle);
-        gateContent.add(leftAlignedStrut(8));
-
-        styleToggles.clear();
-        for (Style s : Style.values())
-        {
-            JToggleButton tog = new JToggleButton(s.label);
-            tog.setSelected(selectedStyles.contains(s));
-            tog.setFont(tog.getFont().deriveFont(Font.BOLD, 15f));
-            tog.setMargin(new Insets(6, 12, 6, 12));
-            tog.setAlignmentX(LEFT_ALIGNMENT);
-            tog.setMaximumSize(new Dimension(Integer.MAX_VALUE, 36));
-            tog.setFocusPainted(false);
-            // Leading checkmark on the picked state — symmetric pair
-            // (visible-check / invisible-stand-in) keeps the label's
-            // horizontal origin stable across toggles. Aligned LEFT
-            // so the check sits at the row's left edge alongside
-            // the label, matching the spec ("checkmark to the left
-            // if someone has it picked"). The 2px green outline
-            // from {@link #applyToggleVisualState} still paints over
-            // the perimeter — the icon is the leading affordance,
-            // the outline is the perimeter affordance.
-            tog.setIcon(BLANK_TOGGLE_ICON);
-            tog.setSelectedIcon(CHECKMARK_TOGGLE_ICON);
-            tog.setHorizontalAlignment(SwingConstants.LEFT);
-            tog.setIconTextGap(8);
-            // Green-on-selected / red-on-unselected paint, applied on
-            // construction + via an item listener so every programmatic
-            // setSelected (resetGateOptions, applyStyleToggleLockState
-            // force-deselect, login restore) auto-repaints without a
-            // separate refresh pass.
-            applyToggleVisualState(tog);
-            tog.addItemListener(e -> applyToggleVisualState(tog));
-            tog.addActionListener(e ->
-            {
-                // Free toggle — the user may deselect every style (and
-                // every build); the queue button stays disabled while the
-                // picks don't suit the queue.
-                if (tog.isSelected()) selectedStyles.add(s);
-                else selectedStyles.remove(s);
-                prefs.setStyles(selectedStyles);
-                refreshCurrentStyleLabel();
-                refreshQueueButton();
-            });
-            styleToggles.put(s, tog);
-            gateContent.add(tog);
-            gateContent.add(leftAlignedStrut(4));
-        }
-
-        // ---- Anti-smurf match-count status row (drives style-toggle lock state) ----
-        // Layout: explanation line on top, per-style remaining counts
-        // below, [Refresh count] button at the bottom. Both widgets
-        // live as fields so the gate-listener callback can update them
-        // in place without rebuilding the gate. Font sizes mirror the
-        // style-toggle row above (15pt BOLD).
-        gateContent.add(leftAlignedStrut(8));
-
-        gateMatchCountStatusLabel = new JLabel(" ");
-        gateMatchCountStatusLabel.setFont(gateMatchCountStatusLabel.getFont().deriveFont(Font.BOLD, 15f));
-        gateMatchCountStatusLabel.setAlignmentX(LEFT_ALIGNMENT);
-        gateMatchCountStatusLabel.setForeground(new Color(0xcc, 0xcc, 0xcc));
-        gateContent.add(gateMatchCountStatusLabel);
-        gateContent.add(leftAlignedStrut(6));
-
-        // Left-aligned single-button row. Was a row of button + updated
-        // label; the label was removed but keeping the row scaffolding
-        // gives us a single attach-point if we ever re-add chrome here.
-        JPanel refreshRow = new JPanel();
-        refreshRow.setLayout(new BoxLayout(refreshRow, BoxLayout.X_AXIS));
-        refreshRow.setAlignmentX(LEFT_ALIGNMENT);
-        refreshRow.setOpaque(false);
-        // 32px max-height accommodates the bigger 15pt font without
-        // letting BoxLayout stretch the button vertically inside the
-        // sidepanel. 28 was for the 12pt button.
-        refreshRow.setMaximumSize(new Dimension(Integer.MAX_VALUE, 32));
-
-        gateMatchCountRefreshBtn = new JButton("Refresh count");
-        gateMatchCountRefreshBtn.setFont(gateMatchCountRefreshBtn.getFont().deriveFont(Font.BOLD, 15f));
-        gateMatchCountRefreshBtn.setMargin(new Insets(3, 8, 3, 8));
-        gateMatchCountRefreshBtn.setFocusPainted(false);
-        // joinGate.refresh() is itself debounced — back-to-back clicks
-        // collapse into one in-flight fetch — but we still flip the
-        // button's enabled state for clearer feedback while refreshing.
-        gateMatchCountRefreshBtn.addActionListener(e -> joinGate.refresh());
-        refreshRow.add(gateMatchCountRefreshBtn);
-        refreshRow.add(Box.createHorizontalGlue());
-        gateContent.add(refreshRow);
-
-        // Apply the initial counts (might still be unknown — the gate is
-        // a no-op pre-login; once UserProfileLobbyJoinGate.onLogin fires
-        // the listener will repaint). applyStyleToggleLockState() also
-        // disables the toggle for any below-threshold style now so the
-        // first user pass through the gate already sees the right
-        // lock state.
-        renderJoinGateStatus();
-        applyStyleToggleLockState();
-
-        gateContent.add(leftAlignedStrut(12));
-
-        // ---- Account type multi-select ----
-        // Required pick (no default), 1–3 builds. Mirrors the style toggles'
-        // multi-select pattern: turning a build on adds it; turning the last
-        // remaining build off is rejected (we always need ≥1 once any has
-        // been picked). Use Reset Options to return to the "none" state.
-        JLabel accountTitle = new JLabel("Pick your build");
-        accountTitle.setFont(accountTitle.getFont().deriveFont(Font.BOLD, GATE_HEADER_PT));
-        accountTitle.setAlignmentX(LEFT_ALIGNMENT);
-        gateContent.add(accountTitle);
-        gateContent.add(leftAlignedStrut(8));
-
-        buildToggles.clear();
-        for (BuildType a : BuildType.values())
-        {
-            JToggleButton tog = new JToggleButton(a.label);
-            tog.setSelected(selectedBuildTypes.contains(a));
-            tog.setFont(tog.getFont().deriveFont(Font.BOLD, 15f));
-            tog.setMargin(new Insets(6, 12, 6, 12));
-            tog.setAlignmentX(LEFT_ALIGNMENT);
-            tog.setMaximumSize(new Dimension(Integer.MAX_VALUE, 36));
-            tog.setFocusPainted(false);
-            // Same leading-checkmark treatment as the style row above —
-            // see those comments for the rationale.
-            tog.setIcon(BLANK_TOGGLE_ICON);
-            tog.setSelectedIcon(CHECKMARK_TOGGLE_ICON);
-            tog.setHorizontalAlignment(SwingConstants.LEFT);
-            tog.setIconTextGap(8);
-            applyToggleVisualState(tog);
-            tog.addItemListener(e -> applyToggleVisualState(tog));
-            tog.addActionListener(e ->
-            {
-                // Free toggle — symmetric with the style row above.
-                if (tog.isSelected()) selectedBuildTypes.add(a);
-                else selectedBuildTypes.remove(a);
-                prefs.setBuilds(selectedBuildTypes);
-                refreshCurrentStyleLabel();
-                refreshQueueButton();
-            });
-            buildToggles.put(a, tog);
-            gateContent.add(tog);
-            gateContent.add(leftAlignedStrut(4));
-        }
-
-        gateContent.add(leftAlignedStrut(12));
-
-        // ---- Plan 10 F.1: matchmaking queue ----
-        // Hidden until the plugin wires a real QueueService (config-gated);
-        // enabled only for exactly one unlocked style + one build — see
-        // refreshQueueButton().
-        queueSection = new QueueGateSection(prefs, GATE_HEADER_PT, this::onQueueClicked);
-        refreshQueueRangeLabel();
+        // ---- Matchmaking queue: wait time + the queue button ----
+        // Hidden until the plugin wires a real QueueService (config-gated).
         queueSection.setVisible(queueService.isAvailable());
         gateContent.add(queueSection);
-
-        refreshQueueButton();
 
         // Mount the wrapper so all gate widgets show up under the
         // title. applyLoginGateState() then flips visibility based on
@@ -945,6 +787,13 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         applyLoginGateState();
 
         return gate;
+    }
+
+    /** The rank-range slider shows with the queue block: logged in, queue on. */
+    private void refreshQueueRangeVisibility()
+    {
+        if (queueRangeHolder == null || gateContent == null) return;
+        queueRangeHolder.setVisible(gateContent.isVisible() && queueService.isAvailable());
     }
 
     /** Toggles the gate between "logged in" and "logged out" views by
@@ -1000,6 +849,7 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
             gateLoggedOutNotice.setVisible(true);
             gateContent.setVisible(false);
         }
+        refreshQueueRangeVisibility();
         // BoxLayout doesn't auto-revalidate on child visibility changes
         // — force the parent gate panel to recompute its layout so the
         // viewport collapses around whichever child is visible.
@@ -1062,9 +912,9 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
             queueSection.setOnWaitChanged(this::pushQueueWaitPref);
             queueSection.setOnRangeChanged(this::pushQueueRankRange);
         }
+        refreshQueueRangeVisibility();
         if (available) queueService.requestPrefs();
         if (!available) returnFromQueueCard(null);
-        refreshQueueButton();
     }
 
     /** Local wait pick → the shared prefs row, so the Discord modal prefills with it. */
@@ -1073,76 +923,32 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         if (queueSection != null) queueService.sendWaitPref(queueSection.waitPrefS());
     }
 
-    /** Local rank-range pick → the shared prefs row. Off sends an explicit
-     *  null so the row is cleared rather than left at Discord's value. */
+    /** Local rank-range pick → the shared prefs row. The full span sends an
+     *  explicit null so the row is cleared rather than left at Discord's value. */
     private void pushQueueRankRange()
     {
         if (queueSection == null) return;
         boolean rangeOn = queueSection.rangeEnabled();
-        queueService.sendRankRange(rangeOn ? rankMinIdx : QueueState.UNKNOWN,
-            rangeOn ? rankMaxIdx : QueueState.UNKNOWN);
+        queueService.sendRankRange(rangeOn ? queueSection.rangeMinIdx() : QueueState.UNKNOWN,
+            rangeOn ? queueSection.rangeMaxIdx() : QueueState.UNKNOWN);
     }
 
-    /** "Queue for Matchmaking": one style, one build, the user's region,
-     *  the lobby slider bounds when the rank-range toggle is on, and the
-     *  wait preference. The gate picks are persisted. */
+    /** "Queue for Matchmaking": NH + Main, the user's region, the slider's
+     *  bounds when it is narrower than every rank, and the wait preference. */
     private void onQueueClicked()
     {
-        Style style = QueueGateSection.soleStyle(selectedStyles);
-        BuildType build = QueueGateSection.soleBuild(selectedBuildTypes);
-        if (style == null || build == null || queueSection == null) return;
+        if (queueSection == null) return;
         boolean rangeOn = queueSection.rangeEnabled();
-        int minIdx = rangeOn ? rankMinIdx : QueueState.UNKNOWN;
-        int maxIdx = rangeOn ? rankMaxIdx : QueueState.UNKNOWN;
-        queueService.join(selfRegion, style, build, minIdx, maxIdx, queueSection.waitPrefS());
-        saveGateSelections();
-        if (rangeOn)
-        {
-            prefs.setQueueMinRankIdx(rankMinIdx);
-            prefs.setQueueMaxRankIdx(rankMaxIdx);
-        }
+        int minIdx = rangeOn ? queueSection.rangeMinIdx() : QueueState.UNKNOWN;
+        int maxIdx = rangeOn ? queueSection.rangeMaxIdx() : QueueState.UNKNOWN;
+        queueService.join(selfRegion, QueueGateSection.QUEUE_STYLE, QueueGateSection.QUEUE_BUILD,
+            minIdx, maxIdx, queueSection.waitPrefS());
     }
 
-    private void refreshQueueButton()
+    /** Every rank label, lowest first — the queue's rank-range slider reads them. */
+    static String[] rankLabels()
     {
-        if (queueSection == null) return;
-        Map<Style, Integer> counts = joinGate != null ? joinGate.getMatchCounts() : null;
-        boolean ok = QueueGateSection.eligible(selectedStyles, selectedBuildTypes, counts);
-        queueSection.setQueueEnabled(ok);
-        if (!ok) queueSection.setHint(queueHint(selectedStyles, selectedBuildTypes, counts));
-    }
-
-    static String queueHint(Set<Style> styles, Set<BuildType> builds, Map<Style, Integer> counts)
-    {
-        Style style = QueueGateSection.soleStyle(styles);
-        if (style == null)
-        {
-            int n = styles == null ? 0 : styles.size();
-            return n == 0 ? "Pick one style to queue." : "Pick exactly one style to queue (" + n + " picked).";
-        }
-        if (!QueueGateSection.isQueueStyle(style)) return "The queue is NH only for now. Pick NH to queue.";
-        if (QueueGateSection.soleBuild(builds) == null)
-        {
-            int n = builds == null ? 0 : builds.size();
-            return n == 0 ? "Pick your build to queue." : "Pick exactly one build to queue (" + n + " picked).";
-        }
-        Integer count = counts == null ? null : counts.get(style);
-        if (count == null) return "Loading your " + style.label + " match count…";
-        int more = LobbyJoinGate.remaining(count);
-        return style.label + " is locked: " + more + " more " + style.label + " fight" + (more == 1 ? "" : "s")
-            + " to unlock the queue.";
-    }
-
-    /** Keeps the rank-range toggle's label in step with the lobby slider. */
-    private void refreshQueueRangeLabel()
-    {
-        if (queueSection == null) return;
-        queueSection.setRangeLabels(rankLabelAt(rankMinIdx), rankLabelAt(rankMaxIdx));
-    }
-
-    private static String rankLabelAt(int idx)
-    {
-        return RANK_LABELS[clampRankIdx(idx)];
+        return RANK_LABELS.clone();
     }
 
     /** Walks {@link #rootCardHost}'s children for the visible card and asks
@@ -1226,9 +1032,7 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
     private void showQueueSearching(QueueState state)
     {
         if (queueCard == null) return;
-        queueCard.render(state,
-            QueueText.styleLabel(state.style, QueueGateSection.soleStyle(selectedStyles)),
-            QueueText.buildLabel(state.build, QueueGateSection.soleBuild(selectedBuildTypes)));
+        queueCard.render(state);
         if (currentFightSession != null) return;
         showCard(CARD_QUEUE);
     }
@@ -1280,266 +1084,17 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         }
     }
 
-    /** EDT callback fired by {@link LobbyJoinGate#addListener}. Re-renders
-     *  the gate's status row, re-applies the style-toggle lock state and
-     *  the queue button, and swaps the gate between "logged in" and
-     *  "Please log into the game" views via {@link #applyLoginGateState()}
-     *  — onLogin / onLogout transitions both fire through this listener. */
+    /** EDT callback fired by {@link LobbyJoinGate#addListener}. Swaps the
+     *  gate between "logged in" and "Please log into the game" views via
+     *  {@link #applyLoginGateState()} — onLogin / onLogout transitions both
+     *  fire through this listener. */
     private void onJoinGateChanged()
     {
-        applyStyleToggleLockState();
         applyLoginGateState();
-        renderJoinGateStatus();
-        refreshQueueButton();
         // The self-name supplier returns null pre-login and then
         // non-null after; rebuild the preview row on every gate
         // event so the row appears the instant the user logs in.
         renderSelfPreview();
-    }
-
-    /** Repaints {@link #gateMatchCountStatusLabel} + the [Refresh count]
-     *  button's enabled state from the current {@link #joinGate}
-     *  snapshot. The status label is HTML-wrapped so long
-     *  "NH: 2 more · Multi: 20 more · …" lines wrap inside a 225px
-     *  sidepanel. */
-    private void renderJoinGateStatus()
-    {
-        if (gateMatchCountStatusLabel == null) return;
-        Map<Style, Integer> counts = joinGate.getMatchCounts();
-        boolean refreshing = joinGate.isRefreshing();
-
-        StringBuilder remainingCsv = new StringBuilder();
-        boolean anyUnknown = counts.isEmpty();
-        boolean anyLocked = false;
-        for (Style s : Style.values())
-        {
-            Integer c = counts.get(s);
-            if (c == null)
-            {
-                anyUnknown = true;
-                continue;
-            }
-            if (!LobbyJoinGate.isUnlocked(c))
-            {
-                anyLocked = true;
-                int rem = LobbyJoinGate.remaining(c);
-                if (remainingCsv.length() > 0) remainingCsv.append(" \u00b7 ");
-                remainingCsv.append(s.label).append(": ").append(rem).append(" more");
-            }
-        }
-
-        String headline = "You need " + LobbyJoinGate.THRESHOLD
-            + " kills or deaths per style to queue.";
-        String detail;
-        if (anyUnknown && counts.isEmpty())
-        {
-            // Pre-login / pre-first-refresh state — gate hasn't seen
-            // any counts yet. Show a low-key message instead of "all
-            // styles locked" which would be alarming.
-            detail = "Loading your match count\u2026";
-        }
-        else if (!anyLocked && !anyUnknown)
-        {
-            detail = "All styles unlocked.";
-        }
-        else
-        {
-            detail = remainingCsv.toString();
-        }
-        // 170px wrap target — the gate panel's inner content area
-        // is narrower than the 225px sidepanel because of the
-        // panel's left/right padding (~6px each side) + the
-        // gateContent box's own insets. At 200px the headline
-        // "You need 20 kills or deaths per style to queue." was
-        // clipping the trailing "r style to queue." in the
-        // sidepanel screenshot. 170 leaves ~10px slack against the
-        // narrowest reasonable RuneLite sidepanel.
-        gateMatchCountStatusLabel.setText("<html><div style='width:170px'>"
-            + escapeHtml(headline) + "<br>" + escapeHtml(detail) + "</div></html>");
-
-        if (gateMatchCountRefreshBtn != null)
-        {
-            // Mid-refresh: disable + relabel so the user sees the click
-            // registered without the now-removed "Refreshing…" label.
-            gateMatchCountRefreshBtn.setEnabled(!refreshing);
-            gateMatchCountRefreshBtn.setText(refreshing ? "Refreshing\u2026" : "Refresh count");
-        }
-    }
-
-    /** Disables the toggle for any style under {@link LobbyJoinGate#THRESHOLD},
-     *  and force-deselects it if previously selected (so a user who
-     *  passed the gate with NH selected, then dropped below 20 NH
-     *  matches by some external means, doesn't ship a locked style to
-     *  the server). Tooltip explains why.
-     *
-     *  <p><b>Logged-out / unknown count handling.</b> If {@link
-     *  LobbyJoinGate#getMatchCounts()} returns an empty map (pre-login,
-     *  during initial refresh, or post-logout) we DO NOT force-deselect
-     *  — the user's picks are preserved so a logout → login round-trip
-     *  doesn't silently wipe their setup. Toggles are still disabled
-     *  while counts are unknown so the user can't change picks during
-     *  the unknown window, but the existing selection is honoured.
-     *  Force-deselect only happens when we have a real count below
-     *  threshold (legitimate "you lost matches since you picked this
-     *  style" path). */
-    private void applyStyleToggleLockState()
-    {
-        if (styleToggles.isEmpty()) return;
-        Map<Style, Integer> counts = joinGate.getMatchCounts();
-        boolean countsUnknown = counts.isEmpty();
-        for (Map.Entry<Style, JToggleButton> e : styleToggles.entrySet())
-        {
-            Style s = e.getKey();
-            JToggleButton tog = e.getValue();
-            Integer boxedCount = counts.get(s);
-            boolean countKnown = boxedCount != null;
-            // Defaulted to 0 when unknown so the unboxing is safe; the
-            // value is only consumed when countKnown is true, so the
-            // sentinel 0 never reaches user-visible UI.
-            int count = boxedCount == null ? 0 : boxedCount.intValue();
-            boolean unlocked = countKnown && LobbyJoinGate.isUnlocked(count);
-            // Logged-out / pre-login: leave toggles enabled so the user
-            // can pre-pick their styles before logging into the game.
-            // The gateContent panel is hidden anyway via
-            // applyLoginGateState() so these toggles aren't visible —
-            // but if they're pre-picked here, they'll be honoured the
-            // moment the user logs in.
-            tog.setEnabled(unlocked || countsUnknown);
-
-            if (countKnown && !unlocked)
-            {
-                int rem = LobbyJoinGate.remaining(count);
-                tog.setToolTipText(s.label + " locked: " + count + "/"
-                    + LobbyJoinGate.THRESHOLD + " (" + rem + " more needed)");
-                // Count is known AND below threshold — force-deselect.
-                // Server would otherwise reject lobby/join with
-                // SMURF_GUARD.
-                if (tog.isSelected())
-                {
-                    tog.setSelected(false);
-                    selectedStyles.remove(s);
-                }
-            }
-            else if (!countKnown)
-            {
-                // Don't tooltip-shame the user during the unknown
-                // window; they can't action on it.
-                tog.setToolTipText(null);
-            }
-            else
-            {
-                tog.setToolTipText(null);
-            }
-        }
-    }
-
-    /** Green-on-selected / red-on-unselected paint for the gate's
-     *  style + build toggles. The selected state also gets a 2px
-     *  green {@link javax.swing.border.LineBorder} outline so the
-     *  "picked" state reads instantly without relying on the L&F's
-     *  pressed-button shading (Substance under RuneLite paints both
-     *  states with very similar greys; the previous toggle UI was
-     *  confusing because users couldn't tell which styles they'd
-     *  selected at a glance).
-     *
-     *  <p>Border thickness is offset by reduced inner padding so the
-     *  toggle's overall width/height is identical in both states —
-     *  no layout reflow on click. Disabled (locked) toggles still
-     *  get the green/red palette; Substance's grey-out overlay
-     *  composites on top, which makes the locked state read as
-     *  "muted green/red" rather than ambiguous-grey. */
-    private static void applyToggleVisualState(JToggleButton tog)
-    {
-        if (tog.isSelected())
-        {
-            tog.setForeground(SELECTED_TOGGLE_FG);
-            tog.setBorder(BorderFactory.createCompoundBorder(
-                BorderFactory.createLineBorder(SELECTED_TOGGLE_FG, 2),
-                BorderFactory.createEmptyBorder(2, 6, 2, 6)));
-        }
-        else
-        {
-            tog.setForeground(UNSELECTED_TOGGLE_FG);
-            // Same total inset as the selected state (2px line + 2px
-            // inner padding == 4px empty border) so flipping the
-            // selection doesn't resize the button.
-            tog.setBorder(BorderFactory.createEmptyBorder(4, 8, 4, 8));
-        }
-    }
-
-    /** Bright green that reads as "this style/build is picked". */
-    private static final Color SELECTED_TOGGLE_FG = new Color(0x6c, 0xd1, 0x6a);
-
-    /** Muted red for the unselected state — strong enough to read
-     *  as "not picked" at a glance without screaming for attention
-     *  the way a saturated red would. */
-    private static final Color UNSELECTED_TOGGLE_FG = new Color(0xef, 0x53, 0x50);
-
-    /** Side length of the leading checkmark icon on a picked
-     *  style/build toggle. Sized to roughly the cap-height of the
-     *  15pt-bold label so the check reads as part of the same row
-     *  rather than a separate glyph. */
-    private static final int CHECK_ICON_SIZE = 14;
-
-    /** Drawn to the left of the label when a style/build toggle is
-     *  {@code isSelected()}. Paired with {@link #BLANK_TOGGLE_ICON}
-     *  on the deselected state (same dims, no glyph) so flipping
-     *  the toggle doesn't shift the label horizontally. */
-    private static final Icon CHECKMARK_TOGGLE_ICON = makeCheckmarkIcon(SELECTED_TOGGLE_FG, CHECK_ICON_SIZE);
-
-    /** Transparent stand-in matching {@link #CHECKMARK_TOGGLE_ICON}'s
-     *  dimensions so the text origin stays put when the toggle
-     *  flips from selected to unselected. */
-    private static final Icon BLANK_TOGGLE_ICON = makeBlankIcon(CHECK_ICON_SIZE);
-
-    /** Anti-aliased vector checkmark — three points: bottom-left,
-     *  mid-bottom, top-right. Drawn with a moderately thick stroke
-     *  (≈2px) so it reads cleanly at the 14×14 size without
-     *  appearing spindly against the toggle's bold label. The
-     *  colour is parameterised so callers can match the picked-
-     *  state tint (currently {@link #SELECTED_TOGGLE_FG}). */
-    private static Icon makeCheckmarkIcon(Color color, int size)
-    {
-        return new Icon()
-        {
-            @Override public int getIconWidth() { return size; }
-            @Override public int getIconHeight() { return size; }
-            @Override public void paintIcon(Component c, Graphics g, int x, int y)
-            {
-                Graphics2D g2 = (Graphics2D) g.create();
-                try
-                {
-                    g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
-                    g2.setColor(color);
-                    g2.setStroke(new BasicStroke(2.2f, BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND));
-                    int x1 = x + 2;
-                    int y1 = y + size / 2;
-                    int x2 = x + (size * 5) / 12;
-                    int y2 = y + size - 3;
-                    int x3 = x + size - 2;
-                    int y3 = y + 2;
-                    g2.drawLine(x1, y1, x2, y2);
-                    g2.drawLine(x2, y2, x3, y3);
-                }
-                finally
-                {
-                    g2.dispose();
-                }
-            }
-        };
-    }
-
-    /** Paints nothing but reserves the same footprint as
-     *  {@link #makeCheckmarkIcon} so the toggle's text origin
-     *  doesn't shift between selected/unselected. */
-    private static Icon makeBlankIcon(int size)
-    {
-        return new Icon()
-        {
-            @Override public int getIconWidth() { return size; }
-            @Override public int getIconHeight() { return size; }
-            @Override public void paintIcon(Component c, Graphics g, int x, int y) { /* intentional no-op */ }
-        };
     }
 
     /** Minimal HTML escaping — only the four chars Swing's HTML view
@@ -1611,22 +1166,9 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         return idx;
     }
 
-    /** Snapshots the user's current gate picks (region / styles / builds /
-     *  rank-slider bounds) into {@link #prefs}. Called from the queue
-     *  click. */
-    private void saveGateSelections()
-    {
-        prefs.setRegion(selfRegion);
-        prefs.setStyles(selectedStyles);
-        prefs.setBuilds(selectedBuildTypes);
-        prefs.setMinRankIdx(rankMinIdx);
-        prefs.setMaxRankIdx(rankMaxIdx);
-    }
-
-    /** Clears all three gate picks (styles, account builds, region) and
-     *  rebinds the gate widgets' visual state to match. Called by the
-     *  roster card's Leave Lobby; the caller is responsible for switching
-     *  cards back to the gate. */
+    /** Clears the gate picks (styles, account builds, region) and rebinds
+     *  the gate widgets to match. Called by the roster card's Leave Lobby;
+     *  the caller is responsible for switching cards back to the gate. */
     private void resetGateOptions()
     {
         // Drop any pending incoming-invite cards.
@@ -1642,30 +1184,12 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         selfRegion = DEFAULT_REGION;
         rankMinIdx = 0;
         rankMaxIdx = RANK_LABELS.length - 1;
-        refreshQueueRangeLabel();
         // Wipe the persisted values so a plugin restart starts empty too.
         prefs.clear();
         // Plan 10 F.1: prefs.clear() wiped the queue picks too — re-align the widgets.
         if (queueSection != null) queueSection.reset();
-
-        for (Map.Entry<Style, JToggleButton> e : styleToggles.entrySet())
-        {
-            e.getValue().setSelected(selectedStyles.contains(e.getKey()));
-        }
-        for (Map.Entry<BuildType, JToggleButton> e : buildToggles.entrySet())
-        {
-            e.getValue().setSelected(selectedBuildTypes.contains(e.getKey()));
-        }
         if (regionCombo != null) regionCombo.setSelectedIndex(indexOfRegion(DEFAULT_REGION));
-
-        // Re-apply the lock state since clearing selection above also
-        // cleared the disabled visual styling; without this the locked
-        // styles look toggleable until the user clicks one and it
-        // silently doesn't take.
-        applyStyleToggleLockState();
-        renderJoinGateStatus();
         refreshCurrentStyleLabel();
-        refreshQueueButton();
     }
 
     /** Returns the index in {@link #REGION_CODES} matching {@code code}, or 0 if missing. */
@@ -3776,8 +3300,6 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
             rankMaxIdx = rankRange.getHigh();
             updateRankValueLabel(minValue, rankMinIdx);
             updateRankValueLabel(maxValue, rankMaxIdx);
-            // Plan 10 F.1: the gate's "Rank range: X – Y" queue toggle shows the same bounds.
-            refreshQueueRangeLabel();
             if (!rankRange.getValueIsAdjusting())
             {
                 // Persist on commit (drag-end) rather than every drag
@@ -3831,8 +3353,9 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
      *  paintComponent so the L&F's clip-and-ellipsify path is
      *  bypassed entirely; the alignment-aware draw inside
      *  ChipLabel honours the LEFT / RIGHT setHorizontalAlignment
-     *  set on the min / max labels respectively. */
-    private static JLabel makeRankValueLabel(int idx)
+     *  set on the min / max labels respectively. Shared with
+     *  {@link QueueRangeSlider}. */
+    static JLabel makeRankValueLabel(int idx)
     {
         ChipLabel l = new ChipLabel(RANK_LABELS[idx]);
         l.setFont(l.getFont().deriveFont(Font.BOLD, 15f));
@@ -3842,7 +3365,7 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         return l;
     }
 
-    private static void updateRankValueLabel(JLabel l, int idx)
+    static void updateRankValueLabel(JLabel l, int idx)
     {
         String label = RANK_LABELS[idx];
         l.setText(label);

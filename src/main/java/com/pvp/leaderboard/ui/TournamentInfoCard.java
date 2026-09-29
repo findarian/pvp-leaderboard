@@ -51,12 +51,17 @@ final class TournamentInfoCard extends JPanel
     private static final Color RED_FG = new Color(0xff, 0xb3, 0xb3);
     private static final Color MUTED = new Color(0x9a, 0x9a, 0x9a);
     private static final Color INFO = new Color(0xdd, 0xdd, 0xdd);
-    /** The lobby's ROW_FONT_PT. */
-    private static final float NAME_PT = 15f;
-    private static final float LINE_PT = 11f;
-    private static final int CHIP_PT = 11;
-    /** Greedy wrap budget per line, sized for the ~170 px the card's text has at {@link #LINE_PT}. */
-    static final int WRAP_CHARS = 26;
+    private static final float NAME_PT = 16f;
+    private static final float LINE_PT = 15f;
+    private static final float CHIP_PT = 14f;
+    private static final float STATUS_PT = 14f;
+    /** Card buttons: the full-width one, and the most / least the Report + Rules row may use. */
+    static final float BUTTON_PT = 16f;
+    private static final float PAIR_MIN_PT = 14f;
+    /** The width a card's text wraps to (the side panel's card, inside its border). */
+    static final int TEXT_WIDTH_PX = 170;
+    /** Room left for the HTML view's own rounding when a line is measured. */
+    private static final int WRAP_SLACK_PX = 4;
     private static final String[] RANK_LABELS = buildRankLabels();
 
     private final TournamentSummary t;
@@ -66,6 +71,8 @@ final class TournamentInfoCard extends JPanel
     /** {@code null} when the event has no registration window to show. */
     private final JLabel closes;
     private final JButton report;
+    private String whenPhrase;
+    private String closesPhrase;
 
     TournamentInfoCard(TournamentSummary t, String myStatus, boolean discordLoggedIn, ZoneId zone, LongSupplier nowMs, Actions actions)
     {
@@ -91,6 +98,7 @@ final class TournamentInfoCard extends JPanel
         if (t.creatorName != null && !t.creatorName.trim().isEmpty()) addLine("tournament-host-", "Host: " + t.creatorName.trim(), MUTED);
         if (t.gearSet != null) addLine("tournament-kit-", kitLine(t), INFO);
         when.setName("tournament-when-" + t.tournamentId);
+        when.setFont(when.getFont().deriveFont(Font.PLAIN, LINE_PT));
         when.setAlignmentX(LEFT_ALIGNMENT);
         add(when);
         if (TournamentsPanel.closes(t, zone, nowMs.getAsLong()).isEmpty())
@@ -101,22 +109,26 @@ final class TournamentInfoCard extends JPanel
         {
             closes = new JLabel();
             closes.setName("tournament-closes-" + t.tournamentId);
+            closes.setFont(closes.getFont().deriveFont(Font.PLAIN, LINE_PT));
             closes.setForeground(MUTED);
             closes.setAlignmentX(LEFT_ALIGNMENT);
             add(closes);
         }
         tick();
-        add(Box.createVerticalStrut(4));
-        add(actionRow(myStatus, actions));
-        add(Box.createVerticalStrut(3));
-        report = TournamentsPanel.smallButton(REPORT_LABEL);
+        add(Box.createVerticalStrut(6));
+        report = TournamentsPanel.tabButton(REPORT_LABEL);
         report.setName("tournament-report-" + t.tournamentId);
         report.addActionListener(e -> actions.report(t));
-        JPanel reportRow = new JPanel(new BorderLayout());
-        reportRow.setOpaque(false);
-        reportRow.setAlignmentX(LEFT_ALIGNMENT);
-        reportRow.add(report, BorderLayout.CENTER);
-        add(reportRow);
+        JButton rules = TournamentsPanel.tabButton("Rules");
+        rules.setName("tournament-rules-" + t.tournamentId);
+        rules.addActionListener(e -> actions.rules(t));
+        add(pairRow(report, rules));
+        JButton signUp = signUpButton(myStatus, actions);
+        if (signUp != null)
+        {
+            add(Box.createVerticalStrut(4));
+            add(signUp);
+        }
         setReportEnabled(discordLoggedIn);
     }
 
@@ -142,36 +154,50 @@ final class TournamentInfoCard extends JPanel
     {
         long now = nowMs.getAsLong();
         String w = TournamentsPanel.when(t, zone, now);
-        if (!w.equals(when.getText())) when.setText(w);
+        if (!w.equals(whenPhrase))
+        {
+            whenPhrase = w;
+            when.setText(wrapHtml(when.getFont(), TEXT_WIDTH_PX, w));
+        }
         if (closes != null)
         {
             String c = TournamentsPanel.closes(t, zone, now);
-            if (!c.equals(closes.getText())) closes.setText(c);
+            if (!c.equals(closesPhrase))
+            {
+                closesPhrase = c;
+                closes.setText(wrapHtml(closes.getFont(), TEXT_WIDTH_PX, c));
+            }
         }
     }
 
     // ---------------------------------------------------------------- rows
+    /** The event's name at the card's full width, then the player's status
+     *  marker (if any) on its own line. */
     private JPanel header(String myStatus)
     {
-        JPanel row = new JPanel(new BorderLayout(6, 0));
-        row.setOpaque(false);
-        row.setAlignmentX(LEFT_ALIGNMENT);
-        JLabel name = new JLabel("<html>" + TournamentsPanel.escape(t.name) + "</html>");
+        JPanel block = new JPanel();
+        block.setLayout(new BoxLayout(block, BoxLayout.Y_AXIS));
+        block.setOpaque(false);
+        block.setAlignmentX(LEFT_ALIGNMENT);
+        JLabel name = new JLabel();
         name.setName("tournament-name-" + t.tournamentId);
         name.setFont(name.getFont().deriveFont(Font.BOLD, NAME_PT));
         name.setForeground(Color.WHITE);
-        row.add(name, BorderLayout.CENTER);
+        name.setAlignmentX(LEFT_ALIGNMENT);
+        name.setText(wrapHtml(name.getFont(), TEXT_WIDTH_PX, t.name));
+        block.add(name);
         if (myStatus != null && !myStatus.isEmpty())
         {
             boolean registered = "registered".equals(myStatus);
             JLabel my = new JLabel(registered ? "✓ Registered" : "You: " + myStatus);
             my.setName("tournament-my-" + t.tournamentId);
-            my.setFont(my.getFont().deriveFont(Font.BOLD, 12f));
+            my.setFont(my.getFont().deriveFont(Font.BOLD, STATUS_PT));
             my.setForeground(registered ? GREEN : MUTED);
-            row.add(my, BorderLayout.EAST);
+            my.setAlignmentX(LEFT_ALIGNMENT);
+            block.add(my);
         }
-        row.setMaximumSize(new Dimension(Integer.MAX_VALUE, row.getPreferredSize().height));
-        return row;
+        block.setMaximumSize(new Dimension(Integer.MAX_VALUE, block.getPreferredSize().height));
+        return block;
     }
 
     /** [Swiss] [NH] [Main] — the lobby's [Region] [style] / [build] rows collapsed to one. */
@@ -190,46 +216,58 @@ final class TournamentInfoCard extends JPanel
 
     private void addLine(String namePrefix, String text, Color fg)
     {
-        JLabel l = new JLabel(wrapHtml(text));
+        JLabel l = new JLabel();
         l.setName(namePrefix + t.tournamentId);
         l.setFont(l.getFont().deriveFont(Font.PLAIN, LINE_PT));
+        l.setText(wrapHtml(l.getFont(), TEXT_WIDTH_PX, text));
         l.setForeground(fg);
         l.setAlignmentX(LEFT_ALIGNMENT);
         add(l);
     }
 
-    private JPanel actionRow(String myStatus, Actions actions)
+    /** Register or Withdraw, whichever the event and the player's status
+     *  allow, as the card's full-width button; {@code null} for neither. */
+    private JButton signUpButton(String myStatus, Actions actions)
     {
-        JPanel row = new JPanel();
-        row.setLayout(new BoxLayout(row, BoxLayout.X_AXIS));
-        row.setOpaque(false);
-        row.setAlignmentX(LEFT_ALIGNMENT);
         boolean registered = "registered".equals(myStatus);
         if (registered && (t.isOpenForRegistration() || t.isRunning()))
         {
-            JButton withdraw = TournamentsPanel.smallButton("Withdraw");
+            JButton withdraw = TournamentsPanel.tabButton("Withdraw");
             withdraw.setName("tournament-withdraw-" + t.tournamentId);
             withdraw.setBackground(RED);
             withdraw.setForeground(RED_FG);
             withdraw.addActionListener(e -> actions.withdraw(t));
-            row.add(withdraw);
-            row.add(Box.createHorizontalStrut(4));
+            return withdraw;
         }
-        else if (!registered && (t.isOpenForRegistration() || (t.isRunning() && t.midEventJoins)))
+        if (!registered && (t.isOpenForRegistration() || (t.isRunning() && t.midEventJoins)))
         {
-            JButton register = TournamentsPanel.smallButton("Register");
+            JButton register = TournamentsPanel.tabButton("Register");
             register.setName("tournament-register-" + t.tournamentId);
             register.setBackground(GREEN);
             register.setForeground(Color.BLACK);
             register.addActionListener(e -> actions.register(t));
-            row.add(register);
-            row.add(Box.createHorizontalStrut(4));
+            return register;
         }
-        JButton rules = TournamentsPanel.smallButton("Rules");
-        rules.setName("tournament-rules-" + t.tournamentId);
-        rules.addActionListener(e -> actions.rules(t));
-        row.add(rules);
-        row.add(Box.createHorizontalGlue());
+        return null;
+    }
+
+    /** Two buttons on one row: {@code wide} fills what {@code narrow} leaves,
+     *  both at the largest size from {@link #BUTTON_PT} down that keeps
+     *  {@code wide}'s label on one line. */
+    static JPanel pairRow(JButton wide, JButton narrow)
+    {
+        for (float pt = BUTTON_PT; pt >= PAIR_MIN_PT; pt--)
+        {
+            wide.setFont(wide.getFont().deriveFont(pt));
+            narrow.setFont(narrow.getFont().deriveFont(pt));
+            if (wide.getPreferredSize().width + narrow.getPreferredSize().width + 4 <= TEXT_WIDTH_PX) break;
+        }
+        JPanel row = new JPanel(new BorderLayout(4, 0));
+        row.setOpaque(false);
+        row.setAlignmentX(LEFT_ALIGNMENT);
+        row.add(wide, BorderLayout.CENTER);
+        row.add(narrow, BorderLayout.EAST);
+        row.setMaximumSize(new Dimension(Integer.MAX_VALUE, row.getPreferredSize().height));
         return row;
     }
 
@@ -237,7 +275,7 @@ final class TournamentInfoCard extends JPanel
     private static JLabel chip(String text, Color color)
     {
         JLabel chip = new JLabel(text);
-        chip.setFont(chip.getFont().deriveFont(Font.BOLD, (float) CHIP_PT));
+        chip.setFont(chip.getFont().deriveFont(Font.BOLD, CHIP_PT));
         chip.setForeground(color);
         chip.setBorder(BorderFactory.createCompoundBorder(BorderFactory.createLineBorder(color, 1), BorderFactory.createEmptyBorder(1, 5, 1, 5)));
         chip.setOpaque(false);
@@ -329,33 +367,62 @@ final class TournamentInfoCard extends JPanel
         return out;
     }
 
-    static String wrapHtml(String... paragraphs)
+    /** Plain text as {@code <html>} lines joined by {@code <br>}, each no
+     *  wider than {@code widthPx} at {@code font}; a word wider than that sits
+     *  on its own line. Paragraphs start on a new line. */
+    static String wrapHtml(Font font, int widthPx, String... paragraphs)
     {
-        StringBuilder sb = new StringBuilder("<html><div style='width:170px'>");
-        boolean first = true;
-        for (String text : paragraphs)
+        List<String> escaped = new ArrayList<>();
+        for (String p : paragraphs) escaped.add(TournamentsPanel.escape(p == null ? "" : p));
+        return "<html>" + wrapLines(font, widthPx, escaped) + "</html>";
+    }
+
+    /** The {@code <br>}-joined lines of {@link #wrapEscaped}, without the
+     *  {@code <html>} wrapper, for a label that adds its own markup after them. */
+    static String wrapInner(Font font, int widthPx, String escaped)
+    {
+        return wrapLines(font, widthPx, java.util.Collections.singletonList(escaped == null ? "" : escaped));
+    }
+
+    /** {@link #wrapHtml} for text that is already escaped (entities, no tags). */
+    static String wrapEscaped(Font font, int widthPx, String escaped)
+    {
+        return "<html>" + wrapLines(font, widthPx, java.util.Collections.singletonList(escaped == null ? "" : escaped)) + "</html>";
+    }
+
+    private static String wrapLines(Font font, int widthPx, List<String> paragraphs)
+    {
+        RowTextFit fit = new RowTextFit();
+        int budget = widthPx - WRAP_SLACK_PX;
+        StringBuilder out = new StringBuilder();
+        for (String paragraph : paragraphs)
         {
-            if (!first) sb.append("<br>");
-            first = false;
-            int col = 0;
-            for (String word : (text == null ? "" : text).split(" "))
+            if (out.length() > 0) out.append("<br>");
+            StringBuilder line = new StringBuilder();
+            for (String word : paragraph.split(" "))
             {
                 if (word.isEmpty()) continue;
-                if (col > 0 && col + 1 + word.length() > WRAP_CHARS)
+                String candidate = line.length() == 0 ? word : line + " " + word;
+                if (line.length() > 0 && fit.textWidth(unescape(candidate), font) > budget)
                 {
-                    sb.append("<br>");
-                    col = 0;
+                    out.append(line).append("<br>");
+                    line.setLength(0);
+                    line.append(word);
                 }
-                else if (col > 0)
+                else
                 {
-                    sb.append(' ');
-                    col++;
+                    line.setLength(0);
+                    line.append(candidate);
                 }
-                sb.append(TournamentsPanel.escape(word));
-                col += word.length();
             }
+            out.append(line);
         }
-        return sb.append("</div></html>").toString();
+        return out.toString();
+    }
+
+    private static String unescape(String s)
+    {
+        return s.replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&");
     }
 
     private static String capitalise(String s)
