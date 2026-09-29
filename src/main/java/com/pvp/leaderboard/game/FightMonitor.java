@@ -687,7 +687,7 @@ public class FightMonitor
                 // Check if THIS opponent's fight is stale (no activity for 16+ ticks)
                 // If stale, remove only this opponent's fight entry so a fresh one is created
                 FightEntry existingFight = activeFights.get(opponentName);
-                if (existingFight != null && existingFight.isStale(tickNow, OUT_OF_COMBAT_TICKS))
+                if (existingFight != null && hitPlayer != localPlayer && existingFight.isStale(tickNow, OUT_OF_COMBAT_TICKS))
                 {
                     // log.debug("[FightStale] Clearing stale fight for {} (lastTick={} currentTick={} gap={})", 
                     //     opponentName, existingFight.lastActivityTick, tickNow, 
