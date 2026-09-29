@@ -35,9 +35,12 @@ import java.awt.Insets;
 import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
+import java.util.function.Function;
 import java.util.function.LongSupplier;
 import java.util.function.Supplier;
 
@@ -64,6 +67,9 @@ public class TournamentsPanel extends JPanel implements TournamentEventListener
     public static final String NAME_LIST_GEAR_SLOT = "tournaments-list-gear-slot";
     public static final String NAME_ACTIVE_GEAR_SLOT = "tournaments-active-gear-slot";
     static final String GEAR_STATUS_CMD = "tournament/gear_status";
+    static final String REGISTER_CMD = "tournament/register";
+    /** A registration refused for the event's minimum number of matches. */
+    static final String MIN_GAMES_CODE = "TOURNAMENT_MIN_GAMES";
     static final String UPDATE_REQUIRED_TEXT = "This tournament needs a newer PvP Leaderboard plugin — update it to register.";
     static final String ROUND_END_SUBMIT_TEXT = "Please submit within 30 seconds or the match will be counted as did not complete and you may be removed from the tournament.";
     static final long IN_COMBAT_MIN_INTERVAL_MS = 30_000L;
@@ -85,6 +91,12 @@ public class TournamentsPanel extends JPanel implements TournamentEventListener
     private volatile Consumer<String> linkOpener = TournamentsPanel::browse;
     /** {@code DiscordAuthService::isLoggedIn} once the dashboard wires it; unwired = logged out. */
     private volatile BooleanSupplier discordLoggedIn = () -> false;
+    /** The player's own match count per event bucket; unwired = unknown. */
+    private volatile Function<String, Integer> matchCountProvider = bucket -> null;
+    /** The event whose Register was pressed and not yet answered. */
+    private String pendingRegisterId;
+    /** Events whose registration was refused for their minimum, until the next connect. */
+    private final Set<String> minGamesRefused = new HashSet<>();
     private final LongSupplier nowMs;
     /** The viewer's zone for the list card's times (injected for tests). */
     private final ZoneId zone;
@@ -120,7 +132,11 @@ public class TournamentsPanel extends JPanel implements TournamentEventListener
     /** The panel's side of every card's buttons — one implementation for all cards. */
     private final TournamentInfoCard.Actions cardActions = new TournamentInfoCard.Actions()
     {
-        @Override public void register(TournamentSummary t) { service.register(t.tournamentId, regionSupplier.get()); }
+        @Override public void register(TournamentSummary t)
+        {
+            pendingRegisterId = t.tournamentId;
+            service.register(t.tournamentId, regionSupplier.get());
+        }
         @Override public void withdraw(TournamentSummary t) { service.withdraw(t.tournamentId); }
         @Override public void rules(TournamentSummary t) { openRules(t); }
         @Override public void report(TournamentSummary t) { onReportProblem(t.tournamentId); }
@@ -215,6 +231,34 @@ public class TournamentsPanel extends JPanel implements TournamentEventListener
         refreshActiveReportGate();
     }
 
+    /** The player's own match count for an event bucket ({@code "nh"}, ...),
+     *  {@code null} when unknown. {@code null} = unwired = unknown. */
+    public void setMatchCountProvider(Function<String, Integer> provider)
+    {
+        this.matchCountProvider = provider == null ? bucket -> null : provider;
+        renderList();
+    }
+
+    /** The count source changed: the cards re-evaluate locally. */
+    public void onMatchCountsChanged()
+    {
+        renderList();
+    }
+
+    /** The player's count in the event's bucket; {@code null} when unknown. */
+    private Integer matchCountFor(TournamentSummary t)
+    {
+        try
+        {
+            Integer count = matchCountProvider.apply(t.category == null ? "" : t.category.trim());
+            return count == null || count < 0 ? null : count;
+        }
+        catch (RuntimeException e)
+        {
+            return null;
+        }
+    }
+
     private boolean discordLoggedInNow()
     {
         try
@@ -283,6 +327,12 @@ public class TournamentsPanel extends JPanel implements TournamentEventListener
     @Override
     public void onSocketConnected()
     {
+        pendingRegisterId = null;
+        if (!minGamesRefused.isEmpty())
+        {
+            minGamesRefused.clear();
+            renderList();
+        }
         if (showing) sync();
     }
 
@@ -502,7 +552,8 @@ public class TournamentsPanel extends JPanel implements TournamentEventListener
      *  lines join the existing 1 Hz refresh. */
     private TournamentInfoCard eventCard(TournamentSummary t)
     {
-        TournamentInfoCard card = new TournamentInfoCard(t, myStatusFor(t), discordLoggedInNow(), zone, nowMs, cardActions);
+        TournamentInfoCard card = new TournamentInfoCard(t, myStatusFor(t), discordLoggedInNow(), zone, nowMs, cardActions,
+            matchCountFor(t), minGamesRefused.contains(t.tournamentId));
         liveTimes.add(card::tick);
         return card;
     }
@@ -926,6 +977,8 @@ public class TournamentsPanel extends JPanel implements TournamentEventListener
     @Override
     public void onRegistered(TournamentSummary tournament, String registrationStatus)
     {
+        pendingRegisterId = null;
+        if (tournament != null) minGamesRefused.remove(tournament.tournamentId);
         showBanner("✓ Registered for " + escape(tournament.name) + ". Your opponent, world and meeting place arrive here when each round opens.");
         service.list();
         service.status();
@@ -1148,6 +1201,21 @@ public class TournamentsPanel extends JPanel implements TournamentEventListener
     public void onTournamentError(String code, String message, String cmd)
     {
         if (GEAR_STATUS_CMD.equals(cmd)) return;
+        String pressed = null;
+        if (cmd == null || cmd.isEmpty() || REGISTER_CMD.equals(cmd))
+        {
+            pressed = pendingRegisterId;
+            pendingRegisterId = null;
+        }
+        if (MIN_GAMES_CODE.equals(code))
+        {
+            if (pressed != null)
+            {
+                minGamesRefused.add(pressed);
+                renderList();
+            }
+            return;
+        }
         showBanner(friendlyError(code, message, cmd));
     }
 

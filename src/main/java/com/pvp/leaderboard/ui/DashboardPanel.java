@@ -69,6 +69,8 @@ public class DashboardPanel extends PluginPanel
     // and enables the tab.
     private JPanel tournamentsPlaceholder;
     private TournamentsPanel tournamentsPanel;
+    /** The live Tournaments panel's listener on the profile gate's counts. */
+    private Runnable tournamentCountsListener;
     /** What {@link #tournamentsPanel} was last told by {@code setShowing}. */
     private boolean tournamentsShowing;
     private java.util.function.BooleanSupplier tournamentInCombatProvider;
@@ -646,6 +648,7 @@ public class DashboardPanel extends PluginPanel
     public void setTournamentService(TournamentService svc)
     {
         if (viewContainer == null || tabTournamentsBtn == null) return;
+        dropTournamentCountsListener();
         if (tournamentsPanel != null)
         {
             tournamentsPanel.shutdown();
@@ -673,6 +676,9 @@ public class DashboardPanel extends PluginPanel
         if (tournamentInCombatProvider != null) tournamentsPanel.setInCombatProvider(tournamentInCombatProvider);
         // Set 6: the Report gate is the same Discord login state onLoginStateChanged() reloads on.
         if (discordAuthService != null) tournamentsPanel.setDiscordLoginProvider(discordAuthService::isLoggedIn);
+        tournamentsPanel.setMatchCountProvider(this::ownMatchCount);
+        tournamentCountsListener = tournamentsPanel::onMatchCountsChanged;
+        joinGate.addListener(tournamentCountsListener);
         if (tournamentGearCard != null) tournamentsPanel.setGearCard(tournamentGearCard);
         if (tournamentsPlaceholder != null) viewContainer.remove(tournamentsPlaceholder);
         viewContainer.add(tournamentsPanel, CARD_TOURNAMENTS);
@@ -698,7 +704,38 @@ public class DashboardPanel extends PluginPanel
     /** Plugin shutdown: stops the live panel's ticker + unsubscribes. */
     public void shutdownTournaments()
     {
+        dropTournamentCountsListener();
         if (tournamentsPanel != null) tournamentsPanel.shutdown();
+    }
+
+    /** The Tournaments tab's view of the profile gate's counts: the count in
+     *  the event's bucket, {@code null} when unknown. */
+    private Integer ownMatchCount(String bucket)
+    {
+        com.pvp.leaderboard.lobby.Style style = styleForBucket(bucket);
+        if (style == null) return null;
+        return joinGate.getMatchCounts().get(style);
+    }
+
+    /** {@code "nh"} → NH, {@code "veng"} → Veng, {@code "multi"} → Multi, {@code "dmm"} → DMM; anything else {@code null}. */
+    static com.pvp.leaderboard.lobby.Style styleForBucket(String bucket)
+    {
+        String b = bucket == null ? "" : bucket.trim().toLowerCase(java.util.Locale.ROOT);
+        switch (b)
+        {
+            case "nh": return com.pvp.leaderboard.lobby.Style.NH;
+            case "veng": return com.pvp.leaderboard.lobby.Style.VENG;
+            case "multi": return com.pvp.leaderboard.lobby.Style.MULTI;
+            case "dmm": return com.pvp.leaderboard.lobby.Style.DMM;
+            default: return null;
+        }
+    }
+
+    private void dropTournamentCountsListener()
+    {
+        if (tournamentCountsListener == null) return;
+        joinGate.removeListener(tournamentCountsListener);
+        tournamentCountsListener = null;
     }
 
     /** Plugin shutdown: shuts down the matchmaking panel and the

@@ -7,6 +7,7 @@ import javax.swing.BorderFactory;
 import javax.swing.Box;
 import javax.swing.BoxLayout;
 import javax.swing.JButton;
+import javax.swing.JComponent;
 import javax.swing.JLabel;
 import javax.swing.JPanel;
 import javax.swing.border.MatteBorder;
@@ -74,7 +75,11 @@ final class TournamentInfoCard extends JPanel
     private String whenPhrase;
     private String closesPhrase;
 
-    TournamentInfoCard(TournamentSummary t, String myStatus, boolean discordLoggedIn, ZoneId zone, LongSupplier nowMs, Actions actions)
+    /** {@code myCount} is the player's own match count in the event's bucket
+     *  ({@code null} when unknown); {@code refused} marks an event whose
+     *  registration was refused for its minimum. */
+    TournamentInfoCard(TournamentSummary t, String myStatus, boolean discordLoggedIn, ZoneId zone, LongSupplier nowMs, Actions actions,
+                       Integer myCount, boolean refused)
     {
         this.t = t;
         this.zone = zone;
@@ -95,6 +100,8 @@ final class TournamentInfoCard extends JPanel
         if (!prize.isEmpty()) addLine("tournament-prize-", prize, INFO);
         String ranks = rankLimitsLine(t);
         if (!ranks.isEmpty()) addLine("tournament-ranks-", ranks, MUTED);
+        String need = minGamesLine(t);
+        if (!need.isEmpty()) addLine("tournament-min-games-", need, MUTED);
         if (t.creatorName != null && !t.creatorName.trim().isEmpty()) addLine("tournament-host-", "Host: " + t.creatorName.trim(), MUTED);
         if (t.gearSet != null) addLine("tournament-kit-", kitLine(t), INFO);
         when.setName("tournament-when-" + t.tournamentId);
@@ -123,7 +130,7 @@ final class TournamentInfoCard extends JPanel
         rules.setName("tournament-rules-" + t.tournamentId);
         rules.addActionListener(e -> actions.rules(t));
         add(pairRow(report, rules));
-        JButton signUp = signUpButton(myStatus, actions);
+        JComponent signUp = signUp(myStatus, actions, myCount, refused);
         if (signUp != null)
         {
             add(Box.createVerticalStrut(4));
@@ -226,8 +233,10 @@ final class TournamentInfoCard extends JPanel
     }
 
     /** Register or Withdraw, whichever the event and the player's status
-     *  allow, as the card's full-width button; {@code null} for neither. */
-    private JButton signUpButton(String myStatus, Actions actions)
+     *  allow, as the card's full-width button; in Register's place the
+     *  minimum's sentence when the player is below it; {@code null} for
+     *  neither. */
+    private JComponent signUp(String myStatus, Actions actions, Integer myCount, boolean refused)
     {
         boolean registered = "registered".equals(myStatus);
         if (registered && (t.isOpenForRegistration() || t.isRunning()))
@@ -241,6 +250,16 @@ final class TournamentInfoCard extends JPanel
         }
         if (!registered && (t.isOpenForRegistration() || (t.isRunning() && t.midEventJoins)))
         {
+            if (belowMinimum(t, myCount, refused))
+            {
+                JLabel blocked = new JLabel();
+                blocked.setName("tournament-min-games-blocked-" + t.tournamentId);
+                blocked.setFont(blocked.getFont().deriveFont(Font.PLAIN, LINE_PT));
+                blocked.setText(wrapHtml(blocked.getFont(), TEXT_WIDTH_PX, minGamesRefusal(t)));
+                blocked.setForeground(INFO);
+                blocked.setAlignmentX(LEFT_ALIGNMENT);
+                return blocked;
+            }
             JButton register = TournamentsPanel.tabButton("Register");
             register.setName("tournament-register-" + t.tournamentId);
             register.setBackground(GREEN);
@@ -334,6 +353,35 @@ final class TournamentInfoCard extends JPanel
             else if (l.maxIdx >= 0) parts.add("max rank " + label + " " + rankLabel(l.maxIdx));
         }
         return capitalise(String.join(" · ", parts));
+    }
+
+    /** {@code "50 NH wins+losses required to join"}; {@code ""} when the event has no minimum. */
+    static String minGamesLine(TournamentSummary t)
+    {
+        if (t.minGames <= 0) return "";
+        return t.minGames + " " + bucketWord(t) + "wins+losses required to join";
+    }
+
+    /** {@code "Cannot join until you have at least 50 total NH matches played."} */
+    static String minGamesRefusal(TournamentSummary t)
+    {
+        return "Cannot join until you have at least " + t.minGames + " total " + bucketWord(t) + "matches played.";
+    }
+
+    /** {@code true} when the event has a minimum and the player is below it:
+     *  a known count under it, or a registration already refused for it.
+     *  An unknown or negative count is not below. */
+    static boolean belowMinimum(TournamentSummary t, Integer myCount, boolean refused)
+    {
+        if (t.minGames <= 0) return false;
+        if (refused) return true;
+        return myCount != null && myCount >= 0 && myCount < t.minGames;
+    }
+
+    /** The event bucket's label and a space ({@code "NH "}), or nothing when the event names no bucket. */
+    private static String bucketWord(TournamentSummary t)
+    {
+        return t.category == null || t.category.trim().isEmpty() ? "" : TournamentSummary.categoryLabel(t.category.trim()) + " ";
     }
 
     static String kitLine(TournamentSummary t)
