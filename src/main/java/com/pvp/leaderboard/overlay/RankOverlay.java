@@ -818,8 +818,10 @@ public class RankOverlay extends Overlay
                         sceneShardInFlight.remove(nameKey);
                         if (pex != null)
                         {
-                            log.debug("[Overlay] Scene profile lookup failed for {}: {}",
-                                playerName, pex.getMessage());
+                            sceneProfileMissUntilMs.put(nameKey,
+                                System.currentTimeMillis() + SCENE_PROFILE_MISS_BACKOFF_MS);
+                            log.debug("[Overlay] Scene profile lookup failed for {}: {} — profile backoff {}m",
+                                playerName, pex.getMessage(), SCENE_PROFILE_MISS_BACKOFF_MS / 60_000L);
                             return;
                         }
                         if (psr != null && psr.tier != null && !psr.tier.trim().isEmpty())

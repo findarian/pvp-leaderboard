@@ -8,6 +8,7 @@ import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
+import java.util.function.DoubleSupplier;
 import java.util.function.LongSupplier;
 
 @Slf4j
@@ -16,6 +17,8 @@ public final class GearStatusReporter implements TournamentEventListener
     public static final long SEND_DELAY_MS = 1_000L;
     public static final long RESEND_MS = 10_000L;
     static final long RATE_LIMIT_RETRY_MS = 1_000L;
+    static final long RATE_LIMIT_MAX_MS = 10_000L;
+    static final long RATE_LIMIT_JITTER_MS = 1_000L;
     static final long ERROR_RETRY_MS = 10_000L;
     static final long ERROR_BACKOFF_MAX_MS = 300_000L;
     static final long STALE_BACKOFF_START_MS = 1_000L;
@@ -82,6 +85,7 @@ public final class GearStatusReporter implements TournamentEventListener
     private final GearMatcher matcher;
     private final BooleanSupplier inCombat;
     private final LongSupplier nowMs;
+    private final DoubleSupplier jitter;
     private final List<Consumer<View>> listeners = new CopyOnWriteArrayList<>();
     private volatile View view = View.EMPTY;
 
@@ -94,9 +98,19 @@ public final class GearStatusReporter implements TournamentEventListener
     private long changeAtMs;
     private long staleBackoffMs = STALE_BACKOFF_START_MS;
     private long errorBackoffMs = ERROR_RETRY_MS;
+    private long rateLimitBackoffMs = RATE_LIMIT_RETRY_MS;
 
+    /** Without jitter; see the seven-argument constructor. */
     public GearStatusReporter(TournamentService service, GearEventTracker events, GearKitSource source, GearMatcher matcher,
                               BooleanSupplier inCombat, LongSupplier nowMs)
+    {
+        this(service, events, source, matcher, inCombat, nowMs, null);
+    }
+
+    /** {@code jitter} (0 to 1, {@code null} = 0) scales the up-to-{@link #RATE_LIMIT_JITTER_MS}
+     *  added to each {@code RATE_LIMITED} retry. */
+    public GearStatusReporter(TournamentService service, GearEventTracker events, GearKitSource source, GearMatcher matcher,
+                              BooleanSupplier inCombat, LongSupplier nowMs, DoubleSupplier jitter)
     {
         this.service = service;
         this.events = events;
@@ -104,6 +118,7 @@ public final class GearStatusReporter implements TournamentEventListener
         this.matcher = matcher == null ? new GearMatcher(null) : matcher;
         this.inCombat = inCombat == null ? () -> false : inCombat;
         this.nowMs = nowMs == null ? System::currentTimeMillis : nowMs;
+        this.jitter = jitter == null ? () -> 0.0 : jitter;
     }
 
     public View view()
@@ -201,6 +216,21 @@ public final class GearStatusReporter implements TournamentEventListener
         changeAtMs = 0;
     }
 
+    private long jitterMs()
+    {
+        double r;
+        try
+        {
+            r = jitter.getAsDouble();
+        }
+        catch (RuntimeException e)
+        {
+            r = 0.0;
+        }
+        if (Double.isNaN(r)) r = 0.0;
+        return Math.round(Math.max(0.0, Math.min(1.0, r)) * RATE_LIMIT_JITTER_MS);
+    }
+
     private static boolean safe(BooleanSupplier s)
     {
         try
@@ -229,6 +259,7 @@ public final class GearStatusReporter implements TournamentEventListener
         awaitingAck = false;
         staleBackoffMs = STALE_BACKOFF_START_MS;
         errorBackoffMs = ERROR_RETRY_MS;
+        rateLimitBackoffMs = RATE_LIMIT_RETRY_MS;
     }
 
     @Override
@@ -246,7 +277,8 @@ public final class GearStatusReporter implements TournamentEventListener
         switch (code == null ? "" : code)
         {
             case "RATE_LIMITED":
-                forceAtMs = now + RATE_LIMIT_RETRY_MS;
+                forceAtMs = now + rateLimitBackoffMs + jitterMs();
+                rateLimitBackoffMs = Math.min(rateLimitBackoffMs * 2, RATE_LIMIT_MAX_MS);
                 break;
             case "TOURNAMENT_GEAR_STALE":
                 service.status();

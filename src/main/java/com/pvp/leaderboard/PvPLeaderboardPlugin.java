@@ -276,6 +276,7 @@ public class PvPLeaderboardPlugin extends Plugin
 		// suppliers resolve at refresh time, not now, so it's fine that
 		// the local player isn't loaded yet.
 		lobbyJoinGate.configure(this::getLocalPlayerName, this::getClientUniqueId);
+		webSocketLobbyService.setJoinAllowed(() -> false);
 		dashboardPanel = new DashboardPanel(this, pvpDataService, discordAuthService,
 			webSocketLobbyService, lobbyJoinGate, lobbyPreferences);
 		// Plan 10 step 7: queue section + Tournaments sub-tab, per the two
@@ -498,20 +499,10 @@ public class PvPLeaderboardPlugin extends Plugin
 		}
 		fightMonitor.setCombatSink(null);
 		tournamentSessionTracker.clear();
-		if (dashboardPanel != null) dashboardPanel.shutdownTournaments();
+		if (dashboardPanel != null) dashboardPanel.shutdown();
 		clientToolbar.removeNavigation(navButton);
 		whitelistService.onLogout();
 		membershipService.onLogout();
-		// Send `lobby/leave` BEFORE closing the socket so the server can
-		// remove our OSRS-LobbyMembers row + broadcast a fresh roster
-		// to peers. AWS API Gateway $disconnect doesn't currently
-		// cascade to leave_lobby, so without
-		// this explicit leave the row sticks for the 30-min sliding
-		// TTL and other plugins keep seeing us as a "live" target.
-		// Best-effort: the service no-ops if no join was ever made,
-		// and any send-failure is swallowed so we still proceed to
-		// the hard socket teardown below.
-		try { webSocketLobbyService.leaveLobby(); } catch (Exception ignored) { /* hard shutdown */ }
 		// Tear down the lobby service's periodic rank-retry task so it
 		// doesn't keep firing on RuneLite's shared scheduler after the
 		// plugin is gone. Best-effort: never let teardown abort the
@@ -775,28 +766,8 @@ public class PvPLeaderboardPlugin extends Plugin
 				whitelistService.onLogout();
 				membershipService.onLogout();
 				pendingHeartbeatStart = false;
-				// Send `lobby/leave` BEFORE the socket close so the
-				// server removes our OSRS-LobbyMembers row + broadcasts
-				// a fresh roster to peers. $disconnect alone doesn't
-				// cascade to leave_lobby today, so without this our row
-				// sticks for the 30-min sliding TTL and remote plugins
-				// keep us in their roster as a dead invite target.
-				//
-				// preserveReplayState=true: the user is about to log
-				// back in. The reconnect-on-LOGGED_IN path runs
-				// replayJoinOnReconnect() from WebSocketLobbyService's
-				// connect listener, which needs lastJoinArgs to be
-				// non-null to actually re-issue lobby/join. Clearing it
-				// here (the pre-Nov 2026 behaviour) caused the silent
-				// "ghost-joined" state where the panel shows CARD_LOBBY
-				// but the server has no OSRS-LobbyMembers row, surfacing
-				// as the "we can't see each other / PEER_NOT_IN_LOBBY"
-				// QA report.
-				try { webSocketLobbyService.leaveLobby(true); } catch (Exception ignored) { /* clean logout best-effort */ }
-				// Close the socket cleanly so the server frees the
-				// OSRS-Connections row + cascades any outstanding
-				// invites/sessions. CLOSE_GOING_AWAY tells the server
-				// "intentional logout, no reconnect".
+				// Close the socket (CLOSE_GOING_AWAY: intentional
+				// logout, no reconnect).
 				webSocketManager.disconnect();
 				// Stop the hourly auto-refresh + clear cached counts so
 				// the next login (potentially a different character)
@@ -959,7 +930,7 @@ public class PvPLeaderboardPlugin extends Plugin
 		final com.pvp.leaderboard.tournament.GearStatusReporter reporter = new com.pvp.leaderboard.tournament.GearStatusReporter(webSocketTournamentService, tracker,
 			new com.pvp.leaderboard.game.GearKitRouter(arenaKitStore, duelKitReader, gearWatcher, arenaLocator),
 			new com.pvp.leaderboard.tournament.GearMatcher(runePouchRunes::isRune), fightMonitor::isInCombat,
-			System::currentTimeMillis);
+			System::currentTimeMillis, () -> java.util.concurrent.ThreadLocalRandom.current().nextDouble());
 		gearEventTracker = tracker;
 		gearStatusReporter = reporter;
 		webSocketTournamentService.addListener(tracker);

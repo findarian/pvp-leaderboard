@@ -31,6 +31,8 @@ public final class PvPLeaderboardConstants
      */
     public static final String WEBSOCKET_URL = "wss://api.pvp-leaderboard.com/prod";
 
+    public static final String PLUGIN_VERSION = "2.0.0";
+
     /**
      * Raw API Gateway invoke URL for the standalone {@code OSRS-DiscordAuth-API}
      * stage (no custom domain). Single source of the deployed API id — must

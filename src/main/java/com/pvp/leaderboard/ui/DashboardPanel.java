@@ -55,21 +55,14 @@ public class DashboardPanel extends PluginPanel
     private CardLayout viewCards;
     private JPanel viewContainer;
 
-    // Matchmaking sub-tabs. Set 7 (operator 2026-09-22): the lobby sub-card
-    // is the QUEUE VIEW for everyone (MatchmakingLobbyPanel's gate card with
-    // the one "Queue for Matchmaking" button); a moderator gets a two-state
-    // "Queue view" / "Mod view" toggle that swaps it for the roster, a regular
-    // player gets only "Tournaments", stretched over the row and toggling
-    // back to the queue view. The whole row is laid out by ONE method,
-    // layoutMatchmakingSubNav(), re-run on every gate tick because the mod
-    // status arrives with /user.
+    // Matchmaking sub-tabs: the lobby sub-card is the QUEUE VIEW for
+    // everyone (MatchmakingLobbyPanel's gate card with the one "Queue for
+    // Matchmaking" button); the row holds only "Tournaments", stretched over
+    // it and toggling back to the queue view.
     private static final String SUBCARD_LOBBY = "lobby";
     private static final String SUBCARD_TOURNAMENTS = "tournaments";
-    static final String VIEW_TOGGLE_QUEUE = "Queue view";
-    static final String VIEW_TOGGLE_MOD = "Mod view";
     static final String TOURNAMENTS_OFF_TOOLTIP = "Tournaments are turned off in the plugin settings";
     private JPanel matchmakingSubNav;
-    private JButton subTabViewToggleBtn;
     private JButton subTabTournamentsBtn;
     private CardLayout matchmakingSubCards;
     private JPanel matchmakingSubCardContainer;
@@ -175,9 +168,6 @@ public class DashboardPanel extends PluginPanel
         JPanel mainPanel = createMainPanel();
         disableNestedWheelScrolling(mainPanel);
         add(mainPanel, BorderLayout.CENTER);
-        // Set 7: the mod status rides on the gate's /user refresh — re-lay
-        // the Matchmaking sub-nav on every tick (EDT, the gate marshals).
-        this.joinGate.addListener(this::layoutMatchmakingSubNav);
     }
     
     private JPanel createMainPanel()
@@ -547,12 +537,10 @@ public class DashboardPanel extends PluginPanel
 
     /**
      * Matchmaking top-level card. Hosts its own sub-tab row plus a sub-card
-     * layout swapping between the matchmaking panel (the queue view — or,
-     * for a moderator, the roster) and the Tournaments panel (a greyed
-     * placeholder until {@link #setTournamentService} wires a service, or
-     * while the flag is off). The row itself is built by
-     * {@link #layoutMatchmakingSubNav()} — one place to change when the
-     * operator settles the exact non-mod layout.
+     * layout swapping between the matchmaking panel (the queue view) and
+     * the Tournaments panel (a greyed placeholder until
+     * {@link #setTournamentService} wires a service, or while the flag is
+     * off). The row holds the Tournaments button alone, in one grid cell.
      */
     private JPanel createMatchmakingCard()
     {
@@ -574,21 +562,6 @@ public class DashboardPanel extends PluginPanel
         // bit MatchmakingLobbyPanel.buildUi() — see leftAlignedStrut() there.
         matchmakingSubNav.setAlignmentX(LEFT_ALIGNMENT);
 
-        // Set 7: the moderator's two-state toggle. Its label names the view
-        // that is showing ("Queue view" / "Mod view"); a click swaps them.
-        subTabViewToggleBtn = new JButton(VIEW_TOGGLE_QUEUE);
-        subTabViewToggleBtn.setName("matchmaking-view-toggle");
-        subTabViewToggleBtn.setMargin(new Insets(1, 4, 1, 4));
-        // Always BOLD — same rationale as the top tab buttons (see makeTabButton).
-        subTabViewToggleBtn.setFont(subTabViewToggleBtn.getFont().deriveFont(Font.BOLD, NAV_FONT_PT));
-        subTabViewToggleBtn.setFocusPainted(false);
-        applyTabActiveStyle(subTabViewToggleBtn, true);
-        subTabViewToggleBtn.addActionListener(e ->
-        {
-            if (matchmakingLobbyPanel != null) matchmakingLobbyPanel.setModView(!matchmakingLobbyPanel.isModView());
-            setActiveMatchmakingSubTab(SUBCARD_LOBBY);
-        });
-
         final String tournamentsDefault = "Tournaments";
         // Set 7: the greyed button's click flash says why it is greyed — the
         // plugin's own setting — never "check Discord" (tournaments live here).
@@ -596,6 +569,7 @@ public class DashboardPanel extends PluginPanel
         subTabTournamentsBtn = new JButton(tournamentsDefault);
         subTabTournamentsBtn.setName("matchmaking-tournaments-tab");
         subTabTournamentsBtn.setMargin(new Insets(1, 4, 1, 4));
+        // Always BOLD — same rationale as the top tab buttons (see makeTabButton).
         subTabTournamentsBtn.setFont(subTabTournamentsBtn.getFont().deriveFont(Font.BOLD, NAV_FONT_PT));
         subTabTournamentsBtn.setEnabled(false);
         subTabTournamentsBtn.setFocusPainted(false);
@@ -627,9 +601,6 @@ public class DashboardPanel extends PluginPanel
         matchmakingLobbyPanel = new MatchmakingLobbyPanel(lobbyService, joinGate, lobbyPreferences);
         // Lobby profile-row clicks → same code path as right-click "PvP lookup".
         matchmakingLobbyPanel.setOnOpenProfile(this::openPlayerLookup);
-        // Set 7: the panel switches view on its own too (Go to lobby, Leave
-        // Lobby, logout) — keep the "Queue view" / "Mod view" label honest.
-        matchmakingLobbyPanel.setOnViewChanged(this::refreshViewToggleLabel);
         // Self-profile preview ("Your profile displayed to others")
         // above the rank slider — supplies the local OSRS name lazily
         // so the row pre-login renders empty (supplier returns null)
@@ -659,51 +630,8 @@ public class DashboardPanel extends PluginPanel
         matchmakingSubCardContainer.add(tournamentsPlaceholder, SUBCARD_TOURNAMENTS);
 
         card.add(matchmakingSubCardContainer);
-        layoutMatchmakingSubNav();
-        return card;
-    }
-
-    /** Set 7 — THE place the Matchmaking sub-nav is laid out (operator
-     *  2026-09-22: "the lobby that shows all the open socket connections
-     *  with players should only be visible to mods and you can click 'queue
-     *  view' or 'mod view' … It would not even exist there for everyone
-     *  else and the tournament button would stretch to fill it"). A
-     *  moderator ({@link com.pvp.leaderboard.lobby.LobbyJoinGate#isMod()})
-     *  gets [Queue view | Mod view toggle] [Tournaments]; everyone else gets
-     *  [Tournaments] alone, stretched over the row (one grid cell), with the
-     *  queue view underneath whenever Tournaments is not selected. Re-run on
-     *  every gate tick, so the mod status may arrive after the panel is
-     *  built; losing it drops the roster and the toggle at once. */
-    private void layoutMatchmakingSubNav()
-    {
-        if (matchmakingSubNav == null || subTabTournamentsBtn == null) return;
-        boolean mod = joinGate.isMod();
-        matchmakingSubNav.removeAll();
-        if (mod)
-        {
-            matchmakingSubNav.setLayout(new GridLayout(1, 2, 4, 0));
-            matchmakingSubNav.add(subTabViewToggleBtn);
-        }
-        else
-        {
-            matchmakingSubNav.setLayout(new GridLayout(1, 1, 4, 0));
-            if (matchmakingLobbyPanel != null) matchmakingLobbyPanel.setModView(false);
-        }
         matchmakingSubNav.add(subTabTournamentsBtn);
-        refreshViewToggleLabel();
-        matchmakingSubNav.revalidate();
-        matchmakingSubNav.repaint();
-    }
-
-    /** The toggle names the view that is showing; the tooltip the other one. */
-    private void refreshViewToggleLabel()
-    {
-        if (subTabViewToggleBtn == null) return;
-        boolean modView = matchmakingLobbyPanel != null && matchmakingLobbyPanel.isModView();
-        subTabViewToggleBtn.setText(modView ? VIEW_TOGGLE_MOD : VIEW_TOGGLE_QUEUE);
-        subTabViewToggleBtn.setToolTipText(modView
-            ? "Switch to the queue view (Queue for Matchmaking)"
-            : "Switch to the mod view (the lobby roster)");
+        return card;
     }
 
     private void setActiveMatchmakingSubTab(String key)
@@ -712,8 +640,6 @@ public class DashboardPanel extends PluginPanel
         if (matchmakingSubCards != null && matchmakingSubCardContainer != null) {
             matchmakingSubCards.show(matchmakingSubCardContainer, key);
         }
-        applyTabActiveStyle(subTabViewToggleBtn, SUBCARD_LOBBY.equals(key));
-        refreshViewToggleLabel();
         // Tournaments only lights up once the live panel exists (Plan 10 F.3);
         // the greyed placeholder never does.
         boolean tournamentsActive = tournamentsPanel != null && SUBCARD_TOURNAMENTS.equals(key);
@@ -772,9 +698,7 @@ public class DashboardPanel extends PluginPanel
         if (!tournamentsTabListenerAdded)
         {
             // The greyed-state mouse listener is inert once the button is enabled.
-            // Set 7: a toggle — a second click returns to the queue view (or the
-            // moderator's current view), which is the only way back for a
-            // regular player, who has no other sub-tab button.
+            // A toggle: a second click returns to the queue view.
             subTabTournamentsBtn.addActionListener(e -> setActiveMatchmakingSubTab(
                 SUBCARD_TOURNAMENTS.equals(activeMatchmakingSubTab) ? SUBCARD_LOBBY : SUBCARD_TOURNAMENTS));
             tournamentsTabListenerAdded = true;
@@ -798,6 +722,14 @@ public class DashboardPanel extends PluginPanel
     public void shutdownTournaments()
     {
         if (tournamentsPanel != null) tournamentsPanel.shutdown();
+    }
+
+    /** Plugin shutdown: shuts down the matchmaking panel and the
+     *  Tournaments tab. */
+    public void shutdown()
+    {
+        if (matchmakingLobbyPanel != null) matchmakingLobbyPanel.shutdown();
+        shutdownTournaments();
     }
 
     private javax.swing.JComponent tournamentGearCard;

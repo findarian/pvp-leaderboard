@@ -37,16 +37,9 @@ import java.util.function.Supplier;
  *   LOGGED_IN}; kicks off an immediate refresh and starts the hourly
  *   auto-refresh timer.</li>
  *   <li>{@link #onLogout} fires from {@code LOGIN_SCREEN}; cancels the
- *   timer and clears the count map (returning to "unknown" state). The
- *   gate doesn't tear down listeners — the panel is registered for the
- *   lifetime of the dashboard.</li>
+ *   timer and clears the count map (returning to "unknown" state).
+ *   Listeners stay registered until {@link #removeListener}.</li>
  * </ol>
- *
- * <p><b>Why no listener removal?</b> The only known caller is
- * {@code MatchmakingLobbyPanel}, which is a singleton-lifetime
- * collaborator; adding {@code removeListener} just invites lifecycle
- * bugs where the panel forgets to clean up. Mirror of the same decision
- * in {@code WebSocketManager.addConnectListener}.
  */
 @Slf4j
 @Singleton
@@ -589,6 +582,12 @@ public final class UserProfileLobbyJoinGate implements LobbyJoinGate
     public void addListener(Runnable listener)
     {
         if (listener != null) listeners.add(listener);
+    }
+
+    @Override
+    public void removeListener(Runnable listener)
+    {
+        if (listener != null) listeners.remove(listener);
     }
 
     private void fireListenersOnEdt()

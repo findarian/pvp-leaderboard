@@ -7,6 +7,7 @@ import com.pvp.leaderboard.service.PvPDataService;
 import com.pvp.leaderboard.service.ShardRank;
 import com.pvp.leaderboard.service.socket.SocketEventBus;
 import com.pvp.leaderboard.service.socket.WebSocketManager;
+import com.pvp.leaderboard.util.NameUtils;
 import com.pvp.leaderboard.util.RankUtils;
 import com.pvp.leaderboard.util.SlowPathMonitor;
 import lombok.extern.slf4j.Slf4j;
@@ -26,8 +27,10 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.BooleanSupplier;
 
 /**
  * Production {@link LobbyService} that adapts the wire protocol to the
@@ -62,10 +65,10 @@ import java.util.concurrent.atomic.AtomicLong;
  * {@link #send(String, JsonObject)} just hands off to its internal
  * {@code WebSocket.send(String)} which is thread-safe.
  *
- * <p><b>Leave-cascade fast-path</b>: when another member's leave
- * invalidates this viewer's filtered roster the server pushes
- * {@code lobby/roster {members: null, stale: true}}. This service
- * re-issues {@code lobby/join} so the server rebuilds + repushes.
+ * <p><b>Stale roster</b>: a {@code lobby/roster} with {@code stale: true}
+ * or without {@code members} re-issues {@code lobby/join} after a
+ * growing, jittered delay ({@link #STALE_REJOIN_BASE_MS} doubling up to
+ * {@link #STALE_REJOIN_MAX_MS}), one at a time.
  */
 @Slf4j
 @Singleton
@@ -283,6 +286,38 @@ public class WebSocketLobbyService implements LobbyService
         this(socket, bus, pvpDataService, null);
     }
 
+    /** A join with the same arguments as the last one sent less than this
+     *  long ago is not sent again. */
+    static final long JOIN_REPEAT_WINDOW_MS = 5_000L;
+    static final long STALE_REJOIN_BASE_MS = 5_000L;
+    static final long STALE_REJOIN_MAX_MS = 60_000L;
+
+    private volatile BooleanSupplier joinAllowed = () -> true;
+
+    private final Object joinRepeatLock = new Object();
+    private JoinArgs lastSentJoinArgs;
+    private long lastSentJoinAtMs;
+
+    private ScheduledFuture<?> staleRejoin;
+    private int staleRejoinAttempt;
+
+    static final int QUEUE_OPPONENTS_MAX = 16;
+    /** {@code queue/matched} opponent by {@code fight_session_id}. */
+    private final Map<String, LobbyMember> queueOpponents = new ConcurrentHashMap<>();
+
+    /** {@code lobby/join} leaves the client only while {@code joinAllowed}
+     *  says so; {@code null} allows every join. */
+    public void setJoinAllowed(BooleanSupplier joinAllowed)
+    {
+        this.joinAllowed = joinAllowed == null ? () -> true : joinAllowed;
+    }
+
+    /** Uniform in [0, 1); overridable in tests. */
+    double nextRandom()
+    {
+        return ThreadLocalRandom.current().nextDouble();
+    }
+
     @Override
     public void setListener(LobbyEventListener listener)
     {
@@ -307,6 +342,7 @@ public class WebSocketLobbyService implements LobbyService
         bus.register("lobby/session_expired",         this::handleSessionExpired);
         bus.register("lobby/displaced",               this::handleDisplaced);
         bus.register("error/lobby",                   this::handleError);
+        bus.register("queue/matched",                 this::handleQueueMatched);
         // Single connect listener — runs both reconnect-resilience
         // hooks in deterministic order: re-issue lobby/join first
         // (restores server-side presence) then flush any
@@ -342,6 +378,8 @@ public class WebSocketLobbyService implements LobbyService
      *  OkHttp's dispatcher thread. */
     private void onSocketReconnected()
     {
+        cancelStaleRejoin();
+        forgetLastSentJoin();
         replayJoinOnReconnect();
         flushPendingConfirm();
     }
@@ -364,6 +402,7 @@ public class WebSocketLobbyService implements LobbyService
             handle.cancel(false);
             rankRetryHandle = null;
         }
+        cancelStaleRejoin();
         // Bus registrations are intentionally left in place — the bus
         // has no unregister API and re-using the service across panel
         // open/close cycles is the desired behaviour (server-side
@@ -380,6 +419,11 @@ public class WebSocketLobbyService implements LobbyService
     public void joinLobby(String region, Set<Style> styles, Set<BuildType> builds,
                           int minDisplayRankIdx, int maxDisplayRankIdx, String sortBucket)
     {
+        if (!joinAllowed.getAsBoolean())
+        {
+            log.debug("WebSocketLobbyService: joinLobby not sent (not allowed)");
+            return;
+        }
         // Normalise + default the bucket so a bad/empty caller-supplied
         // value can't reach the wire as a non-string. Allowed buckets
         // mirror backend.core.lobby.ALLOWED_BUCKETS = {"overall", "nh",
@@ -393,7 +437,19 @@ public class WebSocketLobbyService implements LobbyService
             default:
                 normBucket = "overall";
         }
-        lastJoinArgs = new JoinArgs(region, styles, builds, minDisplayRankIdx, maxDisplayRankIdx, normBucket);
+        JoinArgs args = new JoinArgs(region, styles, builds, minDisplayRankIdx, maxDisplayRankIdx, normBucket);
+        lastJoinArgs = args;
+        long now = currentTimeMillis();
+        synchronized (joinRepeatLock)
+        {
+            if (args.equals(lastSentJoinArgs) && now - lastSentJoinAtMs < JOIN_REPEAT_WINDOW_MS)
+            {
+                log.debug("WebSocketLobbyService: joinLobby repeat within {} ms not sent", JOIN_REPEAT_WINDOW_MS);
+                return;
+            }
+            lastSentJoinArgs = args;
+            lastSentJoinAtMs = now;
+        }
         log.debug("WebSocketLobbyService: joinLobby region={} styles={} builds={} rankRange=[{},{}] bucket={}",
             region, styles, builds, minDisplayRankIdx, maxDisplayRankIdx, normBucket);
         JsonObject d = new JsonObject();
@@ -409,9 +465,56 @@ public class WebSocketLobbyService implements LobbyService
         // user who joins then immediately tweaks the slider shouldn't
         // double-fire a redundant update_range inside the cool-down
         // window. The clock reset also covers the auto-rejoin path.
-        lastRangeUpdateAtMs = currentTimeMillis();
+        lastRangeUpdateAtMs = now;
         pendingRangeMin = minDisplayRankIdx;
         pendingRangeMax = maxDisplayRankIdx;
+    }
+
+    private void forgetLastSentJoin()
+    {
+        synchronized (joinRepeatLock)
+        {
+            lastSentJoinArgs = null;
+        }
+    }
+
+    /** Schedules one {@code lobby/join} replay after a delay that grows
+     *  with each consecutive stale roster; no-op while one is pending or
+     *  without a scheduler. */
+    private synchronized void scheduleStaleRejoin()
+    {
+        if (scheduler == null) return;
+        if (staleRejoin != null && !staleRejoin.isDone()) return;
+        staleRejoinAttempt++;
+        long base = STALE_REJOIN_BASE_MS << Math.min(staleRejoinAttempt - 1, 4);
+        if (base > STALE_REJOIN_MAX_MS) base = STALE_REJOIN_MAX_MS;
+        long delay = base + Math.round(nextRandom() * (base / 2));
+        log.debug("WebSocketLobbyService: stale roster - lobby/join in {} ms", delay);
+        staleRejoin = scheduler.schedule(this::staleRejoinTick, delay, TimeUnit.MILLISECONDS);
+    }
+
+    private void staleRejoinTick()
+    {
+        synchronized (this)
+        {
+            staleRejoin = null;
+        }
+        replayJoinOnReconnect();
+    }
+
+    private synchronized void cancelStaleRejoin()
+    {
+        if (staleRejoin != null)
+        {
+            staleRejoin.cancel(false);
+            staleRejoin = null;
+        }
+    }
+
+    private synchronized void resetStaleRejoin()
+    {
+        cancelStaleRejoin();
+        staleRejoinAttempt = 0;
     }
 
     @Override
@@ -504,6 +607,8 @@ public class WebSocketLobbyService implements LobbyService
         //     to find lastJoinArgs populated so replayJoinOnReconnect
         //     re-issues lobby/join automatically.
         if (!preserveReplayState) lastJoinArgs = null;
+        cancelStaleRejoin();
+        forgetLastSentJoin();
         socket.send("lobby/leave", new JsonObject());
     }
 
@@ -732,16 +837,17 @@ public class WebSocketLobbyService implements LobbyService
 
     private void handleRosterTimed(JsonObject data)
     {
-        // Leave-cascade fast-path: server tells us its filtered view
-        // is stale and a fresh lobby/join will regenerate it.
+        // A stale roster, or one without members: lobby/join again
+        // after scheduleStaleRejoin's delay.
         boolean stale = data.has("stale") && data.get("stale").getAsBoolean();
         JsonElement membersEl = data.get("members");
         if (stale || membersEl == null || membersEl.isJsonNull())
         {
-            log.debug("WebSocketLobbyService: lobby/roster stale or null members - re-sending lobby/join");
-            replayJoinOnReconnect();
+            forgetLastSentJoin();
+            scheduleStaleRejoin();
             return;
         }
+        resetStaleRejoin();
         JsonArray members = membersEl.getAsJsonArray();
         List<LobbyMember> roster = new ArrayList<>(members.size());
         Map<String, LobbyMember> nextCache = new HashMap<>();
@@ -1332,6 +1438,7 @@ public class WebSocketLobbyService implements LobbyService
     {
         String sid = optString(data, "fight_session_id");
         if (sid.isEmpty()) return;
+        forgetLastSentJoin();
         // A new fight is being proposed — any confirm buffered against
         // a *previous* (now-defunct) session is stale. Drop it so a
         // belated flush doesn't try to confirm a session the server
@@ -1394,6 +1501,7 @@ public class WebSocketLobbyService implements LobbyService
     {
         String sid = optString(data, "fight_session_id");
         if (sid.isEmpty()) return;
+        forgetLastSentJoin();
         Style style = parseStyle(optString(data, "style"));
         BuildType build = parseBuild(optString(data, "build"));
         if (style == null || build == null) return;
@@ -1402,6 +1510,7 @@ public class WebSocketLobbyService implements LobbyService
         String world = optString(data, "world");
         String meetingPlace = optString(data, "meeting_place");
         LobbyMember opponent = resolveOpponent(data);
+        queueOpponents.remove(sid);
         if (opponent == null) return;
         // Server has already deleted both LobbyMembers rows + the
         // session at this point — the lobby state is consumed, clear
@@ -1420,7 +1529,9 @@ public class WebSocketLobbyService implements LobbyService
     {
         String sid = optString(data, "fight_session_id");
         if (sid.isEmpty()) return;
+        forgetLastSentJoin();
         if (sid.equals(currentFightSessionId)) currentFightSessionId = null;
+        queueOpponents.remove(sid);
         // 30-s confirm window elapsed — any buffered confirm against
         // this session is moot, drop it so a future reconnect doesn't
         // ship a confirm for a session that no longer exists.
@@ -1456,6 +1567,8 @@ public class WebSocketLobbyService implements LobbyService
             activeName);
         // Break the join/displace ping-pong: a reconnect must not re-join.
         lastJoinArgs = null;
+        cancelStaleRejoin();
+        forgetLastSentJoin();
         currentFightSessionId = null;
         LobbyEventListener l = listener;
         if (l == null) return;
@@ -1466,6 +1579,7 @@ public class WebSocketLobbyService implements LobbyService
     {
         String code = optString(data, "code");
         String message = optString(data, "message");
+        forgetLastSentJoin();
         // Surfaced at WARN because error/lobby pushes are exceptional
         // by definition — the user is going to ask why their fight
         // button didn't work, and the answer is almost always in this
@@ -1496,23 +1610,75 @@ public class WebSocketLobbyService implements LobbyService
     // ---------------------------------------------------------------
 
     /** Returns the opponent {@link LobbyMember} for a
-     *  {@code fight_proposed} / {@code match_found} push.
-     *  When one of player_a / player_b is in the roster cache that
-     *  row is the opponent; otherwise builds a minimal member from
-     *  player_a's id + name on the wire. */
+     *  {@code fight_proposed} / {@code match_found} push: the
+     *  {@code queue/matched} opponent of that session when one arrived,
+     *  else the side whose {@code player_id} (or, without ids, name) is
+     *  not {@link WebSocketManager#getActiveName()}, its roster row when
+     *  cached. When neither side is recognised: the roster row of either
+     *  side, else player_a's id + name on the wire; {@code null} without
+     *  ids. */
     private LobbyMember resolveOpponent(JsonObject data)
     {
+        LobbyMember queued = queueOpponents.get(optString(data, "fight_session_id"));
+        if (queued != null) return queued;
         String a = optString(data, "player_a_player_id");
         String b = optString(data, "player_b_player_id");
-        if (a.isEmpty() || b.isEmpty()) return null;
+        String aName = optString(data, "player_a_name");
+        String bName = optString(data, "player_b_name");
+        String self = NameUtils.canonicalKey(socket.getActiveName());
+        if (a.isEmpty() || b.isEmpty())
+        {
+            if (self.isEmpty() || aName.isEmpty() || bName.isEmpty()) return null;
+            String aKey = NameUtils.canonicalKey(aName);
+            String bKey = NameUtils.canonicalKey(bName);
+            if (self.equals(aKey) && !self.equals(bKey)) return minimalMember(bKey, bName);
+            if (self.equals(bKey) && !self.equals(aKey)) return minimalMember(aKey, aName);
+            return null;
+        }
+        if (!self.isEmpty())
+        {
+            boolean selfIsA = self.equals(NameUtils.canonicalKey(a));
+            boolean selfIsB = self.equals(NameUtils.canonicalKey(b));
+            if (selfIsA != selfIsB)
+            {
+                String id = selfIsA ? b : a;
+                LobbyMember row = rosterByPlayerId.get(id);
+                return row != null ? row : minimalMember(id, selfIsA ? bName : aName);
+            }
+        }
         LobbyMember aRow = rosterByPlayerId.get(a);
         LobbyMember bRow = rosterByPlayerId.get(b);
         if (aRow != null && bRow == null) return aRow;
         if (bRow != null && aRow == null) return bRow;
         if (aRow != null) return aRow;
-        return new LobbyMember(a, optString(data, "player_a_name"),
+        return minimalMember(a, aName);
+    }
+
+    private static LobbyMember minimalMember(String playerId, String name)
+    {
+        return new LobbyMember(playerId, name,
             EnumSet.noneOf(Style.class), EnumSet.noneOf(BuildType.class),
             -1, -1, "", false);
+    }
+
+    /** {@code queue/matched}: remembers the session's opponent for
+     *  {@link #resolveOpponent}. */
+    private void handleQueueMatched(JsonObject data)
+    {
+        String sid = optString(data, "fight_session_id");
+        String name = optString(data, "opponent_name");
+        String playerId = optString(data, "opponent_player_id");
+        if (sid.isEmpty() || (name.isEmpty() && playerId.isEmpty())) return;
+        if (playerId.isEmpty()) playerId = NameUtils.canonicalKey(name);
+        if (name.isEmpty()) name = playerId;
+        Style style = parseStyle(optString(data, "style"));
+        BuildType build = parseBuild(optString(data, "opponent_build"));
+        LobbyMember opponent = new LobbyMember(playerId, name,
+            style == null ? EnumSet.noneOf(Style.class) : EnumSet.of(style),
+            build == null ? EnumSet.noneOf(BuildType.class) : EnumSet.of(build),
+            -1, -1, optString(data, "opponent_region"), false);
+        if (queueOpponents.size() >= QUEUE_OPPONENTS_MAX) queueOpponents.clear();
+        queueOpponents.put(sid, opponent);
     }
 
     private LobbyMember parseMember(JsonObject m)
@@ -1688,6 +1854,26 @@ public class WebSocketLobbyService implements LobbyService
             this.minDisplayRankIdx = minDisplayRankIdx;
             this.maxDisplayRankIdx = maxDisplayRankIdx;
             this.sortBucket = sortBucket == null ? "overall" : sortBucket;
+        }
+
+        @Override
+        public boolean equals(Object o)
+        {
+            if (this == o) return true;
+            if (!(o instanceof JoinArgs)) return false;
+            JoinArgs j = (JoinArgs) o;
+            return minDisplayRankIdx == j.minDisplayRankIdx
+                && maxDisplayRankIdx == j.maxDisplayRankIdx
+                && java.util.Objects.equals(region, j.region)
+                && styles.equals(j.styles)
+                && builds.equals(j.builds)
+                && sortBucket.equals(j.sortBucket);
+        }
+
+        @Override
+        public int hashCode()
+        {
+            return java.util.Objects.hash(region, styles, builds, minDisplayRankIdx, maxDisplayRankIdx, sortBucket);
         }
     }
 }

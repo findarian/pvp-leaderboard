@@ -57,9 +57,9 @@ public class WebSocketQueueService implements QueueService
         bus.register("queue/timeout", this::handleTimeout);
         bus.register("queue/prefs", this::handlePrefs);
         bus.register("error/queue", this::handleError);
-        // ONE connect listener: re-sync the queue row and re-read the
+        // ONE re-sync listener: re-sync the queue row and re-read the
         // shared prefs row (G-2) in the same hook.
-        socket.addConnectListener(this::onSocketConnected);
+        socket.addResyncListener(this::onSocketConnected);
     }
 
     /** Socket (re-)open: ask for the live queue row and the shared prefs. */

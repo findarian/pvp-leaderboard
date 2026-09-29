@@ -129,9 +129,12 @@ public interface LobbyJoinGate
      *  time {@link #getMatchCounts()}, {@link #getLastRefreshEpochMs()},
      *  or {@link #isRefreshing()} could have changed. Listeners are not
      *  de-duplicated — adding the same {@code Runnable} twice will fire
-     *  it twice. There is no {@code removeListener}: the panel that
-     *  registers is a singleton-lifetime collaborator. */
+     *  it twice. {@link #removeListener} unregisters one. */
     void addListener(Runnable listener);
+
+    /** Unregisters one registration of {@code listener}; unknown or
+     *  {@code null} is a no-op. */
+    default void removeListener(Runnable listener) { }
 
     /** Helper: how many more matches the user needs in {@code style}
      *  before they can queue it. Returns 0 if already unlocked, or

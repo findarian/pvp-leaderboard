@@ -15,11 +15,17 @@ import okio.ByteString;
 import javax.annotation.Nullable;
 import javax.inject.Inject;
 import javax.inject.Singleton;
+import java.util.ArrayDeque;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.DoubleSupplier;
+import java.util.function.LongSupplier;
 import java.util.regex.Pattern;
 
 /**
@@ -41,19 +47,24 @@ import java.util.regex.Pattern;
  * current connection (close 1000) and connects fresh — but in practice
  * UUID doesn't change mid-session.
  *
- * <p><b>Reconnect policy</b>: exponential backoff
- * {@code 1s → 2s → 4s → 8s → 16s → 32s → 60s} (cap), reset to 1 s on
- * successful open. Triggered by abnormal close codes (anything other
- * than 1000 / 1001) AND by network-level {@code onFailure}.
+ * <p><b>Reconnect policy</b>: a jittered exponential backoff, see
+ * {@link #reconnectDelayMs(int, double)}. The attempt count grows with
+ * every connection that fails or closes before
+ * {@link #STABLE_CONNECTION_MS} and resets once one stays open that long.
+ * Triggered by abnormal close codes (anything other than 1000 / 1001)
+ * AND by network-level {@code onFailure}. A {@link #connect} while a
+ * retry is scheduled leaves that retry in place, and more than
+ * {@link #OPEN_BURST} opens within {@link #OPEN_BURST_WINDOW_MS} wait
+ * for a scheduled retry.
  *
- * <p>HTTP 401 (server stealth-refuse) drops into a fixed
- * <b>1-minute slow-retry</b> instead of the fast 1s/2s/4s ladder.
- * Bounded enough that a server-side state change (unban, WAF policy
- * update) is picked up within a minute without requiring a RuneLite
- * restart; spaced enough that the per-IP hit rate stays well under
- * any auto-ban trigger. The panel surfaces a "Attempting to
- * reconnect" banner with the countdown so the user sees the retry
- * is in flight (see {@link #getNextReconnectAttemptEpochMs()}).
+ * <p>HTTP 401 retries after {@link #authRefusedDelayMs(double)}. The
+ * panel surfaces a "Attempting to reconnect" banner with the countdown
+ * (see {@link #getNextReconnectAttemptEpochMs()}).
+ *
+ * <p>{@code error/rate_limited} with {@code retry_at_epoch_ms} holds
+ * outgoing frames until that time, at most
+ * {@link #RATE_LIMIT_MAX_HOLD_MS}: the named {@code cmd}, or every frame
+ * when none is named.
  *
  * <p><b>Keepalive</b>: RFC 6455 native ping every 8 min
  * ({@link OkHttpClient.Builder#pingInterval}). API Gateway's idle
@@ -93,23 +104,23 @@ public final class WebSocketManager
 
     private static final long PING_INTERVAL_MIN = 8L;
 
-    /** Initial reconnect delay; doubles up to {@link #BACKOFF_MAX_MS}. */
-    private static final long BACKOFF_INITIAL_MS = 1_000L;
-    private static final long BACKOFF_MAX_MS = 60_000L;
-
-    /** Fixed 1-minute retry interval used after an HTTP 401
-     *  stealth-refuse. Separate from {@link #BACKOFF_INITIAL_MS} /
-     *  {@link #BACKOFF_MAX_MS} so a normal-close reconnect doesn't
-     *  promote into the slow lane and a 401 doesn't drop into the
-     *  1-second cadence. See class javadoc on the reconnect policy
-     *  for the rationale. */
-    private static final long AUTH_REFUSED_RETRY_MS = 60_000L;
+    static final long BACKOFF_MIN_MS = 1_000L;
+    static final long BACKOFF_MAX_MS = 60_000L;
+    static final long STABLE_CONNECTION_MS = 30_000L;
+    static final long AUTH_REFUSED_RETRY_MIN_MS = 30_000L;
+    static final long AUTH_REFUSED_RETRY_MAX_MS = 90_000L;
+    static final long RESYNC_MAX_DELAY_MS = 5_000L;
+    static final int OPEN_BURST = 5;
+    static final long OPEN_BURST_WINDOW_MS = 60_000L;
+    static final long RATE_LIMIT_MAX_HOLD_MS = 60_000L;
 
     private final OkHttpClient sharedHttpClient;
     private final SocketEventBus eventBus;
     private final ScheduledExecutorService scheduler;
     private final Gson gson;
     private final com.pvp.leaderboard.config.PvPLeaderboardConfig config;
+    private final LongSupplier clock;
+    private final DoubleSupplier random;
 
     /** Lazily-built pinging client; reuses the shared client's connection
      *  pool / dispatcher via {@code newBuilder()} so we don't double up
@@ -136,7 +147,13 @@ public final class WebSocketManager
      *  default" and validates non-null names against the MMR row's
      *  {@code player_names} set (anti-spoof). */
     private String activeName;
-    private long currentBackoffMs = BACKOFF_INITIAL_MS;
+    /** Consecutive scheduled reconnects since a socket last stayed open
+     *  {@link #STABLE_CONNECTION_MS}. */
+    private int retryAttempt;
+    /** Clock reading at the current socket's open; {@code 0} when none is open. */
+    private long openedAtMs;
+    /** Clock readings of the recent opens, oldest first. */
+    private final ArrayDeque<Long> recentOpensMs = new ArrayDeque<>();
     private ScheduledFuture<?> pendingReconnect;
     /** Epoch ms when {@link #pendingReconnect} is scheduled to fire,
      *  or {@code 0} when no retry is queued. Exposed via
@@ -164,6 +181,13 @@ public final class WebSocketManager
      *  during an open-callback doesn't trip CME. */
     private final CopyOnWriteArrayList<Runnable> connectListeners = new CopyOnWriteArrayList<>();
 
+    private final CopyOnWriteArrayList<Runnable> resyncListeners = new CopyOnWriteArrayList<>();
+
+    /** Clock reading until which every outgoing frame is held; {@code 0} when none is. */
+    private volatile long holdAllUntilMs;
+    /** Per-cmd hold, clock reading until which that cmd is held. */
+    private final Map<String, Long> holdCmdUntilMs = new ConcurrentHashMap<>();
+
     @Inject
     public WebSocketManager(OkHttpClient sharedHttpClient,
                             SocketEventBus eventBus,
@@ -171,11 +195,26 @@ public final class WebSocketManager
                             Gson gson,
                             com.pvp.leaderboard.config.PvPLeaderboardConfig config)
     {
+        this(sharedHttpClient, eventBus, scheduler, gson, config,
+            System::currentTimeMillis, () -> ThreadLocalRandom.current().nextDouble());
+    }
+
+    WebSocketManager(OkHttpClient sharedHttpClient,
+                     SocketEventBus eventBus,
+                     ScheduledExecutorService scheduler,
+                     Gson gson,
+                     com.pvp.leaderboard.config.PvPLeaderboardConfig config,
+                     LongSupplier clock,
+                     DoubleSupplier random)
+    {
         this.sharedHttpClient = sharedHttpClient;
         this.eventBus = eventBus;
         this.scheduler = scheduler;
         this.gson = gson;
         this.config = config;
+        this.clock = clock;
+        this.random = random;
+        if (eventBus != null) eventBus.register("error/rate_limited", this::onRateLimited);
     }
 
     /**
@@ -271,12 +310,17 @@ public final class WebSocketManager
             try { activeSocket.close(CLOSE_NORMAL, reason); }
             catch (Exception ignored) { /* best-effort */ }
             activeSocket = null;
+            noteSocketEndedLocked();
         }
         intentionalDisconnect = false;
         activeUuid = uuid;
         activeName = normName;
+        if (pendingReconnect != null && !pendingReconnect.isDone())
+        {
+            return;
+        }
         cancelPendingReconnect();
-        openSocketLocked();
+        openNowOrDeferLocked();
     }
 
     /**
@@ -298,10 +342,10 @@ public final class WebSocketManager
         try { activeSocket.close(CLOSE_NORMAL, "config_change"); }
         catch (Exception ignored) { /* best-effort */ }
         activeSocket = null;
+        noteSocketEndedLocked();
         intentionalDisconnect = false;
         cancelPendingReconnect();
-        currentBackoffMs = BACKOFF_INITIAL_MS;
-        openSocketLocked();
+        openNowOrDeferLocked();
     }
 
     /**
@@ -317,6 +361,7 @@ public final class WebSocketManager
             try { activeSocket.close(CLOSE_GOING_AWAY, "client_logout"); }
             catch (Exception ignored) { /* best-effort */ }
             activeSocket = null;
+            noteSocketEndedLocked();
         }
         activeUuid = null;
     }
@@ -335,13 +380,18 @@ public final class WebSocketManager
     /**
      * Encodes + sends a cmd. Returns {@code true} if the frame was
      * handed off to OkHttp's send queue, {@code false} if the socket is
-     * closed or the cmd isn't allowlisted.
+     * closed, the cmd isn't allowlisted or the cmd is held.
      *
      * <p>NOTE: this is the only way to send anything. The encode helper
      * enforces the {@link SocketProtocol#ALLOWED_OUTGOING} guard.
      */
     public boolean send(String cmd, JsonObject data)
     {
+        if (isHeld(cmd, clock.getAsLong()))
+        {
+            log.debug("WebSocketManager: -> {} held", cmd);
+            return false;
+        }
         WebSocket snapshot;
         synchronized (this) { snapshot = activeSocket; }
         if (snapshot == null)
@@ -398,6 +448,13 @@ public final class WebSocketManager
         return activeSocket != null;
     }
 
+    /** The display name the socket was last connected with; {@code null}
+     *  before a connect with a name. */
+    public synchronized String getActiveName()
+    {
+        return activeName;
+    }
+
     /** Epoch ms at which the next reconnect attempt is scheduled to
      *  fire, or {@code 0} when no retry is pending (either because
      *  the socket is connected, or because no UUID has been set yet).
@@ -426,6 +483,42 @@ public final class WebSocketManager
     public void addConnectListener(Runnable l)
     {
         if (l != null) connectListeners.add(l);
+    }
+
+    /**
+     * Registers {@code l} to run once per opened socket, a random
+     * 0–{@link #RESYNC_MAX_DELAY_MS} after the open, while that socket is
+     * still the open one. Every re-sync listener runs in the same task.
+     */
+    public void addResyncListener(Runnable l)
+    {
+        if (l != null) resyncListeners.add(l);
+    }
+
+    /** Retry delay for the {@code attempt}-th consecutive reconnect:
+     *  between {@link #BACKOFF_MIN_MS} and {@code min(BACKOFF_MAX_MS, 2^attempt s)}. */
+    static long reconnectDelayMs(int attempt, double r)
+    {
+        int n = Math.max(1, attempt);
+        long cap = n >= 6 ? BACKOFF_MAX_MS : Math.min(BACKOFF_MAX_MS, 1_000L << n);
+        return between(BACKOFF_MIN_MS, cap, r);
+    }
+
+    static long authRefusedDelayMs(double r)
+    {
+        return between(AUTH_REFUSED_RETRY_MIN_MS, AUTH_REFUSED_RETRY_MAX_MS, r);
+    }
+
+    static long resyncDelayMs(double r)
+    {
+        return between(0L, RESYNC_MAX_DELAY_MS, r);
+    }
+
+    private static long between(long lo, long hi, double r)
+    {
+        if (hi <= lo) return lo;
+        double c = Double.isNaN(r) ? 0.0 : Math.max(0.0, Math.min(1.0, r));
+        return lo + Math.round(c * (hi - lo));
     }
 
     // ---------------------------------------------------------------
@@ -471,13 +564,96 @@ public final class WebSocketManager
         {
             url.append("&show_rank=0");
         }
+        url.append("&v=").append(PvPLeaderboardConstants.PLUGIN_VERSION);
         Request req = new Request.Builder()
             .url(url.toString())
             .header("User-Agent", USER_AGENT)
             .build();
-        log.debug("WebSocketManager: connecting uuid={}... name={}",
-            activeUuid.substring(0, 8), activeName == null ? "<none>" : activeName);
+        log.debug("WebSocketManager: connecting uuid={}... name={} v={}",
+            activeUuid.substring(0, 8), activeName == null ? "<none>" : activeName, PvPLeaderboardConstants.PLUGIN_VERSION);
+        recentOpensMs.addLast(clock.getAsLong());
+        while (recentOpensMs.size() > OPEN_BURST) recentOpensMs.removeFirst();
         activeSocket = pingingClient().newWebSocket(req, new Listener());
+    }
+
+    /** Opens now, or, after {@link #OPEN_BURST} opens within
+     *  {@link #OPEN_BURST_WINDOW_MS}, schedules the open as a retry.
+     *  Must be called under {@code synchronized (this)}. */
+    private void openNowOrDeferLocked()
+    {
+        long now = clock.getAsLong();
+        while (!recentOpensMs.isEmpty() && now - recentOpensMs.peekFirst() >= OPEN_BURST_WINDOW_MS)
+        {
+            recentOpensMs.removeFirst();
+        }
+        if (recentOpensMs.size() >= OPEN_BURST)
+        {
+            log.debug("WebSocketManager: open deferred ({} opens within {} ms)", recentOpensMs.size(), OPEN_BURST_WINDOW_MS);
+            scheduleReconnect();
+            return;
+        }
+        openSocketLocked();
+    }
+
+    /** Bookkeeping for the current socket going away. Must be called
+     *  under {@code synchronized (this)}. */
+    private void noteSocketEndedLocked()
+    {
+        if (openedAtMs > 0L && clock.getAsLong() - openedAtMs >= STABLE_CONNECTION_MS)
+        {
+            retryAttempt = 0;
+        }
+        openedAtMs = 0L;
+    }
+
+    private boolean isHeld(String cmd, long now)
+    {
+        if (now < holdAllUntilMs) return true;
+        if (cmd == null) return false;
+        Long until = holdCmdUntilMs.get(cmd);
+        if (until == null) return false;
+        if (now < until) return true;
+        holdCmdUntilMs.remove(cmd, until);
+        return false;
+    }
+
+    private void onRateLimited(JsonObject data)
+    {
+        if (data == null) return;
+        long now = clock.getAsLong();
+        long retryAt = com.pvp.leaderboard.util.JsonLenient.optLong(data, "retry_at_epoch_ms", 0L);
+        if (retryAt <= now) return;
+        long until = Math.min(retryAt, now + RATE_LIMIT_MAX_HOLD_MS);
+        String cmd = com.pvp.leaderboard.util.JsonLenient.optString(data, "cmd", "");
+        if (cmd.isEmpty())
+        {
+            holdAllUntilMs = Math.max(holdAllUntilMs, until);
+        }
+        else
+        {
+            holdCmdUntilMs.merge(cmd, until, Math::max);
+        }
+        log.debug("WebSocketManager: holding {} for {} ms", cmd.isEmpty() ? "every frame" : cmd, until - now);
+    }
+
+    private void scheduleResync(WebSocket opened)
+    {
+        if (resyncListeners.isEmpty()) return;
+        long delay = resyncDelayMs(random.getAsDouble());
+        scheduler.schedule(() -> runResync(opened), delay, TimeUnit.MILLISECONDS);
+    }
+
+    private void runResync(WebSocket opened)
+    {
+        synchronized (this)
+        {
+            if (activeSocket != opened) return;
+        }
+        for (Runnable l : resyncListeners)
+        {
+            try { l.run(); }
+            catch (Exception e) { log.debug("WebSocketManager: resync listener threw", e); }
+        }
     }
 
     private synchronized void cancelPendingReconnect()
@@ -490,32 +666,29 @@ public final class WebSocketManager
         nextReconnectEpochMs = 0L;
     }
 
-    /** Schedules a reconnect with the current backoff and doubles it
-     *  (up to the cap) for the next failure. Resets to initial on
-     *  successful open via {@link Listener#onOpen}. */
+    /** Schedules the next reconnect after {@link #reconnectDelayMs(int, double)}
+     *  for the next attempt. */
     private synchronized void scheduleReconnect()
     {
         if (shutdownCalled.get() || intentionalDisconnect || activeUuid == null) return;
         if (pendingReconnect != null && !pendingReconnect.isDone()) return;
-        long delay = currentBackoffMs;
-        currentBackoffMs = Math.min(currentBackoffMs * 2, BACKOFF_MAX_MS);
-        log.debug("WebSocketManager: reconnect scheduled in {} ms", delay);
+        retryAttempt++;
+        long delay = reconnectDelayMs(retryAttempt, random.getAsDouble());
+        log.debug("WebSocketManager: reconnect {} scheduled in {} ms", retryAttempt, delay);
         nextReconnectEpochMs = System.currentTimeMillis() + delay;
         pendingReconnect = scheduler.schedule(this::reconnectTick, delay, TimeUnit.MILLISECONDS);
     }
 
-    /** Slow-retry counterpart to {@link #scheduleReconnect()} for the
-     *  HTTP 401 stealth-refuse path. Fixed 1-minute cadence so a
-     *  server-side ban being lifted is picked up within a minute
-     *  without compounding the WAF auto-ban. The panel surfaces a
+    /** Schedules the retry after an HTTP 401, after
+     *  {@link #authRefusedDelayMs(double)}. The panel surfaces a
      *  reconnect banner with a countdown driven by
      *  {@link #getNextReconnectAttemptEpochMs()}. */
     private synchronized void scheduleAuthRefusedRetry()
     {
         if (shutdownCalled.get() || intentionalDisconnect || activeUuid == null) return;
         if (pendingReconnect != null && !pendingReconnect.isDone()) return;
-        long delay = AUTH_REFUSED_RETRY_MS;
-        log.debug("WebSocketManager: 401 slow-retry scheduled in {} ms", delay);
+        long delay = authRefusedDelayMs(random.getAsDouble());
+        log.debug("WebSocketManager: 401 retry scheduled in {} ms", delay);
         nextReconnectEpochMs = System.currentTimeMillis() + delay;
         pendingReconnect = scheduler.schedule(this::reconnectTick, delay, TimeUnit.MILLISECONDS);
     }
@@ -535,13 +708,11 @@ public final class WebSocketManager
         @Override
         public void onOpen(WebSocket webSocket, Response response)
         {
+            boolean isCurrent;
             synchronized (WebSocketManager.this)
             {
-                // Reset the fast-cadence backoff on a successful open
-                // so the next normal-close blip starts at 1 s again.
-                // The 401 retry cadence is fixed (1 min) so there's
-                // nothing to reset there.
-                currentBackoffMs = BACKOFF_INITIAL_MS;
+                isCurrent = (activeSocket == webSocket);
+                if (isCurrent) openedAtMs = clock.getAsLong();
                 nextReconnectEpochMs = 0L;
             }
             log.debug("WebSocketManager: open");
@@ -550,6 +721,7 @@ public final class WebSocketManager
                 try { l.run(); }
                 catch (Exception e) { log.debug("WebSocketManager: connect listener threw", e); }
             }
+            if (isCurrent) scheduleResync(webSocket);
         }
 
         @Override
@@ -616,7 +788,11 @@ public final class WebSocketManager
                 // (root cause of the "we can't see each other"
                 // empty-roster bug surfaced in the QA logs).
                 isCurrent = (activeSocket == webSocket);
-                if (isCurrent) activeSocket = null;
+                if (isCurrent)
+                {
+                    activeSocket = null;
+                    noteSocketEndedLocked();
+                }
                 // 1000 (normal) / 1001 (going-away) are clean closes —
                 // don't reconnect. Anything else is the server kicking
                 // us off (1008 dup-connect, 1006 abnormal) — reconnect
@@ -648,7 +824,11 @@ public final class WebSocketManager
                 // milliseconds after we swap in a name-change-reopened
                 // one).
                 isCurrent = (activeSocket == webSocket);
-                if (isCurrent) activeSocket = null;
+                if (isCurrent)
+                {
+                    activeSocket = null;
+                    noteSocketEndedLocked();
+                }
                 intentional = intentionalDisconnect;
             }
             log.debug("WebSocketManager: failure status={} cause={} intentional={} stale={}",
@@ -662,15 +842,10 @@ public final class WebSocketManager
             // live socket. Treat as a no-op; the current socket has
             // its own onOpen/onClosed lifecycle.
             if (!isCurrent) return;
-            // HTTP 401 = server stealth-refuse on $connect. Drop into
-            // the fixed 1-minute slow-retry so server-side state
-            // changes (unban, WAF policy update, the player's first
-            // match landing) recover automatically without forcing
-            // the user to restart RuneLite. Other failures use the
-            // standard fast-cadence backoff. The panel renders a
+            // HTTP 401 on $connect: scheduleAuthRefusedRetry; other
+            // failures: scheduleReconnect. The panel renders a
             // visible countdown banner from
-            // getNextReconnectAttemptEpochMs() so the user sees the
-            // retry is in flight.
+            // getNextReconnectAttemptEpochMs().
             if (status == 401)
             {
                 scheduleAuthRefusedRetry();

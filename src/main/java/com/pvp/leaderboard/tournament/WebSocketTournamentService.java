@@ -68,7 +68,7 @@ public class WebSocketTournamentService implements TournamentService
         bus.register("tournament/gear_check", this::handleGearCheck);
         bus.register("tournament/gear_ack", this::handleGearAck);
         bus.register("error/tournament", this::handleError);
-        socket.addConnectListener(this::onReconnect);
+        socket.addResyncListener(this::onReconnect);
     }
 
     private void onReconnect()
