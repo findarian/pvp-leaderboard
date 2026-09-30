@@ -1306,7 +1306,7 @@ public class TournamentsPanel extends JPanel implements TournamentEventListener
             case "TOURNAMENT_NOT_REGISTERED": return "You are not registered.";
             case "TOURNAMENT_PLUGIN_REQUIRED": return "Plugin-verified accounts only.";
             case "TOURNAMENT_MIN_GAMES": return "You need more rated games before you can register.";
-            case "TOURNAMENT_BANNED": return "Your account is banned from the PvP Leaderboard. If you believe this is a mistake, DM Toyco.";
+            case "TOURNAMENT_BANNED": return "Your account is banned from matchmaking and tournaments. DM Toyco if this is a mistake.";
             case "TOURNAMENT_NOT_FOUND": return "Tournament not found.";
             case "TOURNAMENT_STATE": return message == null || message.isEmpty() ? "That is not possible right now." : escape(message);
             case "TOURNAMENT_PLUGIN_UPDATE_REQUIRED": return message == null || message.isEmpty() ? UPDATE_REQUIRED_TEXT : escape(message);

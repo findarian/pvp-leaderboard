@@ -32,14 +32,8 @@ public final class QueueText
         Map<String, String> m = new HashMap<>();
         m.put("QUEUE_ALREADY_IN", "You are already in the queue.");
         m.put("QUEUE_NOT_IN", "You are not in the queue.");
-        // G-3: Discord's leading clause verbatim (discord_bot_handler._join_reply,
-        // 409 in_open_session) with the plugin's own trailing clause — Discord's
-        // "check your DMs (or the plugin)" points at a surface this user is not on.
-        m.put("QUEUE_IN_OPEN_SESSION", "You already have a fight being set up — confirm it before queueing again.");
-        // G-3: Discord's 429 sentence minus the emoji. Deliberately names no
-        // cause — QUEUE_COOLDOWN covers the re-pair cooldown as well as a dodge
-        // strike and the server sends no discriminator.
-        m.put("QUEUE_COOLDOWN", "You're on a matchmaking cooldown. Try again later.");
+        m.put("QUEUE_IN_OPEN_SESSION", "You already have a match to confirm.");
+        m.put("QUEUE_COOLDOWN", "You're on a matchmaking cooldown.");
         m.put("QUEUE_INVALID_PREF", "That queue preference is not valid. Pick a wait time from the list and try again.");
         m.put("QUEUE_STYLE_UNAVAILABLE", "The queue is NH only.");
         QUEUE_ERRORS = Collections.unmodifiableMap(m);

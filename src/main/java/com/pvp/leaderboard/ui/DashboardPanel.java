@@ -58,6 +58,9 @@ public class DashboardPanel extends PluginPanel
     private JPanel viewContainer;
     /** The card {@link #showCard} showed last. */
     private String activeCard = CARD_MATCHMAKING;
+    /** Whether this panel is on screen (the sidebar open with this panel's
+     *  tab selected); replaceable in tests. */
+    private java.util.function.BooleanSupplier panelOpen = this::isShowing;
 
     static final String TOURNAMENTS_OFF_TOOLTIP = "Tournaments are turned off in the plugin settings";
     /** Held as a field so the dashboard can wire the profile-click → Player
@@ -599,6 +602,7 @@ public class DashboardPanel extends PluginPanel
         matchmakingLobbyPanel = new MatchmakingLobbyPanel(lobbyService, joinGate, lobbyPreferences);
         // Lobby profile-row clicks → same code path as right-click "PvP lookup".
         matchmakingLobbyPanel.setOnOpenProfile(this::openPlayerLookup);
+        matchmakingLobbyPanel.setOnQueueMatchShown(this::onQueueMatchShown);
         // Self-profile preview ("Your profile displayed to others")
         // above the rank slider — supplies the local OSRS name lazily
         // so the row pre-login renders empty (supplier returns null)
@@ -760,6 +764,34 @@ public class DashboardPanel extends PluginPanel
         if (tournamentsPanel == null) return;
         foldAltViewsToStats();
         setActiveTab(CARD_TOURNAMENTS);
+    }
+
+    /** Replaces the on-screen check made before a queue match shows the
+     *  Matchmaking tab; {@code null} reads as not on screen. */
+    void setPanelOpenProvider(java.util.function.BooleanSupplier provider)
+    {
+        panelOpen = provider == null ? () -> false : provider;
+    }
+
+    /** A queue match's Confirm card is up: shows the Matchmaking tab when this
+     *  panel is on screen and another tab is showing. Never opens the panel. */
+    private void onQueueMatchShown()
+    {
+        if (CARD_MATCHMAKING.equals(activeCard) || !isPanelOpen()) return;
+        foldAltViewsToStats();
+        setActiveTab(CARD_MATCHMAKING);
+    }
+
+    private boolean isPanelOpen()
+    {
+        try
+        {
+            return panelOpen.getAsBoolean();
+        }
+        catch (RuntimeException e)
+        {
+            return false;
+        }
     }
     
     // --- UI Creation Helpers ---

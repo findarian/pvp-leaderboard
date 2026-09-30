@@ -1444,6 +1444,27 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         this.matchFoundNotifier = notifier;
     }
 
+    /** Run on the EDT after a queue match's Confirm Fight card is shown. */
+    private Runnable queueMatchShownListener = () -> { };
+
+    /** Registers the callback run after a queue match's Confirm Fight card is shown. */
+    void setOnQueueMatchShown(Runnable listener)
+    {
+        queueMatchShownListener = listener == null ? () -> { } : listener;
+    }
+
+    private void notifyQueueMatchShown()
+    {
+        try
+        {
+            queueMatchShownListener.run();
+        }
+        catch (RuntimeException e)
+        {
+            LOG.debug("MatchmakingLobbyPanel: queue match listener threw", e);
+        }
+    }
+
     /** Strategy hook for the match-found popup. Mirror of
      *  {@link LobbyInviteNotifier} for the next step in the lobby
      *  flow. The production implementation is
@@ -2691,6 +2712,7 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
             // A queue match: the Confirm Fight view, labelled Confirm / Decline.
             currentFightSession.queueMatch = true;
             showFightSetup(buildConfirmFightView());
+            notifyQueueMatchShown();
         }
         else
         {
