@@ -55,6 +55,10 @@ public class TournamentsPanel extends JPanel implements TournamentEventListener
     public static final String NAME_ROUND_END = "tournaments-round-end";
     /** The in-panel Rules dialog (set 6). */
     public static final String CARD_RULES = "tournaments-rules";
+    /** Shown in place of the tab's view while the player is not logged into the game. */
+    public static final String CARD_LOGGED_OUT = "tournaments-logged-out";
+    public static final String NAME_LOGGED_OUT_TITLE = "tournaments-logged-out-title";
+    public static final String NAME_LOGGED_OUT_NOTICE = "tournaments-logged-out-notice";
     /** The list card's status line (set 7: also says "Connecting…"). */
     public static final String NAME_LIST_STATUS = "tournaments-list-status";
     /** Shown while the socket is not up yet — the list is asked for on connect. */
@@ -91,6 +95,8 @@ public class TournamentsPanel extends JPanel implements TournamentEventListener
     private volatile Consumer<String> linkOpener = TournamentsPanel::browse;
     /** {@code DiscordAuthService::isLoggedIn} once the dashboard wires it; unwired = logged out. */
     private volatile BooleanSupplier discordLoggedIn = () -> false;
+    /** Whether the player is logged into the game; unwired = logged in. */
+    private volatile BooleanSupplier gameLoggedIn = () -> true;
     /** The player's own match count per event bucket; unwired = unknown. */
     private volatile Function<String, Integer> matchCountProvider = bucket -> null;
     /** The event whose Register was pressed and not yet answered. */
@@ -184,6 +190,7 @@ public class TournamentsPanel extends JPanel implements TournamentEventListener
         add(banner, BorderLayout.NORTH);
         cardHost.add(buildListCard(), CARD_LIST);
         cardHost.add(buildActiveCard(), CARD_ACTIVE);
+        cardHost.add(buildLoggedOutCard(), CARD_LOGGED_OUT);
         add(cardHost, BorderLayout.CENTER);
         showCard(CARD_LIST);
         if (!this.service.isAvailable())
@@ -243,6 +250,19 @@ public class TournamentsPanel extends JPanel implements TournamentEventListener
     public void onMatchCountsChanged()
     {
         renderList();
+    }
+
+    /** Whether the player is logged into the game; unwired = logged in. */
+    public void setGameLoggedInProvider(BooleanSupplier provider)
+    {
+        this.gameLoggedIn = provider == null ? () -> true : provider;
+        refreshLoginView();
+    }
+
+    /** The game's login state changed: the logged-out notice or the tab's own view. */
+    public void refreshLoginView()
+    {
+        showCard(currentCard);
     }
 
     /** The player's count in the event's bucket; {@code null} when unknown. */
@@ -352,6 +372,7 @@ public class TournamentsPanel extends JPanel implements TournamentEventListener
     private JPanel buildListCard()
     {
         JPanel card = new JPanel(new BorderLayout());
+        card.setName(CARD_LIST);
         JPanel top = new JPanel();
         top.setLayout(new BoxLayout(top, BoxLayout.Y_AXIS));
         JLabel title = new JLabel("Tournaments");
@@ -383,9 +404,33 @@ public class TournamentsPanel extends JPanel implements TournamentEventListener
         return card;
     }
 
+    /** "Set up tournaments" and "Please log into the game to set up tournaments.", as the Matchmaking tab words it. */
+    private JPanel buildLoggedOutCard()
+    {
+        JPanel card = new JPanel();
+        card.setName(CARD_LOGGED_OUT);
+        card.setLayout(new BoxLayout(card, BoxLayout.Y_AXIS));
+        JLabel title = new JLabel("Set up tournaments");
+        title.setName(NAME_LOGGED_OUT_TITLE);
+        title.setFont(title.getFont().deriveFont(Font.BOLD, HEADER_PT));
+        title.setAlignmentX(LEFT_ALIGNMENT);
+        card.add(title);
+        card.add(Box.createVerticalStrut(8));
+        JLabel notice = new JLabel();
+        notice.setName(NAME_LOGGED_OUT_NOTICE);
+        notice.setFont(notice.getFont().deriveFont(Font.BOLD, BODY_PT));
+        notice.setForeground(new Color(0xcc, 0xcc, 0xcc));
+        notice.setText(TournamentInfoCard.wrapHtml(notice.getFont(), TournamentInfoCard.TEXT_WIDTH_PX,
+            "Please log into the game to set up tournaments."));
+        notice.setAlignmentX(LEFT_ALIGNMENT);
+        card.add(notice);
+        return card;
+    }
+
     private JPanel buildActiveCard()
     {
         JPanel card = new JPanel(new BorderLayout());
+        card.setName(CARD_ACTIVE);
         JPanel top = new JPanel();
         top.setLayout(new BoxLayout(top, BoxLayout.Y_AXIS));
         for (JLabel l : new JLabel[]{activeHeader, activeEta, activeMatch, activeWhere, activeStatus})
@@ -481,8 +526,20 @@ public class TournamentsPanel extends JPanel implements TournamentEventListener
     private void showCard(String name)
     {
         currentCard = name;
-        cards.show(cardHost, name);
+        cards.show(cardHost, gameLoggedInNow() ? name : CARD_LOGGED_OUT);
         placeGearCard();
+    }
+
+    private boolean gameLoggedInNow()
+    {
+        try
+        {
+            return gameLoggedIn.getAsBoolean();
+        }
+        catch (RuntimeException e)
+        {
+            return true;
+        }
     }
 
     public void setGearCard(javax.swing.JComponent card)

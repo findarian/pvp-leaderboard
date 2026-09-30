@@ -673,6 +673,7 @@ public class DashboardPanel extends PluginPanel
         }
         tournamentsPanel = new TournamentsPanel(svc, () -> lobbyPreferences.getRegion("na-e"));
         if (plugin != null) tournamentsPanel.setSelfIdentity(plugin::getLocalPlayerName);
+        if (plugin != null) tournamentsPanel.setGameLoggedInProvider(plugin::isGameLoggedIn);
         if (tournamentInCombatProvider != null) tournamentsPanel.setInCombatProvider(tournamentInCombatProvider);
         // Set 6: the Report gate is the same Discord login state onLoginStateChanged() reloads on.
         if (discordAuthService != null) tournamentsPanel.setDiscordLoginProvider(discordAuthService::isLoggedIn);
@@ -994,6 +995,10 @@ public class DashboardPanel extends PluginPanel
         if (matchmakingLobbyPanel != null)
         {
             matchmakingLobbyPanel.refreshLoginGateView();
+        }
+        if (tournamentsPanel != null)
+        {
+            tournamentsPanel.refreshLoginView();
         }
     }
 
