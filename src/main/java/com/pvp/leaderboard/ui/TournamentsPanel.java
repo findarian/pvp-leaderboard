@@ -75,7 +75,7 @@ public class TournamentsPanel extends JPanel implements TournamentEventListener
     /** A registration refused for the event's minimum number of matches. */
     static final String MIN_GAMES_CODE = "TOURNAMENT_MIN_GAMES";
     static final String UPDATE_REQUIRED_TEXT = "This tournament needs a newer PvP Leaderboard plugin — update it to register.";
-    static final String ROUND_END_SUBMIT_TEXT = "Please submit within 30 seconds or the match will be counted as did not complete and you may be removed from the tournament.";
+    static final String ROUND_END_SUBMIT_TEXT = "Submit within 30 seconds or you may be removed.";
     static final long IN_COMBAT_MIN_INTERVAL_MS = 30_000L;
     private static final int STANDINGS_MAX_ROWS = 40;
     /** The standings rows' size: the largest in this range at which every row fits. */
@@ -1299,15 +1299,15 @@ public class TournamentsPanel extends JPanel implements TournamentEventListener
             case "TOURNAMENT_DISCORD_REQUIRED": return REPORT_LOGIN_HINT;
             case "REPORT_RATE_LIMITED": return REPORT_RATE_LIMITED_TEXT;
             case "RATE_LIMITED": return report ? REPORT_RATE_LIMITED_TEXT : "Too many requests — give it a moment and try again.";
-            case "TOURNAMENT_FULL": return "That tournament is full.";
-            case "TOURNAMENT_REGISTRATION_CLOSED": return "Registration for that tournament has closed.";
-            case "TOURNAMENT_PEAK_OUT_OF_RANGE": return "Your rank is outside the range this tournament allows.";
+            case "TOURNAMENT_FULL": return "Tournament full.";
+            case "TOURNAMENT_REGISTRATION_CLOSED": return "Registration closed.";
+            case "TOURNAMENT_PEAK_OUT_OF_RANGE": return "Your rank is outside this tournament's range.";
             case "TOURNAMENT_ALREADY_REGISTERED": return "You are already registered.";
-            case "TOURNAMENT_NOT_REGISTERED": return "You are not registered for that tournament.";
-            case "TOURNAMENT_PLUGIN_REQUIRED": return "This tournament needs a plugin-verified account.";
+            case "TOURNAMENT_NOT_REGISTERED": return "You are not registered.";
+            case "TOURNAMENT_PLUGIN_REQUIRED": return "Plugin-verified accounts only.";
             case "TOURNAMENT_MIN_GAMES": return "You need more rated games before you can register.";
             case "TOURNAMENT_BANNED": return "Your account is banned from the PvP Leaderboard. If you believe this is a mistake, DM Toyco.";
-            case "TOURNAMENT_NOT_FOUND": return "That tournament does not exist (or is over).";
+            case "TOURNAMENT_NOT_FOUND": return "Tournament not found.";
             case "TOURNAMENT_STATE": return message == null || message.isEmpty() ? "That is not possible right now." : escape(message);
             case "TOURNAMENT_PLUGIN_UPDATE_REQUIRED": return message == null || message.isEmpty() ? UPDATE_REQUIRED_TEXT : escape(message);
             default: return "Tournaments: " + (message == null || message.isEmpty() ? code : escape(message));

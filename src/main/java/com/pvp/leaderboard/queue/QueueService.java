@@ -13,7 +13,7 @@ import com.pvp.leaderboard.lobby.Style;
 public interface QueueService
 {
     /** Wait-time choices (seconds) shared with Discord — AS-64. */
-    int[] WAIT_PREF_CHOICES = {30, 300, 600, 1800};
+    int[] WAIT_PREF_CHOICES = {30, 300, 600, 900};
 
     void setListener(QueueEventListener listener);
 

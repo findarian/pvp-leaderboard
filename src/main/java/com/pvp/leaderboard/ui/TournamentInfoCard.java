@@ -355,17 +355,17 @@ final class TournamentInfoCard extends JPanel
         return capitalise(String.join(" · ", parts));
     }
 
-    /** {@code "50 NH wins+losses required to join"}; {@code ""} when the event has no minimum. */
+    /** {@code "50 NH matches required"}; {@code ""} when the event has no minimum. */
     static String minGamesLine(TournamentSummary t)
     {
         if (t.minGames <= 0) return "";
-        return t.minGames + " " + bucketWord(t) + "wins+losses required to join";
+        return t.minGames + " " + bucketWord(t) + "matches required";
     }
 
-    /** {@code "Cannot join until you have at least 50 total NH matches played."} */
+    /** {@code "You need 50 NH matches to join."} */
     static String minGamesRefusal(TournamentSummary t)
     {
-        return "Cannot join until you have at least " + t.minGames + " total " + bucketWord(t) + "matches played.";
+        return "You need " + t.minGames + " " + bucketWord(t) + "matches to join.";
     }
 
     /** {@code true} when the event has a minimum and the player is below it:

@@ -43,6 +43,7 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.function.Consumer;
 import java.util.function.Function;
+import java.util.function.LongSupplier;
 import java.util.function.Predicate;
 import java.util.function.Supplier;
 
@@ -257,6 +258,10 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
      *  in edge cases). */
     private final Map<String, OutgoingInvite> outgoingInvitesByOpponent = new HashMap<>();
 
+    /** Canonical {@code player_id}s of senders whose incoming invite the
+     *  local user accepted and whose fight has not been proposed yet. */
+    private final Set<String> acceptedInviteSenders = new HashSet<>();
+
     /** Canonical {@code player_id}s the local user has blocked. Driven
      *  by {@link #onBlockListSnapshot} / {@link #onBlockAdded} /
      *  {@link #onBlockRemoved}. The server does NOT filter blocked
@@ -362,6 +367,33 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
      *  absolute deadline. */
     static final long CONFIRM_WINDOW_MS = 30_000L;
 
+    /** How long the Confirm Fight card ignores clicks on its buttons after it appears. */
+    static final long CONFIRM_CLICK_DELAY_MS = 1_000L;
+
+    /** The Confirm Fight card's two buttons for a queue match. */
+    static final String QUEUE_CONFIRM_TEXT = "Confirm";
+    static final String QUEUE_DECLINE_TEXT = "Decline";
+
+    /** Monotonic milliseconds read by the Confirm Fight card's click delay. */
+    private LongSupplier clickClockMs = MatchmakingLobbyPanel::monotonicMs;
+
+    /** Replaces the clock the Confirm Fight card's click delay reads. */
+    void setClickClock(LongSupplier clockMs)
+    {
+        clickClockMs = clockMs == null ? MatchmakingLobbyPanel::monotonicMs : clockMs;
+    }
+
+    private static long monotonicMs()
+    {
+        return System.nanoTime() / 1_000_000L;
+    }
+
+    /** {@code true} once {@link #CONFIRM_CLICK_DELAY_MS} has passed since {@code shownAtMs}. */
+    private boolean clickDelayOver(long shownAtMs)
+    {
+        return clickClockMs.getAsLong() - shownAtMs >= CONFIRM_CLICK_DELAY_MS;
+    }
+
     /** Panel-local UI state for the active mutual-confirm session. Wraps
      *  the immutable {@link FightSession} pushed by the service with two
      *  mutable flags the panel toggles in response to the local user
@@ -416,6 +448,10 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         long windowMs;
         boolean iConfirmed;
         boolean peerConfirmed;
+        /** A match from the queue (no outgoing and no accepted invite):
+         *  its card reads Confirm / Decline and nothing is confirmed
+         *  without a click. */
+        boolean queueMatch;
 
         LocalFightState(FightSession session)
         {
@@ -1934,17 +1970,22 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
     /** Live label on the FIGHT card that the ticker rewrites every second. */
     private JLabel fightCountdownLabel;
 
-    /** Confirm Fight view — shown to the INVITER while they decide to lock
-     *  in (the acceptor auto-confirms in {@link #onFightProposed} and skips
-     *  straight to the Waiting view). Shows a big [Get Match Location] button
+    /** Confirm Fight view — shown to the INVITER and for a queue match while
+     *  they decide to lock in (the acceptor auto-confirms in
+     *  {@link #onFightProposed} and skips straight to the Waiting view).
+     *  Shows a big [Get Match Location] button
      *  and the live 30s countdown; clicking it confirms the fight and, once
      *  both sides are in, the server reveals the world + meeting place — hence
      *  the label describes that outcome rather than the mechanical "Confirm".
      *  If the opponent has already confirmed, an extra subheader makes that
-     *  visible. */
+     *  visible. Both buttons ignore clicks for the card's first
+     *  {@link #CONFIRM_CLICK_DELAY_MS}. For a queue match the buttons read
+     *  {@link #QUEUE_CONFIRM_TEXT} and {@link #QUEUE_DECLINE_TEXT}. */
     private JComponent buildConfirmFightView()
     {
         LocalFightState s = currentFightSession;
+        final long shownAtMs = clickClockMs.getAsLong();
+        final boolean queueMatch = s != null && s.queueMatch;
         JPanel card = newGateLikeCard();
         card.add(makeGateHeader("Confirm fight"));
         card.add(leftAlignedStrut(8));
@@ -1956,7 +1997,7 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         }
         card.add(leftAlignedStrut(14));
 
-        JButton confirm = makeGateActionButton("Get Match Location", true);
+        JButton confirm = makeGateActionButton(queueMatch ? QUEUE_CONFIRM_TEXT : "Get Match Location", true);
         // Primary CTA — green (the colour the exit button used to be) so
         // it reads as the prominent positive action; the secondary
         // "Go back to Lobby" exit below now uses the neutral default
@@ -1967,7 +2008,10 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         confirm.setForeground(Color.WHITE);
         confirm.setOpaque(true);
         confirm.setBorderPainted(false);
-        confirm.addActionListener(e -> onUserConfirmedFight(confirm));
+        confirm.addActionListener(e ->
+        {
+            if (clickDelayOver(shownAtMs)) onUserConfirmedFight(confirm);
+        });
         card.add(confirm);
         card.add(leftAlignedStrut(8));
 
@@ -1975,7 +2019,10 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         card.add(fightCountdownLabel);
         card.add(leftAlignedStrut(12));
 
-        card.add(makeGateCancelButton("Go back to Lobby", this::exitFightSetup));
+        card.add(makeGateCancelButton(queueMatch ? QUEUE_DECLINE_TEXT : "Go back to Lobby", () ->
+        {
+            if (clickDelayOver(shownAtMs)) exitFightSetup();
+        }));
         return wrapInScroll(card);
     }
 
@@ -2300,7 +2347,8 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
             // never reach here.
             if (s.confirmWindowElapsed())
             {
-                if (!s.peerConfirmed)
+                // A queue match the player never confirmed also returns to the queue view.
+                if (!s.peerConfirmed || (s.queueMatch && !s.iConfirmed))
                 {
                     // Peer never confirmed within the window — return to
                     // the lobby so a one-sided confirm doesn't strand the
@@ -2575,7 +2623,9 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
      *  to mutual-confirm. Either way the lobby is hidden until the user
      *  exits via Go-back-to-Lobby, the 30s window expires
      *  ({@link #onFightSessionExpired}), or both sides confirm
-     *  ({@link #onMatchFound}). */
+     *  ({@link #onMatchFound}). (c) Neither: a queue match gets the same
+     *  Confirm Fight card, labelled Confirm / Decline, and nothing is
+     *  confirmed until Confirm is clicked. */
     @Override
     public void onFightProposed(FightSession session)
     {
@@ -2604,6 +2654,8 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         // flow doesn't care which side originated.
         boolean iWasInviter = session.opponent.playerId != null
             && outgoingInvitesByOpponent.containsKey(session.opponent.playerId);
+        boolean iAccepted = session.opponent.playerId != null
+            && acceptedInviteSenders.remove(session.opponent.playerId);
         // Drop any local outgoing-invite tracking for this opponent — the
         // invite has been promoted into a real fight session and the
         // [Invited M:SS] chip should disappear from the lobby roster.
@@ -2632,6 +2684,12 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         {
             // The inviter still does the explicit final step: the Confirm
             // Fight view with the "Get Match Location" CTA + 30s countdown.
+            showFightSetup(buildConfirmFightView());
+        }
+        else if (!iAccepted)
+        {
+            // A queue match: the Confirm Fight view, labelled Confirm / Decline.
+            currentFightSession.queueMatch = true;
             showFightSetup(buildConfirmFightView());
         }
         else
@@ -4985,6 +5043,7 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
             // onFightProposed to both players — that listener swaps the
             // panel into ConfirmFight (30s window). Go-back-to-Lobby exits
             // the view at any point.
+            if (sender.playerId != null) acceptedInviteSenders.add(sender.playerId);
             service.acceptInvite(invite);
             renderRoster();
         };

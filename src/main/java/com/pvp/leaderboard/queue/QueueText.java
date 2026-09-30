@@ -23,6 +23,7 @@ public final class QueueText
 {
     public static final String EXPIRED = "Your match expired before both players confirmed.";
     public static final String OPPONENT_DECLINED = "Your opponent can't make it — the match was cancelled.";
+    public static final String LEFT_ON_DISCORD = "You left the queue on Discord.";
 
     /** {@code error/queue} codes that are not lobby codes (WEBSOCKET_PROTOCOL.md § 7). */
     private static final Map<String, String> QUEUE_ERRORS;
@@ -40,13 +41,13 @@ public final class QueueText
         // strike and the server sends no discriminator.
         m.put("QUEUE_COOLDOWN", "You're on a matchmaking cooldown. Try again later.");
         m.put("QUEUE_INVALID_PREF", "That queue preference is not valid. Pick a wait time from the list and try again.");
-        m.put("QUEUE_STYLE_UNAVAILABLE", "The queue is NH only for now. Pick NH and queue again.");
+        m.put("QUEUE_STYLE_UNAVAILABLE", "The queue is NH only.");
         QUEUE_ERRORS = Collections.unmodifiableMap(m);
     }
 
     private QueueText() {}
 
-    /** {@code "30 s"} / {@code "5 min"} / {@code "10 min"} / {@code "30 min"};
+    /** {@code "30 s"} / {@code "5 min"} / {@code "10 min"} / {@code "15 min"};
      *  any other value prints the same way ({@code "1 min 30 s"}). */
     public static String waitLabel(int waitPrefS)
     {
@@ -65,6 +66,7 @@ public final class QueueText
         {
             case "expired": return EXPIRED;
             case "opponent_declined": return OPPONENT_DECLINED;
+            case "left_on_discord": return LEFT_ON_DISCORD;
             default: return null;
         }
     }
