@@ -21,6 +21,9 @@ public final class LobbyErrorMessages
      *  happened, only that something failed. */
     public static final String UNKNOWN_FALLBACK = "Something went wrong. Try again in a moment.";
 
+    /** {@code FIGHT_SESSION_EXPIRED}, and the queue's idle {@code reason} {@code expired}. */
+    public static final String MATCH_EXPIRED = "Your match expired before both players confirmed.";
+
     /** Stable code → user-facing string map. Keep in sync with the
      *  server-side error enum every time a new code is added. */
     private static final Map<String, String> MESSAGES;
@@ -56,8 +59,7 @@ public final class LobbyErrorMessages
             "That invite expired before you could accept it.");
         m.put("MATCHMAKING_SUSPENDED",
             "That player is suspended from matchmaking right now.");
-        m.put("FIGHT_SESSION_EXPIRED",
-            "The 30-second confirm window expired. Send a new invite to retry.");
+        m.put("FIGHT_SESSION_EXPIRED", MATCH_EXPIRED);
         m.put("SELF_INVITE",
             "You can't fight your own account.");
 

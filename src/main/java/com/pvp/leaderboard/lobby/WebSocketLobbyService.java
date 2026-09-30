@@ -693,7 +693,7 @@ public class WebSocketLobbyService implements LobbyService
             // which surfaced as the "30-second confirm window expired"
             // QA report). Buffer the session id so the connect
             // listener can flush it on the next onOpen — bounded by
-            // the server's 30-s confirm window via
+            // the server's confirm window via
             // handleSessionExpired clearing the buffer.
             pendingConfirmFightSessionId = sid;
             log.debug("confirmFight() buffered (socket closed) sid={}", sid);
@@ -725,7 +725,7 @@ public class WebSocketLobbyService implements LobbyService
         {
             // The socket closed again between onOpen firing and our
             // send. Re-buffer so the next open retries. Bounded by
-            // the 30-s server confirm window — handleSessionExpired
+            // the server's confirm window — handleSessionExpired
             // clears the buffer once the server gives up.
             pendingConfirmFightSessionId = sid;
             log.debug("WebSocketLobbyService: re-buffered confirm sid={} (socket closed mid-flush)", sid);
@@ -1463,26 +1463,27 @@ public class WebSocketLobbyService implements LobbyService
         // they could click anything (QA bug 2026-05-25). Read the
         // canonical key first; fall back to the legacy name so a
         // partial backend deploy doesn't strand every fight; and if
-        // BOTH are missing/zero, synthesise a sane 30s window keyed to
-        // the local clock so the user still gets a usable popup.
+        // BOTH are missing/zero, synthesise now + the confirm window
+        // keyed to the local clock so the user still gets a usable popup.
         //
         // NOTE: the panel no longer trusts this absolute deadline for
         // the confirm countdown — MatchmakingLobbyPanel.LocalFightState
-        // runs a fixed 30 s window off a monotonic clock so a wrong /
+        // counts the confirm window off a monotonic clock so a wrong /
         // skewed client wall clock can't cut the window short. This
         // value is retained only as the server's advisory deadline.
+        long windowMs = confirmWindowMs(data);
         long expiresAt = optLong(data, "confirm_expires_at_epoch_ms");
         if (expiresAt <= 0L) expiresAt = optLong(data, "expires_at_epoch_ms");
         if (expiresAt <= 0L)
         {
-            long synth = System.currentTimeMillis() + 30_000L;
-            log.warn("WebSocketLobbyService.handleFightProposed: missing confirm_expires_at_epoch_ms (and legacy expires_at_epoch_ms) on lobby/fight_proposed sid={} - synthesising local-clock deadline now+30s={} so the Confirm-Fight card doesn't insta-exit",
-                sid, synth);
+            long synth = System.currentTimeMillis() + windowMs;
+            log.warn("WebSocketLobbyService.handleFightProposed: missing confirm_expires_at_epoch_ms (and legacy expires_at_epoch_ms) on lobby/fight_proposed sid={} - synthesising local-clock deadline now+{}ms={} so the Confirm-Fight card doesn't insta-exit",
+                sid, windowMs, synth);
             expiresAt = synth;
         }
         LobbyMember opponent = resolveOpponent(data);
         if (opponent == null) return;
-        FightSession session = new FightSession(sid, opponent, style, build, location, expiresAt);
+        FightSession session = new FightSession(sid, opponent, style, build, location, expiresAt, windowMs);
         LobbyEventListener l = listener;
         if (l == null) return;
         SwingUtilities.invokeLater(() -> l.onFightProposed(session));
@@ -1532,7 +1533,7 @@ public class WebSocketLobbyService implements LobbyService
         forgetLastSentJoin();
         if (sid.equals(currentFightSessionId)) currentFightSessionId = null;
         queueOpponents.remove(sid);
-        // 30-s confirm window elapsed — any buffered confirm against
+        // The confirm window elapsed — any buffered confirm against
         // this session is moot, drop it so a future reconnect doesn't
         // ship a confirm for a session that no longer exists.
         if (sid.equals(pendingConfirmFightSessionId)) pendingConfirmFightSessionId = null;
@@ -1761,6 +1762,28 @@ public class WebSocketLobbyService implements LobbyService
         JsonElement el = o.get(key);
         if (!el.isJsonPrimitive() || !el.getAsJsonPrimitive().isNumber()) return 0L;
         return el.getAsLong();
+    }
+
+    /** The longest confirm window a push may set, in seconds. */
+    private static final double MAX_CONFIRM_WINDOW_S = 900d;
+
+    /** A push's {@code confirm_window_s} in milliseconds: a JSON number from 1 to
+     *  {@link #MAX_CONFIRM_WINDOW_S} seconds. Anything else (absent, not a number,
+     *  under a second, above the maximum) is {@link FightSession#DEFAULT_CONFIRM_WINDOW_MS}. */
+    private static long confirmWindowMs(JsonObject o)
+    {
+        JsonElement el = o == null ? null : o.get("confirm_window_s");
+        if (el == null || !el.isJsonPrimitive() || !el.getAsJsonPrimitive().isNumber()) return FightSession.DEFAULT_CONFIRM_WINDOW_MS;
+        try
+        {
+            double seconds = el.getAsDouble();
+            if (!(seconds >= 1d && seconds <= MAX_CONFIRM_WINDOW_S)) return FightSession.DEFAULT_CONFIRM_WINDOW_MS;
+            return (long) (seconds * 1000d);
+        }
+        catch (RuntimeException e)
+        {
+            return FightSession.DEFAULT_CONFIRM_WINDOW_MS;
+        }
     }
 
     private static Set<String> parseStringArray(JsonObject o, String key)

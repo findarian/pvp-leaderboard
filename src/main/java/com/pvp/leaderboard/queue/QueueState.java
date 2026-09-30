@@ -17,6 +17,7 @@ import com.pvp.leaderboard.util.JsonLenient;
  * elapsed_s / wait_pref_s / remaining_s / next_expand_in_s (null when expanded)
  * matches_last_hour / matches_today   the pinned-message counters
  * reason           idle only: "expired" | "opponent_declined" (Part E, additive)
+ * fight_session_id idle with a reason: the fight session the server ended
  * style / build / region
  * </pre>
  *
@@ -45,10 +46,22 @@ public final class QueueState
     public final String style;
     public final String build;
     public final String region;
+    /** The fight session an idle state's {@code reason} is about; {@code null} when the push names none. */
+    public final String fightSessionId;
 
+    /** A state that names no fight session. */
     public QueueState(String state, Integer window, boolean expanded, int rankMinIdx, int rankMaxIdx,
                       int elapsedS, int waitPrefS, int remainingS, Integer nextExpandInS,
                       int matchesLastHour, int matchesToday, String reason, String style, String build, String region)
+    {
+        this(state, window, expanded, rankMinIdx, rankMaxIdx, elapsedS, waitPrefS, remainingS, nextExpandInS,
+            matchesLastHour, matchesToday, reason, style, build, region, null);
+    }
+
+    public QueueState(String state, Integer window, boolean expanded, int rankMinIdx, int rankMaxIdx,
+                      int elapsedS, int waitPrefS, int remainingS, Integer nextExpandInS,
+                      int matchesLastHour, int matchesToday, String reason, String style, String build, String region,
+                      String fightSessionId)
     {
         this.state = state == null ? "idle" : state;
         this.window = window;
@@ -65,6 +78,7 @@ public final class QueueState
         this.style = style;
         this.build = build;
         this.region = region;
+        this.fightSessionId = fightSessionId == null || fightSessionId.isEmpty() ? null : fightSessionId;
     }
 
     public static QueueState fromJson(JsonObject d)
@@ -91,12 +105,20 @@ public final class QueueState
             JsonLenient.optString(d, "reason", null),
             JsonLenient.optString(d, "style", null),
             JsonLenient.optString(d, "build", null),
-            JsonLenient.optString(d, "region", null));
+            JsonLenient.optString(d, "region", null),
+            JsonLenient.optString(d, "fight_session_id", null));
     }
 
     public boolean isSearching()
     {
         return "searching".equals(state);
+    }
+
+    /** {@code true} for an idle state whose {@code reason} says the server ended a match before both
+     *  players confirmed: {@code "expired"} or {@code "opponent_declined"}. */
+    public boolean endsMatch()
+    {
+        return "idle".equals(state) && ("expired".equals(reason) || "opponent_declined".equals(reason));
     }
 
     public boolean hasRankRange()

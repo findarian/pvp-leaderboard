@@ -315,13 +315,13 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
 
     /** Active fight session occupying the FIGHT card. One at a time — set
      *  on opponent-accept (sender side) or on receiver Accept Fight click;
-     *  cleared on Go-back-to-Lobby, 30s confirm-window expiry, or fight
+     *  cleared on Go-back-to-Lobby, confirm-window expiry, or fight
      *  completion. Null while in the lobby. */
     private LocalFightState currentFightSession;
 
     /** 1Hz ticker that drives all live countdowns: row [Invited M:SS] chips,
-     *  the FIGHT card's 30s confirm-window label, and the two TTL expiry
-     *  paths (10-min invite + 30-sec confirm). Started in the constructor;
+     *  the FIGHT card's confirm-window label, and the two TTL expiry
+     *  paths (10-min invite + confirm window). Started in the constructor;
      *  stopped by {@link #shutdown()}. */
     private Timer fightTicker;
 
@@ -359,14 +359,6 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
      *  min unless the opponent accepts first. Same as the spec'd block window. */
     private static final long FIGHT_INVITE_TTL_MS = 10L * 60L * 1000L;
 
-    /** Fixed length of the mutual-confirm window the user gets after a
-     *  fight is proposed (matches the backend's
-     *  {@code LOBBY_FIGHT_CONFIRM_TTL_SEC = 30 s}). The countdown is
-     *  always exactly this long — see {@link LocalFightState} for why it
-     *  is measured monotonically rather than against the server's
-     *  absolute deadline. */
-    static final long CONFIRM_WINDOW_MS = 30_000L;
-
     /** How long the Confirm Fight card ignores clicks on its buttons after it appears. */
     static final long CONFIRM_CLICK_DELAY_MS = 1_000L;
 
@@ -381,6 +373,15 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
     void setClickClock(LongSupplier clockMs)
     {
         clickClockMs = clockMs == null ? MatchmakingLobbyPanel::monotonicMs : clockMs;
+    }
+
+    /** Monotonic milliseconds read by the Confirm Fight card's confirm window. */
+    private LongSupplier confirmWindowClockMs = MatchmakingLobbyPanel::monotonicMs;
+
+    /** Replaces the clock the Confirm Fight card's confirm window reads. */
+    void setConfirmWindowClock(LongSupplier clockMs)
+    {
+        confirmWindowClockMs = clockMs == null ? MatchmakingLobbyPanel::monotonicMs : clockMs;
     }
 
     private static long monotonicMs()
@@ -400,16 +401,17 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
      *  clicking Confirm + the service's {@code onFightConfirmedByPeer} push.
      *
      *  <p><b>Clock-independent countdown.</b> The confirm window is
-     *  driven by a fixed {@link #CONFIRM_WINDOW_MS} duration measured
-     *  from {@link #startNanos} (a {@link System#nanoTime()} reading
+     *  driven by the session's {@link FightSession#confirmWindowMs}
+     *  measured from {@link #startMs} (a monotonic clock reading
      *  captured the instant the fight was proposed) — NOT by comparing
      *  {@link System#currentTimeMillis()} against the server's absolute
-     *  {@code confirmExpiresAtEpochMs}. {@code nanoTime()} is monotonic:
-     *  it is immune to the wall clock being set wrong, to NTP step
-     *  corrections, to manual clock edits, and to DST jumps. This fixes
-     *  the QA report where a player whose computer clock was wrong saw
-     *  the Confirm-Fight card flash and return to the lobby immediately
-     *  instead of waiting the full 30 s — with the old wall-clock
+     *  {@code confirmExpiresAtEpochMs}. The monotonic clock
+     *  ({@link System#nanoTime()} unless a test replaces it) is immune
+     *  to the wall clock being set wrong, to NTP step corrections, to
+     *  manual clock edits, and to DST jumps. This fixes the QA report
+     *  where a player whose computer clock was wrong saw the
+     *  Confirm-Fight card flash and return to the lobby immediately
+     *  instead of waiting the full window — with the old wall-clock
      *  comparison a clock running ahead of the server (or a
      *  seconds-as-ms units bug on the wire) produced an already-elapsed
      *  deadline, so {@code onFightTick} called {@code exitFightSetup()}
@@ -434,16 +436,19 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         final String location;
         /** Server's advisory absolute confirm deadline (epoch ms).
          *  Diagnostics only — see class doc; the countdown uses the
-         *  monotonic {@link #startNanos} + {@link #windowMs} instead. */
+         *  monotonic {@link #startMs} + {@link #windowMs} instead. */
         final long confirmExpiresAt;
+        /** Monotonic milliseconds the window is counted on. */
+        final LongSupplier clockMs;
         /** Monotonic anchor captured at construction (fight-proposed
          *  time). Immune to wall-clock changes — the basis for all
          *  elapsed-time math below. */
-        final long startNanos;
-        /** Confirm-window length. Normally {@link #CONFIRM_WINDOW_MS};
-         *  package-private + mutable ONLY so unit tests can force the
-         *  window to zero to deterministically simulate "window elapsed"
-         *  without sleeping (mirrors the existing mutable
+        final long startMs;
+        /** Confirm-window length: the session's
+         *  {@link FightSession#confirmWindowMs}. Package-private + mutable
+         *  ONLY so unit tests can force the window to zero to
+         *  deterministically simulate "window elapsed" without sleeping
+         *  (mirrors the existing mutable
          *  {@link #iConfirmed}/{@link #peerConfirmed} test seam). */
         long windowMs;
         boolean iConfirmed;
@@ -452,8 +457,16 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
          *  its card reads Confirm / Decline and nothing is confirmed
          *  without a click. */
         boolean queueMatch;
+        /** Both players confirmed: the Fight ready view is showing. */
+        boolean fightReady;
 
+        /** Counts the window on {@link System#nanoTime()}. */
         LocalFightState(FightSession session)
+        {
+            this(session, MatchmakingLobbyPanel::monotonicMs);
+        }
+
+        LocalFightState(FightSession session, LongSupplier clockMs)
         {
             this.session = session;
             this.opponent = session.opponent;
@@ -461,8 +474,9 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
             this.build = session.build;
             this.location = session.location;
             this.confirmExpiresAt = session.confirmExpiresAtEpochMs;
-            this.startNanos = System.nanoTime();
-            this.windowMs = CONFIRM_WINDOW_MS;
+            this.clockMs = clockMs;
+            this.startMs = clockMs.getAsLong();
+            this.windowMs = session.confirmWindowMs;
         }
 
         /** Real milliseconds elapsed since the fight was proposed,
@@ -470,7 +484,7 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
          *  wall-clock changes. */
         long elapsedMs()
         {
-            return (System.nanoTime() - startNanos) / 1_000_000L;
+            return Math.max(0L, clockMs.getAsLong() - startMs);
         }
 
         /** Milliseconds left in the confirm window, clamped at 0. */
@@ -902,7 +916,7 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
             // (CARD_FIGHT) or already in MeetAt. World hops can briefly
             // pass through LOGIN_SCREEN, and an intentional logout
             // mid-confirm shouldn't yank the dialog out from under
-            // the user. Keep CARD_FIGHT visible — the local 30s
+            // the user. Keep CARD_FIGHT visible — the local
             // confirm-window ticker still drives exitFightSetup() if
             // the window elapses AND the peer hasn't confirmed
             // (onFightTick), and "Go back to Lobby" is the user's manual
@@ -1085,7 +1099,8 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
     /** The queue's server pushes (EDT — the service marshals). A match
      *  needs no handling here: the lobby's own {@code lobby/fight_proposed}
      *  arrives alongside {@code queue/matched} and {@link #onFightProposed}
-     *  swaps to the Confirm Fight view as for any invite. */
+     *  swaps to the Confirm Fight view as for any invite. An idle state that
+     *  ends a queue match ({@link QueueState#endsMatch()}) closes its card. */
     private final class QueueEvents implements QueueEventListener
     {
         @Override
@@ -1097,6 +1112,7 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
                 showQueueSearching(state);
                 return;
             }
+            if (state.endsMatch()) closeEndedQueueMatch(state.fightSessionId);
             returnFromQueueCard(QueueText.forIdleReason(state.reason));
         }
 
@@ -1645,7 +1661,7 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
     //
     // Termination paths (all clear the [Invited] block + currentFightSession):
     //   - Both confirm -> MeetAt -> Go back to Lobby -> LOBBY
-    //   - 30s confirm window expires AND peer hasn't confirmed -> LOBBY
+    //   - confirm window expires AND peer hasn't confirmed -> LOBBY
     //   - server lobby/session_expired push -> LOBBY (authoritative; any state)
     //   - Go back to Lobby clicked from any FIGHT view -> LOBBY
     //   - 10-min original invite TTL elapses (only meaningful in INVITED state)
@@ -1727,7 +1743,7 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
     }
 
     /** Cleans up any in-flight FIGHT session + outgoing invite for the same
-     *  opponent (Go-back-to-Lobby exit, 30s expiry, both-confirmed exit, etc.)
+     *  opponent (Go-back-to-Lobby exit, window expiry, both-confirmed exit, etc.)
      *  and returns the user to the queue view. The server's session TTL keeps
      *  running server-side; the panel just drops its local state and
      *  ignores the late {@link #onFightConfirmedByPeer onFightConfirmedByPeer}
@@ -1978,7 +1994,7 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         // so the second-to-confirm hits bothConfirmed=true at click time
         // and the guard skipped the swap. Result: stuck-on-Confirm-Fight
         // with a disabled "Confirming\u2026" button until the local timer
-        // (now unconditional) kicks them out 30s later. Swapping every
+        // (now unconditional) kicks them out when the window ends. Swapping every
         // time keeps the visual transition consistent for both confirm
         // orderings; if match_found lands milliseconds later,
         // {@link #onMatchFound} immediately swaps Waiting \u2192 MeetAt.
@@ -1995,7 +2011,7 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
      *  they decide to lock in (the acceptor auto-confirms in
      *  {@link #onFightProposed} and skips straight to the Waiting view).
      *  Shows a big [Get Match Location] button
-     *  and the live 30s countdown; clicking it confirms the fight and, once
+     *  and the live countdown; clicking it confirms the fight and, once
      *  both sides are in, the server reveals the world + meeting place — hence
      *  the label describes that outcome rather than the mechanical "Confirm".
      *  If the opponent has already confirmed, an extra subheader makes that
@@ -2049,7 +2065,7 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
 
     /** Waiting view — user has confirmed; shown until the opponent does
      *  too (header "Waiting on other player to confirm") or both have
-     *  confirmed (header "Finalizing match details\u2026") or the 30 s
+     *  confirmed (header "Finalizing match details\u2026") or the confirm
      *  window expires. The two headers describe the same wait but
      *  attribute it correctly: in the first case we're waiting on the
      *  peer's wire confirm, in the second we're waiting on the server's
@@ -2164,15 +2180,15 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         return "";
     }
 
+    /** The Confirm Fight card's countdown: {@code "M:SS remaining"}, whole seconds rounded up. */
     private static String formatRemaining(LocalFightState s)
     {
         if (s == null) return "";
         // Monotonic remaining time — independent of the wall clock so the
-        // displayed countdown always counts a full CONFIRM_WINDOW_MS down
-        // to zero. See LocalFightState doc.
-        long remainMs = s.remainingMs();
-        long secs = (remainMs + 999L) / 1000L;
-        return "0:" + (secs < 10 ? "0" + secs : Long.toString(secs)) + " remaining";
+        // displayed countdown always counts the full window down to zero.
+        // See LocalFightState doc.
+        long secs = (s.remainingMs() + 999L) / 1000L;
+        return QueueSearchingPanel.mmss((int) secs) + " remaining";
     }
 
     /** Format the remaining time on an outgoing invite as M:SS for the row chip. */
@@ -2304,7 +2320,7 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
     }
 
     /** 1Hz tick: expires INVITED outgoing invites whose 10-min TTL has run out
-     *  (refreshes affected rows), updates the FIGHT card's 30s countdown
+     *  (refreshes affected rows), updates the FIGHT card's countdown
      *  label, and force-exits the FIGHT card when the confirm window
      *  elapses <em>and the peer has not confirmed</em>.
      *
@@ -2324,7 +2340,7 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
      *  <p>Trade-off: if the backend ever loses BOTH confirms (the old
      *  {@code confirmed_by} overwrite bug) and never pushes
      *  match_found/session_expired, a both-confirmed user is no longer
-     *  auto-evicted after 30s — the manual "Go back to Lobby" button is
+     *  auto-evicted when the window ends — the manual "Go back to Lobby" button is
      *  the intended escape hatch in that (server-bug) scenario. */
     private void onFightTick()
     {
@@ -2360,7 +2376,7 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         if (s != null)
         {
             // Monotonic, clock-independent window — see LocalFightState
-            // doc. The window only elapses after CONFIRM_WINDOW_MS of
+            // doc. The window only elapses after windowMs of
             // REAL time, so a wrong / skewed wall clock (or a
             // seconds-as-ms deadline on the wire) can no longer pop the
             // card on the first tick. If match_found landed in time,
@@ -2376,7 +2392,7 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
                     // user. serverDeadlineMs is logged next to the
                     // monotonic elapsedMs so client clock skew is obvious
                     // in a bug report (e.g. a serverDeadlineMs already in
-                    // the past at elapsedMs≈30000).
+                    // the past when elapsedMs reaches windowMs).
                     LOG.debug("MatchmakingLobbyPanel.onFightTick: confirm window elapsed without peer confirm sid={} iConfirmed={} peerConfirmed={} elapsedMs={} serverDeadlineMs={} - exiting fight setup",
                         s.session.fightSessionId, s.iConfirmed, s.peerConfirmed, s.elapsedMs(), s.confirmExpiresAt);
                     exitFightSetup();
@@ -2642,7 +2658,7 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
      *  drop the [Invited M:SS] chip and swap to ConfirmFight; (b) receiver
      *  — we just clicked Accept on an incoming card, server promoted us
      *  to mutual-confirm. Either way the lobby is hidden until the user
-     *  exits via Go-back-to-Lobby, the 30s window expires
+     *  exits via Go-back-to-Lobby, the confirm window expires
      *  ({@link #onFightSessionExpired}), or both sides confirm
      *  ({@link #onMatchFound}). (c) Neither: a queue match gets the same
      *  Confirm Fight card, labelled Confirm / Decline, and nothing is
@@ -2697,14 +2713,14 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
             return s != null && s.name != null && s.name.equals(session.opponent.name);
         });
 
-        currentFightSession = new LocalFightState(session);
+        currentFightSession = new LocalFightState(session, confirmWindowClockMs);
         // showFightSetup() (invoked below in both branches) already snaps the
         // JScrollPane viewport to (0,0) post-layout, so no extra
         // scroll-to-top is needed here.
         if (iWasInviter)
         {
             // The inviter still does the explicit final step: the Confirm
-            // Fight view with the "Get Match Location" CTA + 30s countdown.
+            // Fight view with the "Get Match Location" CTA + countdown.
             showFightSetup(buildConfirmFightView());
         }
         else if (!iAccepted)
@@ -2802,6 +2818,7 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         // Both sides confirmed — MeetAt is terminal until Go-back-to-Lobby.
         // Server-resolved world + meeting_place travel through `match`
         // so the view can render them verbatim (see buildMeetAtView).
+        s.fightReady = true;
         showFightSetup(buildMeetAtView(match));
     }
 
@@ -2819,6 +2836,18 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         renderRoster();
     }
 
+    /** Closes a queue match's Confirm or Waiting card whose session the server ended, as
+     *  {@link #onFightSessionExpired} does. {@code fightSessionId} is the ended session, or
+     *  {@code null} when the frame names none. An invite's card, Fight ready and another
+     *  session's card stay. */
+    private void closeEndedQueueMatch(String fightSessionId)
+    {
+        LocalFightState s = currentFightSession;
+        if (s == null || !s.queueMatch || s.fightReady) return;
+        if (fightSessionId != null && !fightSessionId.equals(s.session.fightSessionId)) return;
+        onFightSessionExpired(s.session.fightSessionId);
+    }
+
     @Override
     public void onError(String code, String message)
     {
@@ -2828,6 +2857,9 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         // server that adds a new code without a plugin release degrades
         // gracefully.
         showErrorBanner(LobbyErrorMessages.forCode(code));
+
+        // FIGHT_SESSION_EXPIRED answers a confirm whose session already ended.
+        if ("FIGHT_SESSION_EXPIRED".equals(code)) closeEndedQueueMatch(null);
 
         // PEER_NOT_IN_LOBBY arriving on the heels of a fresh
         // submitOutgoingInvite() means the row we just clicked is dead
@@ -5063,7 +5095,7 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
             removeInvite(holder[0]);
             // Receiver flow: server creates the fight session and pushes
             // onFightProposed to both players — that listener swaps the
-            // panel into ConfirmFight (30s window). Go-back-to-Lobby exits
+            // panel into ConfirmFight. Go-back-to-Lobby exits
             // the view at any point.
             if (sender.playerId != null) acceptedInviteSenders.add(sender.playerId);
             service.acceptInvite(invite);

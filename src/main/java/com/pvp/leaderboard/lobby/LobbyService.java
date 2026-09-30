@@ -119,7 +119,7 @@ public interface LobbyService
      *  is no outstanding invite for that opponent. */
     void cancelInvite(LobbyMember opponent);
 
-    /** Accepts an incoming invite. Server transitions to the 30-s
+    /** Accepts an incoming invite. Server transitions to the
      *  mutual-confirm phase and pushes {@link LobbyEventListener#onFightProposed}
      *  to both players. */
     void acceptInvite(IncomingInvite invite);

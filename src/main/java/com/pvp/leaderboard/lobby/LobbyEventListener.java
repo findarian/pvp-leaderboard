@@ -54,7 +54,7 @@ public interface LobbyEventListener
 
     /** An invite — either one the local user sent and the opponent
      *  accepted, OR one the local user just accepted — has transitioned to
-     *  the 30-s mutual-confirm phase. Panel switches to its ConfirmFight
+     *  the mutual-confirm phase. Panel switches to its ConfirmFight
      *  view. Both players see this event simultaneously. */
     default void onFightProposed(FightSession session) {}
 
@@ -68,7 +68,7 @@ public interface LobbyEventListener
      *  Panel transitions to its terminal Meet-At view. */
     default void onMatchFound(MatchInfo match) {}
 
-    /** The 30-s confirm window elapsed without both players confirming.
+    /** The confirm window elapsed without both players confirming.
      *  Panel returns the user to the lobby with no penalty. */
     default void onFightSessionExpired(String fightSessionId) {}
 

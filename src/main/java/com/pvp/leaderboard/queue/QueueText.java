@@ -21,7 +21,8 @@ import java.util.Map;
  */
 public final class QueueText
 {
-    public static final String EXPIRED = "Your match expired before both players confirmed.";
+    /** The same sentence as the lobby's {@code FIGHT_SESSION_EXPIRED}. */
+    public static final String EXPIRED = LobbyErrorMessages.MATCH_EXPIRED;
     public static final String OPPONENT_DECLINED = "Your opponent can't make it — the match was cancelled.";
     public static final String LEFT_ON_DISCORD = "You left the queue on Discord.";
     /** A queue join refused with {@code MATCHMAKING_SUSPENDED}, and a tournament
