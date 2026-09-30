@@ -17,19 +17,23 @@ import java.util.Map;
  * card prints. Pure functions — {@code MatchmakingLobbyPanel} decides
  * <i>when</i> to show them. Wording is the operator's (mockup v4 / plan
  * § Part F); lobby codes defer to {@link LobbyErrorMessages} so one code
- * never has two translations.
+ * never has two translations, except {@code MATCHMAKING_SUSPENDED} ({@link #BANNED}).
  */
 public final class QueueText
 {
     public static final String EXPIRED = "Your match expired before both players confirmed.";
     public static final String OPPONENT_DECLINED = "Your opponent can't make it — the match was cancelled.";
     public static final String LEFT_ON_DISCORD = "You left the queue on Discord.";
+    /** A queue join refused with {@code MATCHMAKING_SUSPENDED}, and a tournament
+     *  registration refused with {@code TOURNAMENT_BANNED}. */
+    public static final String BANNED = "Your account is banned from matchmaking and tournaments. DM Toyco if this is a mistake.";
 
-    /** {@code error/queue} codes that are not lobby codes (WEBSOCKET_PROTOCOL.md § 7). */
+    /** {@code error/queue} codes and their sentences; read before the lobby table. */
     private static final Map<String, String> QUEUE_ERRORS;
     static
     {
         Map<String, String> m = new HashMap<>();
+        m.put("MATCHMAKING_SUSPENDED", BANNED);
         m.put("QUEUE_ALREADY_IN", "You are already in the queue.");
         m.put("QUEUE_NOT_IN", "You are not in the queue.");
         m.put("QUEUE_IN_OPEN_SESSION", "You already have a match to confirm.");
@@ -71,14 +75,14 @@ public final class QueueText
         return "No opponent found within " + waitLabel(waitPrefS) + " — you left the queue.";
     }
 
-    /** Lobby codes → {@link LobbyErrorMessages}; queue codes → the table
-     *  above; anything newer → the server's message, then the generic
-     *  fallback. Never the raw code. */
+    /** Queue codes and {@code MATCHMAKING_SUSPENDED} → the table above; other
+     *  lobby codes → {@link LobbyErrorMessages}; anything newer → the server's
+     *  message, then the generic fallback. Never the raw code. */
     public static String forError(String code, String message)
     {
-        if (LobbyErrorMessages.isKnown(code)) return LobbyErrorMessages.forCode(code);
         String queue = code == null ? null : QUEUE_ERRORS.get(code);
         if (queue != null) return queue;
+        if (LobbyErrorMessages.isKnown(code)) return LobbyErrorMessages.forCode(code);
         if (message != null && !message.trim().isEmpty()) return message.trim();
         return LobbyErrorMessages.UNKNOWN_FALLBACK;
     }
