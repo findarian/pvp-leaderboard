@@ -36,6 +36,13 @@ public interface TournamentEventListener
     /** {@code tournament/opponent_highlight} — outline this player until {@code untilEpochS}. */
     default void onOpponentHighlight(String tournamentId, String opponentName, String opponentAcctSha, long untilEpochS) {}
 
+    /** {@code tournament/opponent_highlight} with every name the opponent is logged in with
+     *  ({@code opponent_names}; the one name when the push carries no list). */
+    default void onOpponentHighlight(String tournamentId, String opponentName, String opponentAcctSha, long untilEpochS, List<String> opponentNames)
+    {
+        onOpponentHighlight(tournamentId, opponentName, opponentAcctSha, untilEpochS);
+    }
+
     /** {@code tournament/opponent_highlight_clear}. */
     default void onOpponentHighlightClear(String tournamentId, String seriesId) {}
 

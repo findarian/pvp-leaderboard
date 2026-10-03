@@ -42,12 +42,10 @@ public class PerformanceStatsPanel extends JPanel
         if (baseFont == null) baseFont = new Font("SansSerif", Font.PLAIN, 12);
         Font small = baseFont.deriveFont(Font.PLAIN, Math.max(10f, baseFont.getSize2D() - 1f));
         
-        bucketSelectorPanel = new JPanel(new GridLayout(2, 3, 2, 2));
-        bucketSelectorPanel.setMaximumSize(new Dimension(Integer.MAX_VALUE, 56));
-        // G-11: the Tournament bucket the website Performance Overview
-        // already offers. Appended after DMM (the rating ROW sits above
-        // Overall; the bucket BARS keep their order and append) — six
-        // buttons fill the existing 2x3 grid exactly.
+        // Three rows of two: every label, "Tournament" included, shows in full.
+        bucketSelectorPanel = new JPanel(new GridLayout(3, 2, 2, 2));
+        bucketSelectorPanel.setName("performance-bucket-selector");
+        bucketSelectorPanel.setMaximumSize(new Dimension(Integer.MAX_VALUE, 90));
         String[] buckets = {"Overall", "NH", "Veng", "Multi", "DMM", "Tournament"};
         for (String b : buckets) {
             JButton btn = new JButton(b);
@@ -59,6 +57,8 @@ public class PerformanceStatsPanel extends JPanel
             bucketSelectorPanel.add(btn);
         }
         styleBucketButtons("overall");
+        int rowsHeight = bucketSelectorPanel.getPreferredSize().height;
+        bucketSelectorPanel.setMaximumSize(new Dimension(Integer.MAX_VALUE, Math.max(90, rowsHeight)));
         add(bucketSelectorPanel);
         
         // Summary row

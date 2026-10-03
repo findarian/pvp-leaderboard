@@ -183,7 +183,7 @@ public class TournamentGearCard extends JPanel
         if (v.stale()) add(label("gear-card-hint", STALE_HINT, AMBER, Font.PLAIN, LINE_PT));
         GearDiff d = v.diff;
         add(d.buildOk
-            ? label("gear-card-build", "Build: " + escape(set.buildLabel) + " ✓", GREEN, Font.PLAIN, LINE_PT)
+            ? label("gear-card-build", "Build: " + escape(set.buildLabel), GREEN, Font.PLAIN, LINE_PT)
             : label("gear-card-build", "Pick " + escape(set.buildLabel) + " on the duel screen's Stats tab", RED, Font.BOLD, LINE_PT));
         for (GearDiff.Row r : d.missing) add(missingRow(r));
         for (GearDiff.Row r : d.extra)
@@ -196,7 +196,7 @@ public class TournamentGearCard extends JPanel
         {
             String book = set.spellbookLabel == null ? set.spellbook : set.spellbookLabel;
             add(d.spellbookOk
-                ? label("gear-card-spellbook", "Spellbook: " + escape(book) + " ✓", GREEN, Font.PLAIN, LINE_PT)
+                ? label("gear-card-spellbook", "Spellbook: " + escape(book), GREEN, Font.PLAIN, LINE_PT)
                 : label("gear-card-spellbook", "Spellbook: " + escape(book) + " — switch it in the kit tab's drop-down", RED, Font.BOLD, LINE_PT));
         }
         if (d.pouchUnknown) add(label("gear-card-pouch", POUCH_HINT, AMBER, Font.PLAIN, LINE_PT));
@@ -286,7 +286,7 @@ public class TournamentGearCard extends JPanel
         if (okLine != null)
         {
             String clock = prep ? " · " + (e.checkRound > 0 ? "round " + e.checkRound : "the round") + " starts in " + left : "";
-            String text = TournamentInfoCard.wrapEscaped(okLine.getFont(), TournamentInfoCard.TEXT_WIDTH_PX, "Kit ✓ matches " + escape(e.set.name) + clock);
+            String text = TournamentInfoCard.wrapEscaped(okLine.getFont(), TournamentInfoCard.TEXT_WIDTH_PX, "Kit matches " + escape(e.set.name) + clock);
             if (!text.equals(okLine.getText())) okLine.setText(text);
         }
     }

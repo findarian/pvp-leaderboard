@@ -16,6 +16,7 @@ import java.awt.Color;
 import java.awt.Dimension;
 import java.awt.FlowLayout;
 import java.awt.Font;
+import java.awt.Insets;
 import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.List;
@@ -196,12 +197,23 @@ final class TournamentInfoCard extends JPanel
         if (myStatus != null && !myStatus.isEmpty())
         {
             boolean registered = "registered".equals(myStatus);
-            JLabel my = new JLabel(registered ? "✓ Registered" : "You: " + myStatus);
+            JLabel my = new JLabel(registered ? "Registered" : "You: " + myStatus);
             my.setName("tournament-my-" + t.tournamentId);
             my.setFont(my.getFont().deriveFont(Font.BOLD, STATUS_PT));
             my.setForeground(registered ? GREEN : MUTED);
             my.setAlignmentX(LEFT_ALIGNMENT);
             block.add(my);
+            String meeting = meetingLine(t);
+            if (registered && !meeting.isEmpty())
+            {
+                JLabel meet = new JLabel();
+                meet.setName("tournament-meeting-" + t.tournamentId);
+                meet.setFont(meet.getFont().deriveFont(Font.PLAIN, STATUS_PT));
+                meet.setForeground(MUTED);
+                meet.setAlignmentX(LEFT_ALIGNMENT);
+                meet.setText(wrapHtml(meet.getFont(), TEXT_WIDTH_PX, meeting));
+                block.add(meet);
+            }
         }
         block.setMaximumSize(new Dimension(Integer.MAX_VALUE, block.getPreferredSize().height));
         return block;
@@ -270,17 +282,32 @@ final class TournamentInfoCard extends JPanel
         return null;
     }
 
-    /** Two buttons on one row: {@code wide} fills what {@code narrow} leaves,
-     *  both at the largest size from {@link #BUTTON_PT} down that keeps
-     *  {@code wide}'s label on one line. */
+    /** The pair's side margins: the narrow button takes 4 px a side from the wide one. */
+    static final Insets PAIR_WIDE_MARGIN = new Insets(6, 4, 6, 4);
+    static final Insets PAIR_NARROW_MARGIN = new Insets(6, 12, 6, 12);
+    /** Room the narrow button keeps beside its label, measured at {@link #BUTTON_PT}. */
+    static final int PAIR_SPARE_PX = 8;
+
+    /** Two buttons on one row: {@code narrow} is as wide as its label at
+     *  {@link #BUTTON_PT} with its insets plus {@link #PAIR_SPARE_PX}, at
+     *  every size; {@code wide} fills the rest, both at the largest size from
+     *  {@link #BUTTON_PT} down that keeps {@code wide}'s label on one line;
+     *  {@code narrow} gets the wider side margins. */
     static JPanel pairRow(JButton wide, JButton narrow)
     {
+        wide.setMargin(PAIR_WIDE_MARGIN);
+        narrow.setMargin(PAIR_NARROW_MARGIN);
+        narrow.setPreferredSize(null);
+        narrow.setFont(narrow.getFont().deriveFont(BUTTON_PT));
+        int narrowWidth = narrow.getPreferredSize().width + PAIR_SPARE_PX;
         for (float pt = BUTTON_PT; pt >= PAIR_MIN_PT; pt--)
         {
             wide.setFont(wide.getFont().deriveFont(pt));
             narrow.setFont(narrow.getFont().deriveFont(pt));
-            if (wide.getPreferredSize().width + narrow.getPreferredSize().width + 4 <= TEXT_WIDTH_PX) break;
+            if (wide.getPreferredSize().width + narrowWidth + 4 <= TEXT_WIDTH_PX) break;
         }
+        narrow.setPreferredSize(new Dimension(narrowWidth, narrow.getPreferredSize().height));
+        narrow.setMinimumSize(new Dimension(narrowWidth, narrow.getMinimumSize().height));
         JPanel row = new JPanel(new BorderLayout(4, 0));
         row.setOpaque(false);
         row.setAlignmentX(LEFT_ALIGNMENT);
@@ -382,6 +409,13 @@ final class TournamentInfoCard extends JPanel
     private static String bucketWord(TournamentSummary t)
     {
         return t.category == null || t.category.trim().isEmpty() ? "" : TournamentSummary.categoryLabel(t.category.trim()) + " ";
+    }
+
+    /** {@code "Meet on W578 · PvP Arena entrance"} ({@code "Meet on W578"} without a place); {@code ""} without a world. */
+    static String meetingLine(TournamentSummary t)
+    {
+        if (t.meetingWorld == null) return "";
+        return "Meet on " + t.meetingWorld + (t.meetingPlace == null ? "" : " · " + t.meetingPlace);
     }
 
     static String kitLine(TournamentSummary t)

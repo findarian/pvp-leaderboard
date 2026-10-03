@@ -567,6 +567,95 @@ public class PvPDataService
 		return getUserProfile(playerName, clientUniqueId, false);
 	}
 
+	private static final int TOURNAMENT_HISTORY_DEFAULT_LIMIT = 10;
+
+	/** {@code GET /tournament/history?limit=}: finished events, newest first ({@code tournaments[]}, {@code next_before}). */
+	public CompletableFuture<JsonObject> getTournamentHistory(int limit)
+	{
+		HttpUrl base = HttpUrl.parse(API_BASE_URL + "/tournament/history");
+		if (base == null) return failed("Invalid base URL");
+		int page = limit > 0 ? limit : TOURNAMENT_HISTORY_DEFAULT_LIMIT;
+		return apiGet(base.newBuilder().addQueryParameter("limit", String.valueOf(page)).build());
+	}
+
+	/** {@code GET /tournament/standings?tournament_id=}: an event's standings, the live push's payload. */
+	public CompletableFuture<JsonObject> getTournamentStandings(String tournamentId)
+	{
+		if (tournamentId == null || tournamentId.trim().isEmpty()) return failed("no tournament id");
+		HttpUrl base = HttpUrl.parse(API_BASE_URL + "/tournament/standings");
+		if (base == null) return failed("Invalid base URL");
+		return apiGet(base.newBuilder().addQueryParameter("tournament_id", tournamentId.trim()).build());
+	}
+
+	private static <T> CompletableFuture<T> failed(String why)
+	{
+		CompletableFuture<T> f = new CompletableFuture<>();
+		f.completeExceptionally(new IOException(why));
+		return f;
+	}
+
+	/** One GET of an API route with the client identifier: the JSON body on success, a failure otherwise. */
+	private CompletableFuture<JsonObject> apiGet(HttpUrl url)
+	{
+		CompletableFuture<JsonObject> future = new CompletableFuture<>();
+		Request.Builder requestBuilder = new Request.Builder().url(url).get();
+		String clientUuid = clientIdentityService != null ? clientIdentityService.getClientUniqueId() : null;
+		if (clientUuid != null && !clientUuid.isEmpty())
+		{
+			requestBuilder.addHeader("X-Client-Unique-Id", clientUuid);
+		}
+		enqueueCounted(requestBuilder.build(), new Callback()
+		{
+			@Override
+			public void onFailure(Call call, IOException e)
+			{
+				future.completeExceptionally(e);
+			}
+
+			@Override
+			public void onResponse(Call call, Response response) throws IOException
+			{
+				try (Response res = response)
+				{
+					if (!res.isSuccessful())
+					{
+						future.completeExceptionally(new IOException("API call failed with status: " + res.code()));
+						return;
+					}
+					ResponseBody body = res.body();
+					String bodyString = body != null ? body.string() : "{}";
+					JsonObject json = gson.fromJson(bodyString, JsonObject.class);
+					future.complete(json == null ? new JsonObject() : json);
+				}
+				catch (JsonSyntaxException | IOException e)
+				{
+					future.completeExceptionally(e);
+				}
+			}
+		});
+		return future;
+	}
+
+	/** A player card's rank: the shard of each bucket in turn, then the {@code /user} profile; {@code null} when none knows the player. */
+	public CompletableFuture<String> getRankTierForCard(String playerName, String... buckets)
+	{
+		if (playerName == null || playerName.trim().isEmpty() || buckets == null || buckets.length == 0)
+		{
+			return CompletableFuture.completedFuture(null);
+		}
+		return shardTier(playerName, buckets, 0).thenCompose(tier -> tier != null
+			? CompletableFuture.completedFuture(tier)
+			: getRankFromProfileForLobby(playerName, buckets[0]).thenApply(sr -> sr == null ? null : sr.tier));
+	}
+
+	private CompletableFuture<String> shardTier(String playerName, String[] buckets, int i)
+	{
+		if (i >= buckets.length) return CompletableFuture.completedFuture(null);
+		return getShardRankByName(playerName, buckets[i], true)
+			.exceptionally(ex -> null)
+			.thenCompose(sr -> sr != null && sr.tier != null ? CompletableFuture.completedFuture(sr.tier) : shardTier(playerName, buckets, i + 1));
+	}
+
     private static String canonicalUserCacheKey(String playerName)
     {
         // NameUtils handles the nameplate non-breaking space (\u00A0) so a

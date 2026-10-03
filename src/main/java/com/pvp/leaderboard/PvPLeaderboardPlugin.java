@@ -347,13 +347,13 @@ public class PvPLeaderboardPlugin extends Plugin
 			mouseManager.registerMouseListener(disableWarning);
 		}
 
-		// Plan 10 F.4: yellow outline around the current tournament opponent.
-		// Server-driven only — the tracker returns a name while
+		// The outline around the current tournament opponent: the tracker
+		// names every name the opponent is logged in with while
 		// tournament/opponent_highlight is in force and null otherwise.
 		final TournamentOpponentOverlay opponentOutline = tournamentOpponentOverlay;
 		if (opponentOutline != null)
 		{
-			opponentOutline.setOpponentSupplier(tournamentSessionTracker::getHighlightedOpponentName);
+			opponentOutline.setOpponentNamesSupplier(tournamentSessionTracker::getHighlightedOpponentNames);
 			overlayManager.add(opponentOutline);
 		}
 		fightMonitor.setCombatSink(this::onOwnHit);
@@ -391,6 +391,8 @@ public class PvPLeaderboardPlugin extends Plugin
 		}
 		dashboardPanel.setWinStreakTracker(winStreakTracker);
 		fightMonitor.setStreakSink(this::onFightStreak);
+		// The side panel's own rating rows follow the post-fight profile refresh.
+		fightMonitor.setProfileRefreshSink(this::onOwnProfileRefreshed);
 
 		// Init menu handler with RankOverlay
 		menuHandler.init(dashboardPanel, navButton);
@@ -514,6 +516,7 @@ public class PvPLeaderboardPlugin extends Plugin
 			winStreakOverlay.clear();
 		}
 		fightMonitor.setStreakSink(null);
+		fightMonitor.setProfileRefreshSink(null);
 		winStreakTracker.clear();
 		// Hard-close the socket and forbid future reconnects — the
 		// plugin is going away. WebSocketManager.shutdown() is
@@ -591,6 +594,12 @@ public class PvPLeaderboardPlugin extends Plugin
 		winStreakTracker.onFight(bucketKey, result);
 		DashboardPanel panel = dashboardPanel;
 		if (panel != null) panel.refreshStreakLine(bucketKey);
+	}
+
+	private void onOwnProfileRefreshed(String playerName)
+	{
+		DashboardPanel panel = dashboardPanel;
+		if (panel != null) panel.refreshOwnRatingRows(playerName);
 	}
 
 	/** Plan 10 F.2: the auto-switch's action — pins the side panel + overlay

@@ -48,6 +48,10 @@ public final class TournamentSummary
     public final int gearPrepSec;
     public final String location;
     public final boolean roundsAuto;
+    /** Where a registered player meets when round 1 opens ({@code meeting.world}, "W578"); {@code null} when the entry has none. */
+    public final String meetingWorld;
+    /** {@code meeting.place}; {@code null} when the entry has none. */
+    public final String meetingPlace;
 
     /** One bucket's entry of {@code rank_limits}: rank indices (0 = Bronze 3 … 24 = 3rd Age), {@code -1} = that bound is not set. */
     public static final class RankLimit
@@ -103,6 +107,18 @@ public final class TournamentSummary
                              String creatorName, List<RankLimit> rankLimits, TournamentRules rules, GearSet gearSet, int gearPrepSec, String location,
                              boolean roundsAuto)
     {
+        this(tournamentId, name, status, format, category, style, maxPlayers, registrationClosesAt, startsAt, rounds, currentRound, registeredCount,
+            myStatus, rulesUrl, buyInGp, prizeMode, prizeTopX, prizeRandomY, prizePoolGp, description, pluginRequired, midEventJoins, minGames, roundLengthSec,
+            creatorName, rankLimits, rules, gearSet, gearPrepSec, location, roundsAuto, null, null);
+    }
+
+    public TournamentSummary(String tournamentId, String name, String status, String format, String category, String style,
+                             int maxPlayers, long registrationClosesAt, long startsAt, int rounds, int currentRound, int registeredCount,
+                             String myStatus, String rulesUrl, long buyInGp, String prizeMode, int prizeTopX, int prizeRandomY,
+                             long prizePoolGp, String description, boolean pluginRequired, boolean midEventJoins, int minGames, int roundLengthSec,
+                             String creatorName, List<RankLimit> rankLimits, TournamentRules rules, GearSet gearSet, int gearPrepSec, String location,
+                             boolean roundsAuto, String meetingWorld, String meetingPlace)
+    {
         this.tournamentId = tournamentId;
         this.name = name;
         this.status = status;
@@ -134,6 +150,37 @@ public final class TournamentSummary
         this.gearPrepSec = Math.max(0, gearPrepSec);
         this.location = location;
         this.roundsAuto = roundsAuto;
+        this.meetingWorld = meetingWorld;
+        this.meetingPlace = meetingPlace;
+    }
+
+    /** A copy with the meeting world and place (the registered push carries them beside the event). */
+    public TournamentSummary withMeeting(String world, String place)
+    {
+        return new TournamentSummary(tournamentId, name, status, format, category, style, maxPlayers, registrationClosesAt, startsAt, rounds, currentRound,
+            registeredCount, myStatus, rulesUrl, buyInGp, prizeMode, prizeTopX, prizeRandomY, prizePoolGp, description, pluginRequired, midEventJoins, minGames,
+            roundLengthSec, creatorName, rankLimits, rules, gearSet, gearPrepSec, location, roundsAuto, TournamentSeries.worldLabelOf(world), blankToNull(place));
+    }
+
+    private static String blankToNull(String s)
+    {
+        if (s == null) return null;
+        String t = s.trim();
+        return t.isEmpty() ? null : t;
+    }
+
+    /** {@code meeting.world} of an object, as "W578"; {@code null} without one. */
+    static String meetingWorld(JsonObject o)
+    {
+        JsonObject meeting = JsonLenient.optObject(o, "meeting");
+        return meeting == null ? null : TournamentSeries.worldLabelOf(JsonLenient.optString(meeting, "world", null));
+    }
+
+    /** {@code meeting.place} of an object; {@code null} without one. */
+    static String meetingPlace(JsonObject o)
+    {
+        JsonObject meeting = JsonLenient.optObject(o, "meeting");
+        return meeting == null ? null : textOf(meeting, "place");
     }
 
     /** {@code null} when the object has no {@code tournament_id}. */
@@ -173,7 +220,9 @@ public final class TournamentSummary
             GearSet.fromJson(o.get("gear_set")),
             JsonLenient.optInt(o, "gear_prep_sec", 0),
             textOf(o, "location"),
-            isJsonTrue(o, "rounds_auto"));
+            isJsonTrue(o, "rounds_auto"),
+            meetingWorld(o),
+            meetingPlace(o));
     }
 
     static boolean isJsonTrue(JsonObject o, String key)

@@ -177,8 +177,8 @@ public class WinStreakOverlay extends OverlayPanel
 	{
 		String key = bucket.bucketKey;
 		List<String> lines = new ArrayList<>(4);
-		lines.add(bucket.label + " Kill Streak: " + tracker.text(key));
-		if (showLongest) lines.add("Longest: " + tracker.longest(key));
+		lines.add(bucket.label + " Current Kill Streak: " + tracker.text(key));
+		if (showLongest) lines.add("Longest Kill Streak: " + tracker.longest(key));
 		if (showWinLoss && profile != null) lines.add("W/L: " + profile.wins(key) + "-" + profile.losses(key));
 		String peak = showPeak && profile != null ? profile.peak(key) : null;
 		if (peak != null) lines.add("Peak: " + peak);

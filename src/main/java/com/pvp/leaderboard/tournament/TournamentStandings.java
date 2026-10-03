@@ -72,7 +72,7 @@ public final class TournamentStandings
             eta == null ? -1 : eta,
             JsonLenient.optLong(o, "break_until", 0L),
             JsonLenient.optInt(o, "extended", 0),
-            StandingsRow.fromArray(JsonLenient.optArray(o, "standings")),
+            StandingsRow.fromArray(JsonLenient.optArray(o, "standings"), StandingsRow.tierLabels(o)),
             JsonLenient.optLong(o, "updated_at", 0L),
             JsonLenient.optObject(o, "winners"),
             JsonLenient.optLong(o, "gear_check_until", 0L));

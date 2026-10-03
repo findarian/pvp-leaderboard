@@ -481,7 +481,7 @@ public interface PvPLeaderboardConfig extends Config
 	@ConfigItem(
 		keyName = "showKillStreakBox",
 		name = "Always show kill streak box",
-		description = "Show the movable counter '<style> Kill Streak: N' everywhere (Alt+drag to move it). "
+		description = "Show the movable counter '<style> Current Kill Streak: N' everywhere (Alt+drag to move it). "
 			+ "Off: it only appears inside the FFA portal, while the option below is on. "
 			+ "'N+' means your streak is longer than the loaded match history.",
 		section = killStreakSection,
@@ -554,8 +554,8 @@ public interface PvPLeaderboardConfig extends Config
 
 	@ConfigItem(
 		keyName = "killStreakBoxShowPeak",
-		name = "Show peak rank",
-		description = "Add a line with your peak rank in that style (nothing when you have none)",
+		name = "Show peak rank in box",
+		description = "Adds a Peak line to the kill streak box.",
 		section = killStreakSection,
 		position = 6
 	)

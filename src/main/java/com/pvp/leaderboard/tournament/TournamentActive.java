@@ -77,7 +77,7 @@ public final class TournamentActive
             JsonLenient.optLong(o, "break_until", 0L),
             TournamentSeries.fromJson(JsonLenient.optObject(o, "series"), id, deadline),
             JsonLenient.optBool(o, "bye", false),
-            StandingsRow.fromArray(JsonLenient.optArray(o, "standings")),
+            StandingsRow.fromArray(JsonLenient.optArray(o, "standings"), StandingsRow.tierLabels(o)),
             myRank == null ? -1 : myRank,
             myPoints == null ? -1 : myPoints,
             GearSet.fromJson(o.get("gear_set")),

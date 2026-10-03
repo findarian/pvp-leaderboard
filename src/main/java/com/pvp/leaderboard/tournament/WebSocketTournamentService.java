@@ -228,10 +228,14 @@ public class WebSocketTournamentService implements TournamentService
 
     private void handleRegistered(JsonObject d)
     {
-        TournamentSummary t = TournamentSummary.fromJson(JsonLenient.optObject(d, "tournament"));
-        if (t == null) return;
+        TournamentSummary parsed = TournamentSummary.fromJson(JsonLenient.optObject(d, "tournament"));
+        if (parsed == null) return;
         JsonObject reg = JsonLenient.optObject(d, "registration");
         String status = JsonLenient.optString(reg, "status", "registered");
+        // the meeting rides beside the event on this push
+        JsonObject meeting = JsonLenient.optObject(d, "meeting");
+        TournamentSummary t = meeting == null || parsed.meetingWorld != null ? parsed
+            : parsed.withMeeting(JsonLenient.optString(meeting, "world", null), JsonLenient.optString(meeting, "place", null));
         fire(l -> l.onRegistered(t, status));
     }
 
@@ -276,7 +280,9 @@ public class WebSocketTournamentService implements TournamentService
         String tid = JsonLenient.optString(d, "tournament_id", "");
         String acct = JsonLenient.optString(d, "opponent_acct_sha", null);
         long until = JsonLenient.optLong(d, "until", 0L);
-        fire(l -> l.onOpponentHighlight(tid, name, acct, until));
+        List<String> listed = TournamentSeries.namesOf(d, "opponent_names");
+        List<String> names = listed.isEmpty() ? java.util.Collections.singletonList(name) : listed;
+        fire(l -> l.onOpponentHighlight(tid, name, acct, until, names));
     }
 
     private void handleHighlightClear(JsonObject d)
@@ -325,7 +331,7 @@ public class WebSocketTournamentService implements TournamentService
     {
         String tid = JsonLenient.optString(d, "tournament_id", "");
         JsonObject winners = JsonLenient.optObject(d, "winners");
-        List<StandingsRow> rows = StandingsRow.fromArray(JsonLenient.optArray(d, "standings"));
+        List<StandingsRow> rows = StandingsRow.fromArray(JsonLenient.optArray(d, "standings"), StandingsRow.tierLabels(d));
         fire(l -> l.onFinished(tid, winners, rows));
     }
 

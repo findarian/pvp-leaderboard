@@ -15,16 +15,16 @@ import java.awt.Color;
 import java.awt.Font;
 
 /**
- * The in-panel Rules dialog (plugin set 6, 2026-09-22): a card the
- * Tournaments panel shows in place of the list / active view when an
- * event's {@code tournament/list_response} entry carries a
- * {@link TournamentRules} block. Sections render in wire order as a bold
- * heading + the lines as wrapped <b>plain text</b> (a {@link JTextArea},
- * so nothing in the rules is ever interpreted as HTML), in a scroll pane;
- * <b>Open on the site</b> opens the event's {@code rules_url} in the
- * browser and <b>Back</b> returns to the card the player came from. With
- * no block (an older backend, or junk) the panel never builds this — it
- * opens {@code rules_url} directly, as before.
+ * The in-panel Rules page: a card the Tournaments panel shows in place of
+ * the list / active view when an event's {@code tournament/list_response}
+ * entry carries a {@link TournamentRules} block. The title, then
+ * <b>Back</b> and <b>Open on the site</b>, then the sections in wire order
+ * as a bold heading + the lines as wrapped <b>plain text</b> (a
+ * {@link JTextArea}, so nothing in the rules is ever interpreted as HTML),
+ * in a scroll pane. <b>Open on the site</b> opens the event's
+ * {@code rules_url} in the browser and <b>Back</b> returns to the card the
+ * player came from. With no block the panel never builds this and opens
+ * {@code rules_url} directly.
  */
 final class TournamentRulesDialog extends JPanel
 {
@@ -50,7 +50,17 @@ final class TournamentRulesDialog extends JPanel
         caption.setForeground(MUTED);
         caption.setAlignmentX(LEFT_ALIGNMENT);
         top.add(caption);
+        top.add(Box.createVerticalStrut(6));
+        JButton back = TournamentsPanel.tabButton("Back");
+        back.setName("tournament-rules-back");
+        back.addActionListener(e -> onBack.run());
+        top.add(back);
         top.add(Box.createVerticalStrut(4));
+        JButton site = TournamentsPanel.tabButton("Open on the site");
+        site.setName("tournament-rules-open-site");
+        site.addActionListener(e -> onOpenSite.run());
+        top.add(site);
+        top.add(Box.createVerticalStrut(6));
         add(top, BorderLayout.NORTH);
 
         JPanel body = new JPanel();
@@ -91,19 +101,5 @@ final class TournamentRulesDialog extends JPanel
         scroll.setHorizontalScrollBarPolicy(JScrollPane.HORIZONTAL_SCROLLBAR_NEVER);
         scroll.getVerticalScrollBar().setUnitIncrement(12);
         add(scroll, BorderLayout.CENTER);
-
-        JPanel footer = new JPanel();
-        footer.setLayout(new BoxLayout(footer, BoxLayout.Y_AXIS));
-        footer.setBorder(BorderFactory.createEmptyBorder(6, 0, 0, 0));
-        JButton site = TournamentsPanel.tabButton("Open on the site");
-        site.setName("tournament-rules-open-site");
-        site.addActionListener(e -> onOpenSite.run());
-        footer.add(site);
-        footer.add(Box.createVerticalStrut(4));
-        JButton back = TournamentsPanel.tabButton("Back");
-        back.setName("tournament-rules-back");
-        back.addActionListener(e -> onBack.run());
-        footer.add(back);
-        add(footer, BorderLayout.SOUTH);
     }
 }

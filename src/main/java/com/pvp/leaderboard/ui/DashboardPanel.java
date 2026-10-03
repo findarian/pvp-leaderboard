@@ -38,6 +38,7 @@ public class DashboardPanel extends PluginPanel
     // Header elements
     private JLabel playerNameLabel;
     private JButton refreshButton;
+    private JButton showStreaksButton;
     private JButton matchHistoryBtn;
     private JButton advancedToggle;
     private JButton rankTierToggle;
@@ -210,9 +211,25 @@ public class DashboardPanel extends PluginPanel
         mainPanel.add(tournamentsRow);
         mainPanel.add(Box.createVerticalStrut(6));
 
-        // 3. Card-switched view container: one card per tab.
+        // 3. Card-switched view container: one card per tab. It is as tall as
+        // the card on show, not the tallest card.
         viewCards = new CardLayout();
-        viewContainer = new JPanel(viewCards);
+        viewContainer = new JPanel(viewCards)
+        {
+            @Override
+            public Dimension getPreferredSize()
+            {
+                for (Component card : getComponents())
+                {
+                    if (!card.isVisible()) continue;
+                    Dimension d = card.getPreferredSize();
+                    Insets in = getInsets();
+                    return new Dimension(d.width + in.left + in.right, d.height + in.top + in.bottom);
+                }
+                return super.getPreferredSize();
+            }
+        };
+        viewContainer.setName("view-container");
         viewContainer.setAlignmentX(LEFT_ALIGNMENT);
 
         // --- Stats view (everything that used to live below the rank-tier toggle) ---
@@ -257,22 +274,33 @@ public class DashboardPanel extends PluginPanel
         refreshButton.setVisible(false);
         refreshButton.addActionListener(e -> handleRefresh());
         statsContainer.add(refreshButton);
+        statsContainer.add(Box.createVerticalStrut(4));
+
+        // Show streaks / Hide streaks, directly below Refresh and shown with it;
+        // the choice is kept in the panel's own key.
+        showStreaksButton = new JButton();
+        showStreaksButton.setName("show-streaks-toggle");
+        showStreaksButton.setAlignmentX(LEFT_ALIGNMENT);
+        showStreaksButton.setMaximumSize(new Dimension(Integer.MAX_VALUE, 25));
+        showStreaksButton.setHorizontalAlignment(SwingConstants.CENTER);
+        showStreaksButton.setVisible(false);
+        showStreaksButton.addActionListener(e -> setStreaksShown(!rankProgressPanel.isStreaksShown()));
+        statsContainer.add(showStreaksButton);
         statsContainer.add(Box.createVerticalStrut(24));
-        
-        // 4. Additional Stats (above rank progress)
+
+        // 4. Additional Stats, built here and added at the end of the column
         extraStatsPanel = new AdditionalStatsPanel();
         extraStatsPanel.setPvPDataService(pvpDataService);
         extraStatsPanel.setVisible(false);
         extraStatsPanel.setAlignmentX(LEFT_ALIGNMENT);
         try { extraStatsPanel.setBucket("overall"); } catch (Exception ignore) {}
-        statsContainer.add(extraStatsPanel);
-        statsContainer.add(Box.createVerticalStrut(12));
 
         // 5. Rank Progress
         rankProgressPanel = new RankProgressPanel();
         rankProgressPanel.setAlignmentX(LEFT_ALIGNMENT);
         statsContainer.add(rankProgressPanel);
         statsContainer.add(Box.createVerticalStrut(12));
+        applyStreaksShown(lobbyPreferences.getShowStreaks());
 
         // 6. Match History button (standalone, below progress bars, hidden until search)
         matchHistoryBtn = new JButton("Popout Match History");
@@ -323,9 +351,13 @@ public class DashboardPanel extends PluginPanel
         chartPanel.setBorder(BorderFactory.createTitledBorder("Win Rate History"));
         chartPanel.setAlignmentX(LEFT_ALIGNMENT);
         advancedContainer.add(chartPanel);
-        
+
         statsContainer.add(advancedContainer);
-        
+
+        // 9. Additional Stats last: directly under the Advanced Stats button while that is closed
+        statsContainer.add(Box.createVerticalStrut(12));
+        statsContainer.add(extraStatsPanel);
+
         advancedToggle.addActionListener(e -> {
             boolean showing = advancedContainer.isVisible();
             advancedToggle.setText(showing ? "Advanced Stats" : "Hide Advanced Stats");
@@ -547,8 +579,22 @@ public class DashboardPanel extends PluginPanel
         activeCard = key;
         if (viewCards != null && viewContainer != null) {
             viewCards.show(viewContainer, key);
+            viewContainer.revalidate();
         }
         syncTournamentsShowing();
+    }
+
+    /** The Show streaks switch: the rows, the button's words and the saved choice. */
+    private void setStreaksShown(boolean shown)
+    {
+        lobbyPreferences.setShowStreaks(shown);
+        applyStreaksShown(shown);
+    }
+
+    private void applyStreaksShown(boolean shown)
+    {
+        rankProgressPanel.setStreaksShown(shown);
+        showStreaksButton.setText(shown ? "Hide streaks" : "Show streaks");
     }
 
     /** Tells the live Tournaments panel when it comes on screen (it re-syncs
@@ -677,6 +723,13 @@ public class DashboardPanel extends PluginPanel
         }
         tournamentsPanel = new TournamentsPanel(svc, () -> lobbyPreferences.getRegion("na-e"));
         if (plugin != null) tournamentsPanel.setSelfIdentity(plugin::getLocalPlayerName);
+        tournamentsPanel.setOnOpenProfile(this::openPlayerLookup);
+        if (pvpDataService != null)
+        {
+            tournamentsPanel.setRankLookup(name -> pvpDataService.getRankTierForCard(name, "tournament", "nh"));
+            tournamentsPanel.setHistoryLoader(pvpDataService::getTournamentHistory);
+            tournamentsPanel.setStandingsLoader(pvpDataService::getTournamentStandings);
+        }
         if (plugin != null) tournamentsPanel.setGameLoggedInProvider(plugin::isGameLoggedIn);
         if (tournamentInCombatProvider != null) tournamentsPanel.setInCombatProvider(tournamentInCombatProvider);
         // Set 6: the Report gate is the same Discord login state onLoginStateChanged() reloads on.
@@ -1134,6 +1187,7 @@ public class DashboardPanel extends PluginPanel
             playerNameLabel.setText(playerId);
             if (loginPanel != null) loginPanel.setPluginSearchText(playerId);
             refreshButton.setVisible(true);
+            showStreaksButton.setVisible(true);
             matchHistoryBtn.setVisible(false);
             advancedToggle.setVisible(false);
             extraStatsPanel.setPlayerName(currentMatchesPlayerId);
@@ -1268,6 +1322,22 @@ public class DashboardPanel extends PluginPanel
     private void refreshStreakLines()
     {
         for (StreakBucket b : StreakBucket.values()) refreshStreakLine(b.bucketKey);
+    }
+
+    /** The local player's own profile was refreshed after a fight: redraws the rating rows from the cached profile while it is shown. */
+    public void refreshOwnRatingRows(String playerName)
+    {
+        String normalized = normalizePlayerId(playerName);
+        if (normalized == null || normalized.isEmpty() || pvpDataService == null) return;
+        SwingUtilities.invokeLater(() ->
+        {
+            if (!isShowingSelf() || !normalized.equalsIgnoreCase(currentMatchesPlayerId)) return;
+            com.pvp.leaderboard.cache.UserStatsCache cached = pvpDataService.peekUserProfile(playerName);
+            JsonObject stats = cached == null ? null : cached.getStats();
+            if (stats == null) return;
+            String name = stats.has("player_name") ? stats.get("player_name").getAsString() : playerName;
+            applyAllBucketStats(stats, name, loadGeneration);
+        });
     }
 
     public void refreshStreakLine(String bucketKey)

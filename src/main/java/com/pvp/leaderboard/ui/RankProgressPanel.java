@@ -10,14 +10,14 @@ import java.awt.*;
  * name, the rank line ({@code "Adamant 3 #731 Top 0.07%"}) and the
  * progress-to-next-rank bar.
  *
- * <p>Plan 10 (2026-09-21): the <b>Tournament Rating</b> row sits above
- * Overall and is hidden until the player has a tournament rating (the
- * bucket is absent from {@code /user} until their first recognised
- * tournament game, AS-97). Every row also carries a <b>streak line</b>
- * ({@code "Current Winstreak 4 · Longest Streak 12"}, BOARD row 33),
- * hidden while both values are unknown / zero. The streak label is added
- * after the bar so the rank label stays the block's second {@link JLabel}
- * (what the existing tests read).
+ * <p>The <b>Tournament Rating</b> row sits between Overall and NH and is
+ * hidden until the player has a tournament rating (the bucket is absent
+ * from {@code /user} until their first tournament game). Every row also
+ * carries two <b>streak lines</b> under the bar ({@code "Current Winstreak 4"}
+ * above {@code "Longest Streak 12"}, at the title's size in plain weight),
+ * shown only while {@link #setStreaksShown} is on. The streak labels are
+ * added after the bar so the rank label stays the block's second
+ * {@link JLabel}. Each row is capped at its own height.
  */
 public class RankProgressPanel extends JPanel
 {
@@ -25,10 +25,11 @@ public class RankProgressPanel extends JPanel
     private static final int PROGRESS_BAR_WIDTH = 200;
     private static final int PROGRESS_BAR_HEIGHT = 16;
 
-    /** Row order on screen. Index 0 (tournament) is hidden until rated. */
-    static final String[] BUCKET_KEYS = {"tournament", "overall", "nh", "veng", "multi", "dmm"};
-    private static final String[] BUCKET_TITLES = {"Tournament Rating", "Overall Rating", "NH Rating", "Veng Rating", "Multi Rating", "DMM Rating"};
-    private static final int TOURNAMENT_IDX = 0;
+    /** Row order on screen. Index 1 (tournament) is hidden until rated. */
+    static final String[] BUCKET_KEYS = {"overall", "tournament", "nh", "veng", "multi", "dmm"};
+    private static final String[] BUCKET_TITLES = {"Overall Rating", "Tournament Rating", "NH Rating", "Veng Rating", "Multi Rating", "DMM Rating"};
+    private static final int TOURNAMENT_IDX = 1;
+    private static final Color STREAK_FG = new Color(0xcc, 0xcc, 0xcc);
 
     private final JPanel[] bucketPanels;
     private final Component[] bucketGaps;
@@ -36,6 +37,18 @@ public class RankProgressPanel extends JPanel
     private final JLabel[] bucketNameLabels;
     private final JLabel[] rankLabels;
     private final JLabel[] streakLabels;
+    private final JLabel[] longestLabels;
+    private boolean streaksShown;
+
+    /** A row that never grows past its own height. */
+    private static final class RowPanel extends JPanel
+    {
+        @Override
+        public Dimension getMaximumSize()
+        {
+            return new Dimension(Integer.MAX_VALUE, getPreferredSize().height);
+        }
+    }
 
     public RankProgressPanel()
     {
@@ -46,6 +59,7 @@ public class RankProgressPanel extends JPanel
         bucketNameLabels = new JLabel[n];
         rankLabels = new JLabel[n];
         streakLabels = new JLabel[n];
+        longestLabels = new JLabel[n];
 
         setLayout(new BoxLayout(this, BoxLayout.Y_AXIS));
         initUI();
@@ -55,10 +69,9 @@ public class RankProgressPanel extends JPanel
     {
         for (int i = 0; i < BUCKET_KEYS.length; i++)
         {
-            JPanel bucketPanel = new JPanel();
+            JPanel bucketPanel = new RowPanel();
             bucketPanel.setLayout(new BoxLayout(bucketPanel, BoxLayout.Y_AXIS));
             bucketPanel.setBorder(BorderFactory.createEmptyBorder(0, 0, 0, SIDEBAR_SCROLLBAR_RESERVE_PX));
-            bucketPanel.setMaximumSize(new Dimension(Integer.MAX_VALUE, 88));
             bucketPanel.setAlignmentX(LEFT_ALIGNMENT);
             bucketPanel.setName("rankBucket-" + BUCKET_KEYS[i]);
 
@@ -90,15 +103,11 @@ public class RankProgressPanel extends JPanel
             });
             bucketPanel.add(progressBars[i]);
 
-            // Streak line (BOARD row 33) — after the bar so the rank label
-            // stays the block's second JLabel.
-            streakLabels[i] = new JLabel(" ");
-            streakLabels[i].setFont(streakLabels[i].getFont().deriveFont(Font.PLAIN, 11f));
-            streakLabels[i].setForeground(new Color(0xcc, 0xcc, 0xcc));
-            streakLabels[i].setAlignmentX(LEFT_ALIGNMENT);
-            streakLabels[i].setName("rankStreak-" + BUCKET_KEYS[i]);
-            streakLabels[i].setVisible(false);
+            // The streak lines sit after the bar so the rank label stays the block's second JLabel.
+            streakLabels[i] = streakLabel("rankStreak-" + BUCKET_KEYS[i], bucketNameLabels[i].getFont());
             bucketPanel.add(streakLabels[i]);
+            longestLabels[i] = streakLabel("rankStreakLongest-" + BUCKET_KEYS[i], bucketNameLabels[i].getFont());
+            bucketPanel.add(longestLabels[i]);
 
             bucketPanels[i] = bucketPanel;
             add(bucketPanel);
@@ -109,6 +118,17 @@ public class RankProgressPanel extends JPanel
             }
         }
         setTournamentRowVisible(false);
+    }
+
+    private static JLabel streakLabel(String name, Font titleFont)
+    {
+        JLabel label = new JLabel(name.startsWith("rankStreakLongest-") ? longestStreakText(0) : currentStreakText(0, false));
+        label.setFont(titleFont.deriveFont(Font.PLAIN, titleFont.getSize2D()));
+        label.setForeground(STREAK_FG);
+        label.setAlignmentX(LEFT_ALIGNMENT);
+        label.setName(name);
+        label.setVisible(false);
+        return label;
     }
 
     private void setTournamentRowVisible(boolean visible)
@@ -123,6 +143,25 @@ public class RankProgressPanel extends JPanel
     public boolean isTournamentRowVisible()
     {
         return bucketPanels[TOURNAMENT_IDX].isVisible();
+    }
+
+    /** Whether the streak lines are shown under the rows. */
+    public boolean isStreaksShown()
+    {
+        return streaksShown;
+    }
+
+    /** Shows or hides the streak lines under every row (Swing thread). */
+    public void setStreaksShown(boolean shown)
+    {
+        streaksShown = shown;
+        for (int i = 0; i < BUCKET_KEYS.length; i++)
+        {
+            streakLabels[i].setVisible(shown);
+            longestLabels[i].setVisible(shown);
+        }
+        revalidate();
+        repaint();
     }
 
     public void updateBucket(String bucket, String rankLabel, int division, double pct, int rankNumber)
@@ -141,11 +180,10 @@ public class RankProgressPanel extends JPanel
     }
 
     /**
-     * Full form (Plan 10 / BOARD row 33): {@code streak} / {@code bestStreak}
-     * feed the streak line under the bar; pass {@code -1} for either to
-     * leave the line as it is (the rank-only refreshes do), {@code 0} for
-     * both to hide it. A {@code "—"} rank on the tournament row hides that
-     * row; anything else shows it.
+     * Full form: {@code streak} / {@code bestStreak} feed the streak lines
+     * under the bar; pass {@code -1} for either to leave the lines as they
+     * are (the rank-only refreshes do). A {@code "—"} rank on the tournament
+     * row hides that row; anything else shows it.
      */
     public void updateBucket(String bucket, String rankLabel, int division, double pct, int rankNumber, String topPercent,
                              int streak, int bestStreak)
@@ -178,7 +216,7 @@ public class RankProgressPanel extends JPanel
                 }
                 if (streak >= 0 && bestStreak >= 0)
                 {
-                    setStreakLine(idx, streak, false, bestStreak);
+                    setStreakLines(idx, streak, false, bestStreak);
                 }
                 if (idx == TOURNAMENT_IDX)
                 {
@@ -192,26 +230,27 @@ public class RankProgressPanel extends JPanel
     {
         int idx = getBucketIndex(bucket);
         if (idx < 0) return;
-        SwingUtilities.invokeLater(() -> setStreakLine(idx, streak, plus, bestStreak));
+        SwingUtilities.invokeLater(() -> setStreakLines(idx, streak, plus, bestStreak));
     }
 
-    private void setStreakLine(int idx, int streak, boolean plus, int bestStreak)
+    private void setStreakLines(int idx, int streak, boolean plus, int bestStreak)
     {
-        if (streakLabels[idx] == null) return;
-        boolean show = streak > 0 || bestStreak > 0;
-        streakLabels[idx].setText(show ? streakText(streak, plus, bestStreak) : " ");
-        streakLabels[idx].setVisible(show);
+        streakLabels[idx].setText(currentStreakText(streak, plus));
+        longestLabels[idx].setText(longestStreakText(bestStreak));
+        streakLabels[idx].setVisible(streaksShown);
+        longestLabels[idx].setVisible(streaksShown);
     }
 
-    /** {@code "Current Winstreak 4 · Longest Streak 12"} (BOARD row 33 wording, mockup v4). */
-    static String streakText(int streak, int bestStreak)
+    /** {@code "Current Winstreak 4"} ({@code "100+"} when the loaded history ran out before a loss). */
+    static String currentStreakText(int streak, boolean plus)
     {
-        return streakText(streak, false, bestStreak);
+        return "Current Winstreak " + Math.max(0, streak) + (plus ? "+" : "");
     }
 
-    static String streakText(int streak, boolean plus, int bestStreak)
+    /** {@code "Longest Streak 12"}. */
+    static String longestStreakText(int bestStreak)
     {
-        return "Current Winstreak " + Math.max(0, streak) + (plus ? "+" : "") + " · Longest Streak " + Math.max(0, bestStreak);
+        return "Longest Streak " + Math.max(0, bestStreak);
     }
 
     public void reset()
@@ -230,11 +269,10 @@ public class RankProgressPanel extends JPanel
                     progressBars[i].setString("0%");
                     progressBars[i].setForeground(UIManager.getColor("ProgressBar.foreground"));
                 }
-                if (streakLabels[i] != null)
-                {
-                    streakLabels[i].setText(" ");
-                    streakLabels[i].setVisible(false);
-                }
+                streakLabels[i].setText(currentStreakText(0, false));
+                streakLabels[i].setVisible(false);
+                longestLabels[i].setText(longestStreakText(0));
+                longestLabels[i].setVisible(false);
             }
             setTournamentRowVisible(false);
         });

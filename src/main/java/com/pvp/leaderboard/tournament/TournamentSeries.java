@@ -1,7 +1,12 @@
 package com.pvp.leaderboard.tournament;
 
+import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.pvp.leaderboard.util.JsonLenient;
+
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
 
 /**
  * The local player's series in the current round (Plan 10 Part C):
@@ -30,10 +35,22 @@ public final class TournamentSeries
     public final long deadlineAt;
     public final String category;
     public final String style;
+    /** Every name the opponent is logged in with ({@code opponent_names}); empty when the push carries none. */
+    public final List<String> opponentNames;
+    /** The opponent's region ({@code opponent_region}, "na-e"); {@code null} when the push carries none. */
+    public final String opponentRegion;
 
     public TournamentSeries(String tournamentId, String seriesId, int round, int bestOf, String status, String opponentName,
                             String opponentAcctSha, String opponentPlayerId, String world, String meetingPlace, int gamesRecognised,
                             String winnerAcctSha, long deadlineAt, String category, String style)
+    {
+        this(tournamentId, seriesId, round, bestOf, status, opponentName, opponentAcctSha, opponentPlayerId, world, meetingPlace, gamesRecognised,
+            winnerAcctSha, deadlineAt, category, style, null, null);
+    }
+
+    public TournamentSeries(String tournamentId, String seriesId, int round, int bestOf, String status, String opponentName,
+                            String opponentAcctSha, String opponentPlayerId, String world, String meetingPlace, int gamesRecognised,
+                            String winnerAcctSha, long deadlineAt, String category, String style, List<String> opponentNames, String opponentRegion)
     {
         this.tournamentId = tournamentId;
         this.seriesId = seriesId;
@@ -50,6 +67,37 @@ public final class TournamentSeries
         this.deadlineAt = deadlineAt;
         this.category = category;
         this.style = style;
+        this.opponentNames = opponentNames == null ? Collections.<String>emptyList() : Collections.unmodifiableList(new ArrayList<>(opponentNames));
+        this.opponentRegion = opponentRegion;
+    }
+
+    /** The names the outline matches: {@link #opponentNames}, else the one {@link #opponentName} when named. */
+    public List<String> outlineNames()
+    {
+        if (!opponentNames.isEmpty()) return opponentNames;
+        return hasNamedOpponent() ? Collections.singletonList(opponentName) : Collections.<String>emptyList();
+    }
+
+    /** The string entries of {@code key}'s array, trimmed, blanks and non-strings skipped; empty when it is not an array. */
+    public static List<String> namesOf(JsonObject o, String key)
+    {
+        List<String> out = new ArrayList<>();
+        for (JsonElement e : JsonLenient.optArray(o, key))
+        {
+            if (e == null || !e.isJsonPrimitive() || !e.getAsJsonPrimitive().isString()) continue;
+            String s = e.getAsString().trim();
+            if (!s.isEmpty()) out.add(s);
+        }
+        return out;
+    }
+
+    /** {@code "W370"} for {@code 370} / {@code "370"} / {@code " w370 "}; {@code null} for nothing. */
+    public static String worldLabelOf(String world)
+    {
+        if (world == null) return null;
+        String w = world.trim();
+        if (w.isEmpty()) return null;
+        return w.toUpperCase().startsWith("W") ? "W" + w.substring(1) : "W" + w;
     }
 
     /** {@code null} without a {@code series_id}. {@code tournamentId} /
@@ -75,7 +123,9 @@ public final class TournamentSeries
             JsonLenient.optString(o, "winner_acct_sha", null),
             JsonLenient.optLong(o, "deadline_at", deadlineAt),
             JsonLenient.optString(o, "category", null),
-            JsonLenient.optString(o, "style", null));
+            JsonLenient.optString(o, "style", null),
+            namesOf(o, "opponent_names"),
+            TournamentSummary.textOf(o, "opponent_region"));
     }
 
     public boolean isOpen()
@@ -86,9 +136,8 @@ public final class TournamentSeries
     /** {@code "W370"} for {@code 370} / {@code "370"} / {@code "W370"}; {@code "?"} when unknown. */
     public String worldLabel()
     {
-        if (world == null || world.trim().isEmpty()) return "?";
-        String w = world.trim();
-        return w.toUpperCase().startsWith("W") ? w : "W" + w;
+        String label = worldLabelOf(world);
+        return label == null ? "?" : label;
     }
 
     public boolean hasNamedOpponent()

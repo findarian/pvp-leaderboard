@@ -69,6 +69,9 @@ public class LobbyPreferences
     public static final String KEY_QUEUE_MIN_RANK_IDX = "queueMinRankIdx";
     public static final String KEY_QUEUE_MAX_RANK_IDX = "queueMaxRankIdx";
 
+    /** The side panel's "Show streaks" switch. Not a lobby key: {@link #clear()} leaves it. */
+    public static final String KEY_SHOW_STREAKS = "sidePanelShowStreaks";
+
     /** Aggregated list so {@link #clear()} can wipe in one loop without
      *  drifting from the constants above. */
     private static final String[] ALL_KEYS = {
@@ -145,6 +148,18 @@ public class LobbyPreferences
     public void setQueueMaxRankIdx(int idx)
     {
         writeRaw(KEY_QUEUE_MAX_RANK_IDX, Integer.toString(idx));
+    }
+
+    // -------------------- Side panel --------------------
+
+    public boolean getShowStreaks()
+    {
+        return "true".equalsIgnoreCase(readRaw(KEY_SHOW_STREAKS));
+    }
+
+    public void setShowStreaks(boolean shown)
+    {
+        writeRaw(KEY_SHOW_STREAKS, Boolean.toString(shown));
     }
 
     // -------------------- Region --------------------

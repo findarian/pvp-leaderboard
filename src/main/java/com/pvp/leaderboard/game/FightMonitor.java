@@ -11,6 +11,7 @@ import com.pvp.leaderboard.service.MatchResult;
 import com.pvp.leaderboard.service.MatchResultService;
 import com.pvp.leaderboard.service.PortalRatingCap;
 import com.pvp.leaderboard.service.PvPDataService;
+import com.pvp.leaderboard.util.NameUtils;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -261,6 +262,14 @@ public class FightMonitor
     public void setStreakSink(java.util.function.BiConsumer<String, String> sink)
     {
         this.streakSink = sink;
+    }
+
+    private volatile java.util.function.Consumer<String> profileRefreshSink;
+
+    /** Told the local player's name after each post-fight refresh of their own profile. */
+    public void setProfileRefreshSink(java.util.function.Consumer<String> sink)
+    {
+        this.profileRefreshSink = sink;
     }
 
     java.util.function.Consumer<JsonObject> streakResolver(String guessBucket, String guessResult)
@@ -1703,8 +1712,26 @@ public class FightMonitor
             case VENG: return "veng";
             case MULTI: return "multi";
             case DMM: return "dmm";
+            case TOURNAMENT: return "tournament";
             case OVERALL:
             default: return "overall";
+        }
+    }
+
+    /** The local player's own profile was just refreshed: tell the sink. */
+    private void reportOwnProfileRefresh(String playerName)
+    {
+        java.util.function.Consumer<String> sink = profileRefreshSink;
+        if (sink == null || playerName == null) return;
+        String self = getLocalPlayerName();
+        if (self == null || !NameUtils.canonicalKey(self).equals(NameUtils.canonicalKey(playerName))) return;
+        try
+        {
+            sink.accept(playerName);
+        }
+        catch (RuntimeException e)
+        {
+            log.debug("[PostFight] profile refresh sink threw for {}: {}", playerName, e.getMessage());
         }
     }
 
@@ -1719,6 +1746,7 @@ public class FightMonitor
                     // This ensures fight results update the cached rank and reset the 1-hour timer
                     rankOverlay.refreshLookedUpPlayer(playerName, bucket, tier);
                 }
+                reportOwnProfileRefresh(playerName);
             } else if (retriesLeft > 0) {
                 log.debug("[PostFight] tier is null for player={}, retrying ({} left)", playerName, retriesLeft - 1);
                 scheduler.schedule(() -> fetchTierWithRetry(playerName, bucket, retriesLeft - 1), 
@@ -2014,6 +2042,7 @@ public class FightMonitor
             case "veng": return "Veng";
             case "nh": return "NH";
             case "overall": return "Overall";
+            case "tournament": return "Tournament";
             default: return bucket.toUpperCase();
         }
     }
