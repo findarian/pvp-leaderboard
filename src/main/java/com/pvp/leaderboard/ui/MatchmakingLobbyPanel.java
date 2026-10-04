@@ -101,7 +101,7 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
      *  button —, the roster (built, never attached to the card host),
      *  and the full-screen fight-setup view (Pick Style → optional
      *  sub-location → Meet At) that takes over the panel between [Fight] /
-     *  a queue match and "Go back to Lobby". The card-key strings double
+     *  a queue match and "Back to queue". The card-key strings double
      *  as {@link Component#getName()} on each card's root panel so tests
      *  (and any future "which card am I on?" diagnostic) can find the
      *  currently-visible card by name. Every switch goes through
@@ -188,7 +188,7 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
     private JPanel rosterContainer;
     /** Held as a field so we can snap the viewport back to the top when the
      *  user enters the fight-setup flow — they shouldn't have to scroll
-     *  back up after returning from Go-back-to-Lobby. */
+     *  back up after returning from Back to queue. */
     private JScrollPane rosterScroll;
     private JLabel presenceLabel;
     private JLabel currentStyleLabel;
@@ -318,7 +318,7 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
 
     /** Active fight session occupying the FIGHT card. One at a time — set
      *  on opponent-accept (sender side) or on receiver Accept Fight click;
-     *  cleared on Go-back-to-Lobby, confirm-window expiry, or fight
+     *  cleared on Back to queue, confirm-window expiry, or fight
      *  completion. Null while in the lobby. */
     private LocalFightState currentFightSession;
 
@@ -368,6 +368,9 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
     /** The Confirm Fight card's two buttons for a queue match. */
     static final String QUEUE_CONFIRM_TEXT = "Confirm";
     static final String QUEUE_DECLINE_TEXT = "Decline";
+
+    /** The exit button of every fight card except a queue match's Confirm card. */
+    static final String BACK_TO_QUEUE_TEXT = "Back to queue";
 
     /** Monotonic milliseconds read by the Confirm Fight card's click delay. */
     private LongSupplier clickClockMs = MatchmakingLobbyPanel::monotonicMs;
@@ -922,9 +925,9 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
             // the user. Keep CARD_FIGHT visible — the local
             // confirm-window ticker still drives exitFightSetup() if
             // the window elapses AND the peer hasn't confirmed
-            // (onFightTick), and "Go back to Lobby" is the user's manual
+            // (onFightTick), and "Back to queue" is the user's manual
             // escape hatch. MeetAt has no auto-expiry; the user clicks
-            // "Go back to Lobby" when ready.
+            // "Back to queue" when ready.
             // Backend rules: a logged-out user's fight session is
             // expired server-side on $disconnect, so a re-login won't
             // resume a real session — but the panel staying on
@@ -1675,10 +1678,10 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
     //   -> rest is identical to sender path
     //
     // Termination paths (all clear the [Invited] block + currentFightSession):
-    //   - Both confirm -> MeetAt -> Go back to Lobby -> LOBBY
+    //   - Both confirm -> MeetAt -> Back to queue -> LOBBY
     //   - confirm window expires AND peer hasn't confirmed -> LOBBY
     //   - server lobby/session_expired push -> LOBBY (authoritative; any state)
-    //   - Go back to Lobby clicked from any FIGHT view -> LOBBY
+    //   - Back to queue clicked from any FIGHT view -> LOBBY
     //   - 10-min original invite TTL elapses (only meaningful in INVITED state)
 
     private boolean isPlayerInvited(LobbyMember p)
@@ -1753,7 +1756,7 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
     }
 
     /** Cleans up any in-flight FIGHT session + outgoing invite for the same
-     *  opponent (Go-back-to-Lobby exit, window expiry, both-confirmed exit, etc.)
+     *  opponent (Back to queue exit, window expiry, both-confirmed exit, etc.)
      *  and returns the user to the queue view. The server's session TTL keeps
      *  running server-side; the panel just drops its local state and
      *  ignores the late {@link #onFightConfirmedByPeer onFightConfirmedByPeer}
@@ -1801,7 +1804,7 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         }
 
         card.add(leftAlignedStrut(12));
-        card.add(makeGateCancelButton("Go back to Lobby", this::exitFightSetup));
+        card.add(makeGateCancelButton(BACK_TO_QUEUE_TEXT, this::exitFightSetup));
         return wrapInScroll(card);
     }
 
@@ -1846,7 +1849,7 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         }
 
         card.add(leftAlignedStrut(12));
-        card.add(makeGateCancelButton("Go back to Lobby", this::exitFightSetup));
+        card.add(makeGateCancelButton(BACK_TO_QUEUE_TEXT, this::exitFightSetup));
         return wrapInScroll(card);
     }
 
@@ -1878,7 +1881,7 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         }
 
         card.add(leftAlignedStrut(12));
-        card.add(makeGateCancelButton("Go back to Lobby", this::exitFightSetup));
+        card.add(makeGateCancelButton(BACK_TO_QUEUE_TEXT, this::exitFightSetup));
         return wrapInScroll(card);
     }
 
@@ -1962,7 +1965,7 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
      *        the button flips to "(expired)", disabled, and the view
      *        DOES NOT swap — the user is left on the Confirm Fight
      *        card with the dead button so they can read the label and
-     *        click Go-back-to-Lobby. Pre-debounce, this code path was
+     *        click Back to queue. Pre-debounce, this code path was
      *        a silent no-op (matches the "I clicked Confirm and
      *        nothing happened" QA report when a race clears the
      *        session between view-build and click).</li>
@@ -1980,7 +1983,7 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         {
             LOG.warn("MatchmakingLobbyPanel: Confirm Fight clicked but currentFightSession=null -"
                 + " session was cleared between view-build and click (most likely cause: late"
-                + " match_found / session_expired). Click is a no-op; user must Go-back-to-Lobby.");
+                + " match_found / session_expired). Click is a no-op; user must click Back to queue.");
             if (confirmBtn != null)
             {
                 confirmBtn.setEnabled(false);
@@ -2047,7 +2050,7 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         JButton confirm = makeGateActionButton(queueMatch ? QUEUE_CONFIRM_TEXT : "Get Match Location", true);
         // Primary CTA — green (the colour the exit button used to be) so
         // it reads as the prominent positive action; the secondary
-        // "Go back to Lobby" exit below now uses the neutral default
+        // "Back to queue" exit below now uses the neutral default
         // button colour (2026-05-29 request). Label is "Get Match Location"
         // (2026-05-30 request) since confirming reveals the match world +
         // meeting place.
@@ -2066,7 +2069,7 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         card.add(fightCountdownLabel);
         card.add(leftAlignedStrut(12));
 
-        card.add(makeGateCancelButton(queueMatch ? QUEUE_DECLINE_TEXT : "Go back to Lobby", () ->
+        card.add(makeGateCancelButton(queueMatch ? QUEUE_DECLINE_TEXT : BACK_TO_QUEUE_TEXT, () ->
         {
             if (clickDelayOver(shownAtMs)) exitFightSetup();
         }));
@@ -2099,7 +2102,7 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         card.add(fightCountdownLabel);
         card.add(leftAlignedStrut(12));
 
-        card.add(makeGateCancelButton("Go back to Lobby", this::exitFightSetup));
+        card.add(makeGateCancelButton(BACK_TO_QUEUE_TEXT, this::exitFightSetup));
         return wrapInScroll(card);
     }
 
@@ -2142,10 +2145,10 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         card.add(makeMeetAtRow("Meet at:", meetingPlaceText));
         card.add(leftAlignedStrut(14));
 
-        // Per spec: this screen also has a Go-back-to-Lobby exit; auto-return
+        // Per spec: this screen also has a Back to queue exit; auto-return
         // on real fight submission is a future hook tied to the in-game match
         // submission pipeline ().
-        card.add(makeGateCancelButton("Go back to Lobby", this::exitFightSetup));
+        card.add(makeGateCancelButton(BACK_TO_QUEUE_TEXT, this::exitFightSetup));
         return wrapInScroll(card);
     }
 
@@ -2342,7 +2345,7 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
      *  the panel waits for the server's authoritative
      *  {@code lobby/match_found} (\u2192 MeetAt) or
      *  {@code lobby/session_expired} (\u2192 lobby) push, or the user's
-     *  manual "Go back to Lobby" click. When {@code match_found} lands in
+     *  manual "Back to queue" click. When {@code match_found} lands in
      *  time, {@link #handleMatchFound} clears {@code currentFightSession}
      *  so this branch is moot — the outer {@code if (s != null)} guard
      *  skips.
@@ -2350,7 +2353,7 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
      *  <p>Trade-off: if the backend ever loses BOTH confirms (the old
      *  {@code confirmed_by} overwrite bug) and never pushes
      *  match_found/session_expired, a both-confirmed user is no longer
-     *  auto-evicted when the window ends — the manual "Go back to Lobby" button is
+     *  auto-evicted when the window ends — the manual "Back to queue" button is
      *  the intended escape hatch in that (server-bug) scenario. */
     private void onFightTick()
     {
@@ -2412,7 +2415,7 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
                 // finalized; don't bounce the user back to the lobby).
                 // The server stays authoritative: lobby/match_found swaps
                 // to MeetAt and lobby/session_expired returns to the
-                // lobby. The user's manual "Go back to Lobby" button is
+                // lobby. The user's manual "Back to queue" button is
                 // always available as the escape hatch. We stop updating
                 // the countdown label here so it freezes instead of
                 // showing a stale "0:00 remaining".
@@ -2668,7 +2671,7 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
      *  drop the [Invited M:SS] chip and swap to ConfirmFight; (b) receiver
      *  — we just clicked Accept on an incoming card, server promoted us
      *  to mutual-confirm. Either way the lobby is hidden until the user
-     *  exits via Go-back-to-Lobby, the confirm window expires
+     *  exits via Back to queue, the confirm window expires
      *  ({@link #onFightSessionExpired}), or both sides confirm
      *  ({@link #onMatchFound}). (c) Neither: a queue match gets the same
      *  Confirm Fight card, labelled Confirm / Decline, and nothing is
@@ -2825,7 +2828,7 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         if (s == null) return;
         if (s.session.fightSessionId != null
             && !s.session.fightSessionId.equals(match.fightSessionId)) return;
-        // Both sides confirmed — MeetAt is terminal until Go-back-to-Lobby.
+        // Both sides confirmed — MeetAt is terminal until Back to queue.
         // Server-resolved world + meeting_place travel through `match`
         // so the view can render them verbatim (see buildMeetAtView).
         s.fightReady = true;
@@ -3210,7 +3213,7 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         return b;
     }
 
-    /** Bottom exit button ("Go back to Lobby"). Neutral default button
+    /** Bottom exit button ("Back to queue"). Neutral default button
      *  colour — it deliberately does NOT set a background so it matches
      *  the colour the Confirm button used to be. The green tint moved to
      *  the Confirm CTA (see {@link #buildConfirmFightView}) so green now
@@ -3518,7 +3521,7 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
 
     /** Snaps the roster scroll back to the top. Called when entering the
      *  fight-setup flow so the user lands at the top of the roster on
-     *  return (Go-back-to-Lobby / both-confirmed / window-expired) rather
+     *  return (Back to queue / both-confirmed / window-expired) rather
      *  than at whatever position they had clicked Fight from.
      *
      *  Implementation note: a direct {@code setValue(0)} on the scrollbar
@@ -4287,7 +4290,7 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
             removeInvite(holder[0]);
             // Receiver flow: server creates the fight session and pushes
             // onFightProposed to both players — that listener swaps the
-            // panel into ConfirmFight. Go-back-to-Lobby exits
+            // panel into ConfirmFight. Back to queue exits
             // the view at any point.
             if (sender.playerId != null) acceptedInviteSenders.add(sender.playerId);
             service.acceptInvite(invite);

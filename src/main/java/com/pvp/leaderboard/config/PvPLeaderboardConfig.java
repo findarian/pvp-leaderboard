@@ -170,7 +170,7 @@ public interface PvPLeaderboardConfig extends Config
 	@ConfigItem(
 		keyName = "autoSwitchTournamentBucket",
 		name = "Auto-switch to Tournament",
-		description = "While you are in a running tournament the side panel and overlay use the Tournament bucket; it switches back at the next fight like every bucket (Plan 10)",
+		description = "While you are in a running tournament the side panel and overlay use the Tournament bucket; it switches back at the next fight like every bucket",
 		section = overlaySection,
 		position = 4
 	)
@@ -327,7 +327,8 @@ public interface PvPLeaderboardConfig extends Config
 		name = "Lobby invite popup",
 		description = "Show an OSRS-style in-game popup when another player invites you to fight in the matchmaking lobby",
 		section = notificationSection,
-		position = 4
+		position = 4,
+		hidden = true
 	)
 	default boolean enableLobbyInviteNotification()
 	{
@@ -339,7 +340,8 @@ public interface PvPLeaderboardConfig extends Config
 		name = "Lobby invite popup duration",
 		description = "How long the lobby invite popup stays on screen (seconds). Includes fade in/out.",
 		section = notificationSection,
-		position = 5
+		position = 5,
+		hidden = true
 	)
 	@Range(min = 1, max = 30)
 	default int lobbyInviteNotificationDurationSeconds()
@@ -388,7 +390,7 @@ public interface PvPLeaderboardConfig extends Config
 	@ConfigItem(
 		keyName = "enableQuickMatch",
 		name = "Matchmaking queue",
-		description = "Show 'Queue for matchmaking' on the Matchmaking gate: one style, optional rank range, a wait time shared with Discord (Plan 10)",
+		description = "Show the matchmaking queue on the Matchmaking tab: NH, an optional rank range and a wait time shared with Discord",
 		section = otherSection,
 		position = 1
 	)
@@ -400,7 +402,7 @@ public interface PvPLeaderboardConfig extends Config
 	@ConfigItem(
 		keyName = "enableTournaments",
 		name = "Tournaments tab",
-		description = "Show the Tournaments sub-tab (register, live standings, round clock). Only the tab is gated: the opponent outline and the Tournament bucket auto-switch stay on regardless (Plan 10)",
+		description = "Show the Tournaments tab (register, live standings, round clock). With it off, the opponent outline and Auto-switch to Tournament still work",
 		section = otherSection,
 		position = 2
 	)
