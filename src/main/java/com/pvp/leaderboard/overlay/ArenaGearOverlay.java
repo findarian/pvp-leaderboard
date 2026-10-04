@@ -115,12 +115,12 @@ public class ArenaGearOverlay extends Overlay
             String want = v.event.set.spellbook;
             if (againstOpponent && s.ownPanel >= 0 && s.ownKit != null && !want.equals(s.ownKit.spellbook))
             {
-                outline(g, client.getWidget(ArenaWidgets.DUEL_PANELS[s.ownPanel].spellbookMenu));
+                outline(g, spellbookBox(ArenaWidgets.DUEL_PANELS[s.ownPanel]));
             }
             int chest = reader.suppliesPanel();
             if (chest >= 0 && ArenaWidgets.BUILD_ORDER[chest].equals(v.event.set.build) && !want.equals(reader.suppliesSpellbook()))
             {
-                outline(g, client.getWidget(ArenaWidgets.SUPPLIES_PANELS[chest].spellbookMenu));
+                outline(g, spellbookBox(ArenaWidgets.SUPPLIES_PANELS[chest]));
             }
         }
         GearSearchHelper.Highlight h = search.highlight();
@@ -236,6 +236,19 @@ public class ArenaGearOverlay extends Overlay
             originalColors.clear();
             greyed = false;
         }
+    }
+
+    /** The panel's spellbook drop-down as shown: the first visible of its display, container and menu. */
+    private Widget spellbookBox(ArenaWidgets.KitPanel panel)
+    {
+        for (int id : new int[]{panel.spellbookDisplay, panel.spellbookContainer, panel.spellbookMenu})
+        {
+            Widget w = client.getWidget(id);
+            if (w == null || w.isHidden()) continue;
+            Rectangle b = w.getBounds();
+            if (b != null && !b.isEmpty()) return w;
+        }
+        return null;
     }
 
     private void outlineRows(Graphics2D g, ArenaWidgets.KitPanel panel, GearSearchHelper.Highlight h)
