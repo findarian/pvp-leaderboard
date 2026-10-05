@@ -51,8 +51,10 @@ import java.util.regex.Pattern;
  * {@link #reconnectDelayMs(int, double)}. The attempt count grows with
  * every connection that fails or closes before
  * {@link #STABLE_CONNECTION_MS} and resets once one stays open that long.
- * Triggered by abnormal close codes (anything other than 1000 / 1001)
- * AND by network-level {@code onFailure}. A {@link #connect} while a
+ * Triggered by any close the plugin did not request, whatever its code
+ * (the server's 2-hour close included), AND by network-level
+ * {@code onFailure}; a logout or a plugin stop never reconnects. A
+ * {@link #connect} while a
  * retry is scheduled leaves that retry in place, and more than
  * {@link #OPEN_BURST} opens within {@link #OPEN_BURST_WINDOW_MS} wait
  * for a scheduled retry.
@@ -793,17 +795,14 @@ public final class WebSocketManager
                     activeSocket = null;
                     noteSocketEndedLocked();
                 }
-                // 1000 (normal) / 1001 (going-away) are clean closes —
-                // don't reconnect. Anything else is the server kicking
-                // us off (1008 dup-connect, 1006 abnormal) — reconnect
-                // with backoff. Reconnect ONLY when the closed socket
-                // was the current one; a stale callback from a defunct
-                // socket must not schedule a spurious reconnect over
-                // the live one.
-                shouldReconnect = isCurrent
-                    && !intentionalDisconnect
-                    && code != CLOSE_NORMAL
-                    && code != CLOSE_GOING_AWAY;
+                // Any close the plugin did not request reconnects with
+                // backoff, whatever its code (the server's 2-hour close
+                // is 1001). A logout or a plugin stop sets
+                // intentionalDisconnect first and never reconnects.
+                // Reconnect ONLY when the closed socket was the current
+                // one; a stale callback from a defunct socket must not
+                // schedule a spurious reconnect over the live one.
+                shouldReconnect = isCurrent && !intentionalDisconnect;
             }
             log.debug("WebSocketManager: closed code={} reason={} reconnect={} stale={}",
                 code, reason, shouldReconnect, !isCurrent);
