@@ -1,29 +1,21 @@
 package com.pvp.leaderboard.service;
 
-import com.google.gson.JsonArray;
-import com.google.gson.JsonElement;
-import com.google.gson.JsonObject;
-import com.pvp.leaderboard.cache.UserStatsCache;
-import com.pvp.leaderboard.config.StreakBucket;
-import com.pvp.leaderboard.util.JsonLenient;
-import lombok.extern.slf4j.Slf4j;
-import net.runelite.client.config.ConfigManager;
+import com.google.gson.*;
+import com.pvp.leaderboard.cache.*;
+import com.pvp.leaderboard.config.*;
+import com.pvp.leaderboard.util.*;
+import java.util.*;
+import java.util.function.*;
+import javax.inject.*;
+import net.runelite.client.config.*;
 
-import javax.inject.Inject;
-import javax.inject.Singleton;
-import java.util.EnumMap;
-import java.util.Locale;
-import java.util.Map;
-import java.util.function.LongSupplier;
-
-@Slf4j
 @Singleton
 public class WinStreakTracker
 {
 	static final String CONFIG_GROUP = "PvPLeaderboard";
 	static final String KEY_PREFIX = "winStreak.";
 	static final long GRACE_MS = 30_000L;
-	static final int GRACE_REFRESHES = 2;
+	static final int GRACE_TRIES = 2;
 
 	private static final String WIN = "win";
 	private static final String LOSS = "loss";
@@ -34,7 +26,7 @@ public class WinStreakTracker
 	private String loadedProfile;
 	private final Map<StreakBucket, Streak> streaks = new EnumMap<>(StreakBucket.class);
 	private boolean known;
-	private long lastProfileTs = Long.MIN_VALUE;
+	private long profileTs = Long.MIN_VALUE;
 
 	private static final class Streak
 	{
@@ -42,7 +34,7 @@ public class WinStreakTracker
 		boolean plus;
 		int serverBest;
 		int localBest;
-		int graceSightings;
+		int graceSeen;
 		long graceStartMs;
 	}
 
@@ -58,16 +50,16 @@ public class WinStreakTracker
 		this.nowMs = nowMs;
 	}
 
-	public synchronized void seedFromHistory(JsonArray matchesNewestFirst)
+	public synchronized void seedHistory(JsonArray newestFirst)
 	{
-		if (matchesNewestFirst == null || !ensureLoaded()) return;
+		if (newestFirst == null || !ensureLoaded()) return;
 		known = true;
 		Map<StreakBucket, int[]> tally = new EnumMap<>(StreakBucket.class);
-		for (JsonElement e : matchesNewestFirst)
+		for (JsonElement e : newestFirst)
 		{
-			if (e == null || !e.isJsonObject()) continue;
+			if (!e.isJsonObject()) continue;
 			JsonObject row = e.getAsJsonObject();
-			StreakBucket bucket = StreakBucket.fromBucketKey(JsonLenient.optString(row, "bucket", null));
+			StreakBucket bucket = StreakBucket.forKey(JsonLenient.optString(row, "bucket", null));
 			if (bucket == null) continue;
 			int[] t = tally.computeIfAbsent(bucket, k -> new int[2]);
 			if (t[1] == 1) continue;
@@ -83,19 +75,19 @@ public class WinStreakTracker
 			if (exact)
 			{
 				set(en.getKey(), s, wins, false);
-				s.graceSightings = 0;
+				s.graceSeen = 0;
 			}
 			else if (wins > s.current)
 			{
 				set(en.getKey(), s, wins, true);
-				s.graceSightings = 0;
+				s.graceSeen = 0;
 			}
 		}
 	}
 
 	public synchronized void onFight(String bucketKey, String result)
 	{
-		StreakBucket bucket = StreakBucket.fromBucketKey(bucketKey);
+		StreakBucket bucket = StreakBucket.forKey(bucketKey);
 		if (bucket == null || !ensureLoaded()) return;
 		Streak s = streaks.get(bucket);
 		String r = normalise(result);
@@ -111,7 +103,7 @@ public class WinStreakTracker
 
 	public synchronized void reconcile(String bucketKey, int serverStreak, int serverBest)
 	{
-		StreakBucket bucket = StreakBucket.fromBucketKey(bucketKey);
+		StreakBucket bucket = StreakBucket.forKey(bucketKey);
 		if (bucket == null || !ensureLoaded()) return;
 		known = true;
 		Streak s = streaks.get(bucket);
@@ -120,33 +112,40 @@ public class WinStreakTracker
 		if (serverStreak >= s.current)
 		{
 			set(bucket, s, serverStreak, false);
-			s.graceSightings = 0;
+			s.graceSeen = 0;
 			return;
 		}
 		long now = nowMs.getAsLong();
-		if (s.graceSightings == 0) s.graceStartMs = now;
-		s.graceSightings++;
-		if (s.graceSightings >= GRACE_REFRESHES && now - s.graceStartMs >= GRACE_MS)
+		if (s.graceSeen == 0) s.graceStartMs = now;
+		s.graceSeen++;
+		if (s.graceSeen >= GRACE_TRIES && now - s.graceStartMs >= GRACE_MS)
 		{
 			set(bucket, s, serverStreak, false);
 			s.localBest = serverStreak;
-			s.graceSightings = 0;
+			s.graceSeen = 0;
 		}
 	}
 
-	public synchronized void observeProfile(UserStatsCache cached)
+	public synchronized void observeProfile(UserStats cached)
 	{
 		if (cached == null || !ensureLoaded()) return;
-		if (cached.getTimestamp() == lastProfileTs) return;
-		lastProfileTs = cached.getTimestamp();
+		if (cached.getTimestamp() == profileTs) return;
+		profileTs = cached.getTimestamp();
 		known = true;
-		WinStreaks server = WinStreaks.fromProfile(cached.getStats());
+		JsonObject buckets = JsonLenient.optObject(cached.getStats(), "buckets");
 		for (StreakBucket b : StreakBucket.values())
 		{
-			reconcile(b.bucketKey,
-				server.hasStreak(b.bucketKey) ? server.current(b.bucketKey) : -1,
-				server.hasBest(b.bucketKey) ? server.best(b.bucketKey) : -1);
+			JsonObject bucket = JsonLenient.optObject(buckets, b.bucketKey);
+			reconcile(b.bucketKey, sent(bucket, "streak"), sent(bucket, "best_streak"));
 		}
+	}
+
+	/** {@code buckets.<key>.<field>} as the server sent it, or -1 when it sent
+	 *  none: absent, not a number, or negative (a streak is never below zero). */
+	private static int sent(JsonObject bucket, String field)
+	{
+		Integer v = JsonLenient.optInteger(bucket, field);
+		return v == null || v < 0 ? -1 : v;
 	}
 
 	public synchronized void clear()
@@ -154,7 +153,7 @@ public class WinStreakTracker
 		loadedProfile = null;
 		streaks.clear();
 		known = false;
-		lastProfileTs = Long.MIN_VALUE;
+		profileTs = Long.MIN_VALUE;
 	}
 
 	public synchronized boolean isKnown()
@@ -188,7 +187,7 @@ public class WinStreakTracker
 
 	private Streak find(String bucketKey)
 	{
-		StreakBucket bucket = StreakBucket.fromBucketKey(bucketKey);
+		StreakBucket bucket = StreakBucket.forKey(bucketKey);
 		return bucket == null || !ensureLoaded() ? null : streaks.get(bucket);
 	}
 
@@ -200,7 +199,7 @@ public class WinStreakTracker
 		{
 			loadedProfile = profile;
 			known = false;
-			lastProfileTs = Long.MIN_VALUE;
+			profileTs = Long.MIN_VALUE;
 			streaks.clear();
 			for (StreakBucket b : StreakBucket.values())
 			{
@@ -231,7 +230,6 @@ public class WinStreakTracker
 		}
 		catch (RuntimeException e)
 		{
-			log.debug("[WinStreak] could not save {}: {}", bucket, e.getMessage());
 		}
 	}
 

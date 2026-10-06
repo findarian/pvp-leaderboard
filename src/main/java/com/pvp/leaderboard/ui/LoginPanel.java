@@ -1,42 +1,49 @@
 package com.pvp.leaderboard.ui;
 
-import com.pvp.leaderboard.PvPLeaderboardConstants;
-import com.pvp.leaderboard.service.DiscordAuthService;
-import javax.swing.*;
+import lombok.*;
+import com.pvp.leaderboard.*;
+import com.pvp.leaderboard.service.*;
 import java.awt.*;
-import java.net.URLEncoder;
-import java.util.function.Consumer;
-import net.runelite.client.util.LinkBrowser;
+import java.awt.event.*;
+import java.net.*;
+import java.nio.charset.*;
+import java.util.*;
+import java.util.function.*;
+import javax.swing.*;
+import net.runelite.client.util.*;
+import javax.swing.Timer;
+import static com.pvp.leaderboard.ui.Ui.*;
 
 public class LoginPanel extends JPanel
 {
-    private static final int MAX_PLUGIN_SEARCHES_PER_MINUTE = 10;
+    private static final int MAX_SEARCHES = 10;
 
     /** Discord brand "blurple" (#5865F2) — matches flipping-copilot's button. */
-    private static final Color DISCORD_BLURPLE = new Color(88, 101, 242);
-    
-    private final DiscordAuthService discordAuthService;
-    private final Consumer<String> onPluginSearch;
-    private final Runnable onLoginStateChanged;
+    private static final Color BLURPLE = new Color(88, 101, 242);
+
+    private final DiscordLogin discordLogin;
+    private final Consumer<String> onSearch;
+    private final Runnable onLoginState;
 
     private JTextField searchField;
-    private JButton pluginSearchBtn;
-    private JButton loginButton;
-    
-    private boolean loginInProgress = false;
-    private boolean isLoggedIn = false;
-    
-    // Rate limiting for plugin search (10 per minute)
-    private final java.util.Deque<Long> pluginSearchTimestamps = new java.util.ArrayDeque<>();
+    private JButton searchBtn;
+    @Getter private JButton loginButton;
 
-    public LoginPanel(DiscordAuthService discordAuthService, Consumer<String> onPluginSearch, Runnable onLoginStateChanged)
+    private boolean loggingIn = false;
+    private boolean isLoggedIn = false;
+
+    // Rate limiting for plugin search (10 per minute)
+    private final Deque<Long> searchTimes = new ArrayDeque<>();
+
+    /** Both callbacks are always wired (the dashboard passes them). */
+    public LoginPanel(DiscordLogin discordLogin, Consumer<String> onSearch, Runnable onLoginState)
     {
-        this.discordAuthService = discordAuthService;
-        this.onPluginSearch = onPluginSearch;
-        this.onLoginStateChanged = onLoginStateChanged;
+        this.discordLogin = discordLogin;
+        this.onSearch = onSearch;
+        this.onLoginState = onLoginState;
 
         setLayout(new BoxLayout(this, BoxLayout.Y_AXIS));
-        setBorder(BorderFactory.createEmptyBorder(4, 4, 4, 4));
+        setBorder(pad(4, 4, 4, 4));
         setMaximumSize(new Dimension(220, 85));
         setPreferredSize(new Dimension(220, 85));
 
@@ -50,59 +57,55 @@ public class LoginPanel extends JPanel
         searchField = new JTextField(PLACEHOLDER);
         searchField.setHorizontalAlignment(JTextField.CENTER);
         searchField.setForeground(Color.GRAY);
-        searchField.setMaximumSize(new Dimension(Integer.MAX_VALUE, 25));
-        searchField.setAlignmentX(Component.LEFT_ALIGNMENT);
-        searchField.addFocusListener(new java.awt.event.FocusAdapter() {
+        maxH(searchField, 25);
+        left(searchField);
+        searchField.addFocusListener(new FocusAdapter() {
             @Override
-            public void focusGained(java.awt.event.FocusEvent e) {
+            public void focusGained(FocusEvent e) {
                 if (searchField.getText().equals(PLACEHOLDER)) {
                     searchField.setText("");
                     searchField.setForeground(null);
                 }
             }
             @Override
-            public void focusLost(java.awt.event.FocusEvent e) {
+            public void focusLost(FocusEvent e) {
                 if (searchField.getText().isEmpty()) {
                     searchField.setText(PLACEHOLDER);
                     searchField.setForeground(Color.GRAY);
                 }
             }
         });
-        searchField.addActionListener(e -> searchUserOnPlugin());
+        searchField.addActionListener(e -> searchHere());
         add(searchField);
 
-        add(Box.createVerticalStrut(4));
+        add(vgap(4));
 
-        JPanel btnPanel = new JPanel(new GridLayout(1, 2, 4, 0));
-        btnPanel.setAlignmentX(Component.LEFT_ALIGNMENT);
-        btnPanel.setMaximumSize(new Dimension(Integer.MAX_VALUE, 40));
+        var btnPanel = new JPanel(new GridLayout(1, 2, 4, 0));
+        left(btnPanel);
+        maxH(btnPanel, 40);
 
-        JButton websiteSearchBtn = new JButton("<html><center>Website<br>Search</center></html>");
-        websiteSearchBtn.addActionListener(e -> searchUserOnWebsite());
+        var siteBtn = new JButton("<html><center>Website<br>Search</center></html>");
+        siteBtn.addActionListener(e -> searchSite());
 
-        pluginSearchBtn = new JButton("<html><center>Plugin<br>Search</center></html>");
-        pluginSearchBtn.addActionListener(e -> searchUserOnPlugin());
+        searchBtn = new JButton("<html><center>Plugin<br>Search</center></html>");
+        searchBtn.addActionListener(e -> searchHere());
 
-        btnPanel.add(websiteSearchBtn);
-        btnPanel.add(pluginSearchBtn);
+        btnPanel.add(siteBtn);
+        btnPanel.add(searchBtn);
         add(btnPanel);
 
-        loginButton = new JButton("Login with Discord");
-        loginButton.setMaximumSize(new Dimension(Integer.MAX_VALUE, 25));
-        loginButton.setAlignmentX(Component.LEFT_ALIGNMENT);
+        // Hoisted into the dashboard's community box, which sizes it.
         // Discord blurple (#5865F2), matching flipping-copilot's login button.
-        loginButton.setBackground(DISCORD_BLURPLE);
+        loginButton = new JButton("Login with Discord");
+        loginButton.setBackground(BLURPLE);
         loginButton.setForeground(Color.WHITE);
         loginButton.setOpaque(true);
         loginButton.setFocusPainted(false);
         loginButton.addActionListener(e -> handleLogin());
     }
 
-    public JButton getLoginButton()
-    {
-        return loginButton;
-    }
-
+    /** RuneScape name format: 1-12 letters, digits, spaces, underscores or
+     *  hyphens. Rejects null, blank and the 16-character placeholder. */
     private boolean isValidUsername(String username)
     {
         if (username == null) return false;
@@ -111,7 +114,7 @@ public class LoginPanel extends JPanel
         // Allow alphanumeric, spaces, underscores, and hyphens (RuneScape username format)
         return trimmed.matches("^[a-zA-Z0-9 _-]+$");
     }
-    
+
     private String normalizeUsername(String username)
     {
         if (username == null) return null;
@@ -119,180 +122,122 @@ public class LoginPanel extends JPanel
         return username.trim().toLowerCase().replaceAll("\\s+", " ");
     }
 
-    private void searchUserOnWebsite()
+    private void searchSite()
     {
         String username = searchField.getText();
-        if (username == null || username.trim().isEmpty() || PLACEHOLDER.equals(username))
+        if (username.trim().isEmpty() || PLACEHOLDER.equals(username))
         {
-            LinkBrowser.browse(PvPLeaderboardConstants.PUBLIC_SITE_BASE_URL);
+            LinkBrowser.browse(PvpConsts.SITE_URL);
             return;
         }
         if (!isValidUsername(username)) return;
-        try
-        {
-            String normalizedUsername = normalizeUsername(username);
-            String encodedUsername = URLEncoder.encode(normalizedUsername, "UTF-8");
-            String url = PvPLeaderboardConstants.PUBLIC_SITE_BASE_URL + "/profile.html?player=" + encodedUsername;
-            LinkBrowser.browse(url);
-        }
-        catch (Exception ignore) {}
+        // A valid name encodes to URL-safe text, so the https link always opens.
+        LinkBrowser.browse(PvpConsts.SITE_URL + "/profile.html?player="
+            + URLEncoder.encode(normalizeUsername(username), StandardCharsets.UTF_8));
     }
 
-    private void searchUserOnPlugin()
+    private void searchHere()
     {
         String username = searchField.getText();
-        if (username == null || username.trim().isEmpty() || PLACEHOLDER.equals(username))
-        {
-            return;
-        }
         if (!isValidUsername(username))
         {
             return;
         }
-        
+
         // Rate limit: 10 searches per minute
-        if (!checkPluginSearchRateLimit())
+        if (!checkLimit())
         {
             // Show rate limit feedback briefly
-            if (pluginSearchBtn != null)
-            {
-                pluginSearchBtn.setText("Wait...");
-                Timer timer = new Timer(1000, e -> pluginSearchBtn.setText("Search"));
-                timer.setRepeats(false);
-                timer.start();
-            }
+            searchBtn.setText("Wait...");
+            Timer timer = new Timer(1000, e -> searchBtn.setText("Search"));
+            timer.setRepeats(false);
+            timer.start();
             return;
-
         }
-        
-        if (onPluginSearch != null)
-        {
-            String normalizedUsername = normalizeUsername(username);
-            onPluginSearch.accept(normalizedUsername);
 
-            searchField.setText(PLACEHOLDER);
-            searchField.setForeground(Color.GRAY);
-            searchField.transferFocus();
-        }
+        onSearch.accept(normalizeUsername(username));
+
+        searchField.setText(PLACEHOLDER);
+        searchField.setForeground(Color.GRAY);
+        searchField.transferFocus();
     }
-    
-    private boolean checkPluginSearchRateLimit()
+
+    private boolean checkLimit()
     {
         long now = System.currentTimeMillis();
         long oneMinuteAgo = now - 60_000;
-        
+
         // Remove timestamps older than 1 minute
-        while (!pluginSearchTimestamps.isEmpty() && pluginSearchTimestamps.peekFirst() < oneMinuteAgo)
+        while (!searchTimes.isEmpty() && searchTimes.peekFirst() < oneMinuteAgo)
         {
-            pluginSearchTimestamps.pollFirst();
+            searchTimes.pollFirst();
         }
-        
+
         // Check if we've exceeded the limit
-        if (pluginSearchTimestamps.size() >= MAX_PLUGIN_SEARCHES_PER_MINUTE)
+        if (searchTimes.size() >= MAX_SEARCHES)
         {
             return false; // Rate limited
         }
-        
+
         // Record this search
-        pluginSearchTimestamps.addLast(now);
+        searchTimes.addLast(now);
         return true;
     }
 
     private void handleLogin()
     {
-        if (loginInProgress)
+        if (loggingIn)
         {
             // The button doubles as "Cancel login" while a handshake is in
             // flight (the OAuth redirect now lands on a hosted page, so login
             // takes a browser round-trip + polling).
-            try { discordAuthService.cancelLogin(); } catch (Exception ignore) {}
+            discordLogin.cancelLogin();
             setLoginBusy(false);
             return;
         }
         if (isLoggedIn)
         {
-            // Logout
             setLoggedIn(false);
-            clearTokens();
-            if (onLoginStateChanged != null) onLoginStateChanged.run();
+            discordLogin.logout();
+            onLoginState.run();
             return;
         }
-        
-        // Use Discord OAuth flow
-        try
-        {
-            setLoginBusy(true);
-            discordAuthService.login().thenAccept(success -> {
-                if (success && discordAuthService.isLoggedIn())
-                {
-                    SwingUtilities.invokeLater(() -> {
-                        setLoginBusy(false);
-                        setLoggedIn(true);
-                        if (onLoginStateChanged != null) onLoginStateChanged.run();
-                    });
-                }
-                else
-                {
-                    SwingUtilities.invokeLater(() -> {
-                        setLoginBusy(false);
-                    });
-                }
-            }).exceptionally(ex -> {
-                SwingUtilities.invokeLater(() -> {
-                    setLoginBusy(false);
-                });
-                return null;
-            });
-        }
-        catch (Exception e)
-        {
+
+        // Use Discord OAuth flow. The login state is read on the Swing
+        // thread; no logout can happen meanwhile, the button reads Cancel.
+        setLoginBusy(true);
+        discordLogin.login().whenComplete((success, ex) -> SwingUtilities.invokeLater(() -> {
             setLoginBusy(false);
-        }
+            if (Boolean.TRUE.equals(success) && discordLogin.isLoggedIn())
+            {
+                setLoggedIn(true);
+                onLoginState.run();
+            }
+        }));
     }
 
+    /** The button stays enabled while busy so the user can cancel the handshake. */
     private void setLoginBusy(boolean busy)
     {
-        loginInProgress = busy;
-        try
-        {
-            if (loginButton != null)
-            {
-                // Stay enabled while busy so the user can cancel the handshake.
-                loginButton.setEnabled(true);
-                loginButton.setText(busy ? "Cancel login" : (isLoggedIn ? "Logout" : "Login with Discord"));
-            }
-            if (searchField != null) searchField.setEnabled(!busy);
-        }
-        catch (Exception ignore) {}
+        loggingIn = busy;
+        loginButton.setText(busy ? "Cancel login" : (isLoggedIn ? "Logout" : "Login with Discord"));
+        searchField.setEnabled(!busy);
     }
 
     public void setLoggedIn(boolean loggedIn)
     {
-        this.isLoggedIn = loggedIn;
-        if (loginButton != null)
-        {
-            loginButton.setText(loggedIn ? "Logout" : "Login with Discord");
-        }
-    }
-    
-    public void setPluginSearchText(String text)
-    {
-        if (searchField != null)
-        {
-            searchField.setText(text);
-        }
-    }
-    
-    public String getPluginSearchText()
-    {
-        if (searchField == null) return "";
-        String text = searchField.getText();
-        return PLACEHOLDER.equals(text) ? "" : text;
+        isLoggedIn = loggedIn;
+        loginButton.setText(loggedIn ? "Logout" : "Login with Discord");
     }
 
-    private void clearTokens() {
-        discordAuthService.logout();
-        isLoggedIn = false;
-        if (loginButton != null) loginButton.setText("Login with Discord");
+    public void setPluginSearchText(String text)
+    {
+        searchField.setText(text);
+    }
+
+    public String getPluginSearchText()
+    {
+        String text = searchField.getText();
+        return PLACEHOLDER.equals(text) ? "" : text;
     }
 }

@@ -1,52 +1,37 @@
 package com.pvp.leaderboard;
 
-import com.google.inject.Provides;
-import com.pvp.leaderboard.config.PvPLeaderboardConfig;
-import com.pvp.leaderboard.game.FightMonitor;
-import com.pvp.leaderboard.game.MenuHandler;
-import com.pvp.leaderboard.game.SessionInitTracker;
-import com.pvp.leaderboard.overlay.LobbyInviteNotificationOverlay;
-import com.pvp.leaderboard.overlay.MatchFoundNotificationOverlay;
-import com.pvp.leaderboard.overlay.PluginDisableWarningOverlay;
-import com.pvp.leaderboard.overlay.RankOverlay;
-import com.pvp.leaderboard.overlay.TournamentOpponentOverlay;
-import com.pvp.leaderboard.queue.NoOpQueueService;
-import com.pvp.leaderboard.queue.WebSocketQueueService;
-import com.pvp.leaderboard.service.ClientIdentityService;
-import com.pvp.leaderboard.service.DiscordAuthService;
-import com.pvp.leaderboard.service.MembershipService;
-import com.pvp.leaderboard.service.PvPDataService;
-import com.pvp.leaderboard.service.WhitelistService;
-import com.pvp.leaderboard.tournament.NoOpTournamentService;
-import com.pvp.leaderboard.tournament.TournamentBucketAutoSwitch;
-import com.pvp.leaderboard.tournament.TournamentSessionTracker;
-import com.pvp.leaderboard.tournament.WebSocketTournamentService;
-import com.pvp.leaderboard.ui.DashboardPanel;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.TimeUnit;
+import com.google.inject.*;
+import com.pvp.leaderboard.config.*;
+import com.pvp.leaderboard.game.*;
+import com.pvp.leaderboard.lobby.*;
+import com.pvp.leaderboard.overlay.*;
+import com.pvp.leaderboard.queue.*;
+import com.pvp.leaderboard.service.*;
+import com.pvp.leaderboard.service.socket.*;
+import com.pvp.leaderboard.tournament.*;
+import com.pvp.leaderboard.ui.*;
+import java.awt.*;
+import java.awt.datatransfer.*;
+import java.awt.image.*;
+import java.util.*;
+import java.util.concurrent.*;
+import javax.inject.*;
+import javax.swing.*;
+import lombok.extern.slf4j.*;
+import net.runelite.api.*;
+import net.runelite.api.events.*;
+import net.runelite.client.config.*;
+import net.runelite.client.eventbus.*;
+import net.runelite.client.events.*;
+import net.runelite.client.game.*;
+import net.runelite.client.input.*;
+import net.runelite.client.plugins.*;
+import net.runelite.client.ui.*;
+import net.runelite.client.ui.overlay.*;
+import net.runelite.client.util.*;
 import javax.inject.Inject;
-import javax.swing.SwingUtilities;
-import lombok.extern.slf4j.Slf4j;
-import net.runelite.api.Client;
-import net.runelite.api.GameState;
-import net.runelite.api.events.ActorDeath;
-import net.runelite.api.events.GameStateChanged;
-import net.runelite.api.events.GameTick;
-import net.runelite.api.events.HitsplatApplied;
-import net.runelite.api.events.MenuOptionClicked;
-import net.runelite.client.config.ConfigManager;
-import net.runelite.client.eventbus.EventBus;
-import net.runelite.client.eventbus.Subscribe;
-import net.runelite.client.events.ClientShutdown;
-import net.runelite.client.events.ConfigChanged;
-import net.runelite.client.input.MouseManager;
-import net.runelite.client.plugins.Plugin;
-import net.runelite.client.plugins.PluginDescriptor;
-import net.runelite.client.ui.ClientToolbar;
-import net.runelite.client.ui.NavigationButton;
-import net.runelite.client.ui.overlay.OverlayManager;
-import java.awt.image.BufferedImage;
-import net.runelite.client.util.ImageUtil;
+import javax.swing.Timer;
+import java.util.List;
 
 @Slf4j
 @PluginDescriptor(
@@ -72,19 +57,16 @@ public class PvPLeaderboardPlugin extends Plugin
 	private RankOverlay rankOverlay;
 
 	@Inject
-	private LobbyInviteNotificationOverlay lobbyInviteNotificationOverlay;
+	private MatchFoundNotificationOverlay matchPopup;
 
 	@Inject
-	private MatchFoundNotificationOverlay matchFoundNotificationOverlay;
+	private PluginDisableWarningOverlay warnOverlay;
 
 	@Inject
-	private PluginDisableWarningOverlay pluginDisableWarningOverlay;
+	private WinStreakOverlay winStreakOverlay;
 
 	@Inject
-	private com.pvp.leaderboard.overlay.WinStreakOverlay winStreakOverlay;
-
-	@Inject
-	private com.pvp.leaderboard.service.WinStreakTracker winStreakTracker;
+	private WinStreakTracker winStreakTracker;
 
 	@Inject
 	private ConfigManager configManager;
@@ -96,13 +78,13 @@ public class PvPLeaderboardPlugin extends Plugin
 	private EventBus eventBus;
 
 	@Inject
-	private PvPDataService pvpDataService;
+	private PvpApi pvpApi;
 
 	@Inject
-	private DiscordAuthService discordAuthService;
+	private DiscordLogin discordLogin;
 
 	@Inject
-	private ClientIdentityService clientIdentityService;
+	private IdentitySvc identitySvc;
 
 	@Inject
 	private MenuHandler menuHandler;
@@ -114,79 +96,75 @@ public class PvPLeaderboardPlugin extends Plugin
 	private WhitelistService whitelistService;
 
 	@Inject
-	private MembershipService membershipService;
+	private MemberFeed memberFeed;
 
 	@Inject
-	private com.pvp.leaderboard.service.socket.WebSocketManager webSocketManager;
+	private SocketMgr socketMgr;
 
 	@Inject
-	private com.pvp.leaderboard.lobby.WebSocketLobbyService webSocketLobbyService;
+	private WebSocketLobbyService lobbySvc;
 
 	@Inject
-	private com.pvp.leaderboard.lobby.UserProfileLobbyJoinGate lobbyJoinGate;
+	private ProfileGate profileGate;
 
 	@Inject
-	private com.pvp.leaderboard.lobby.LobbyPreferences lobbyPreferences;
+	private LobbyPrefs lobbyPrefs;
 
 	// Plan 10 step 7: the matchmaking queue + Swiss tournaments (2026-09-21).
 	@Inject
-	private WebSocketQueueService webSocketQueueService;
+	private WebSocketQueueService queueSvc;
 
 	@Inject
-	private WebSocketTournamentService webSocketTournamentService;
+	private TourneySvc tourneySvc;
 
 	@Inject
-	private TournamentSessionTracker tournamentSessionTracker;
+	private OppTracker oppTracker;
 
 	@Inject
-	private TournamentOpponentOverlay tournamentOpponentOverlay;
+	private TournamentOpponentOverlay oppOverlay;
 
 	/** Plan 10 F.2: flips to the Tournament bucket when a round opens
 	 *  (config-gated); the switch back is the next ordinary fight. */
-	private final TournamentBucketAutoSwitch tournamentBucketAutoSwitch =
-		new TournamentBucketAutoSwitch(() -> config.autoSwitchTournamentBucket(), this::pinTournamentBucket);
+	private final BucketSwitch bucketSwitch =
+		new BucketSwitch(() -> config.autoSwitchTournamentBucket(), this::pinBucket);
 
 	@Inject
-	private net.runelite.client.game.ItemManager itemManager;
+	private ItemManager itemManager;
 
 	@Inject
-	private com.pvp.leaderboard.game.ArenaKitStore arenaKitStore;
+	private KitStore kitStore;
 
 	@Inject
-	private com.pvp.leaderboard.game.DuelKitReader duelKitReader;
+	private KitReader kitReader;
 
 	@Inject
-	private com.pvp.leaderboard.game.GearWatcher gearWatcher;
+	private GearWatcher gearWatcher;
 
 	@Inject
-	private com.pvp.leaderboard.game.RunePouchRunes runePouchRunes;
+	private ArenaLocator arenaLocator;
 
 	@Inject
-	private com.pvp.leaderboard.game.ArenaLocator arenaLocator;
+	private GearSearch gearSearch;
 
 	@Inject
-	private com.pvp.leaderboard.game.GearSearchHelper gearSearchHelper;
+	private ArenaGearOverlay gearOverlay;
 
-	@Inject
-	private com.pvp.leaderboard.overlay.ArenaGearOverlay arenaGearOverlay;
+	private GearTracker gearTracker;
+	private GearReporter gearReporter;
+	private Timer gearTicker;
 
-	private com.pvp.leaderboard.tournament.GearEventTracker gearEventTracker;
-	private com.pvp.leaderboard.tournament.GearStatusReporter gearStatusReporter;
-	private com.pvp.leaderboard.ui.TournamentGearCard tournamentGearCard;
-	private javax.swing.Timer gearTicker;
-
-	private DashboardPanel dashboardPanel;
+	private Dashboard dashPanel;
 	private NavigationButton navButton;
-	private int pendingSelfRankLookupTicks = -1;
-	private boolean pendingHeartbeatStart = false;
+	private int selfRankWait = -1;
+	private boolean heartbeatDue = false;
 
 	/** Gates the once-per-session half of the delayed init below. The
 	 *  same countdown is armed by LOGGED_IN and by HOPPING/LOADING,
 	 *  and LOADING fires on every map region load — see
-	 *  {@link SessionInitTracker} for why re-running the profile
+	 *  {@link InitTracker} for why re-running the profile
 	 *  fetch and heartbeat restart on those is both pointless and
 	 *  expensive. */
-	private final SessionInitTracker sessionInitTracker = new SessionInitTracker();
+	private final InitTracker initTracker = new InitTracker();
 
 	/** Set true when RuneLite fires {@link ClientShutdown} (the whole
 	 *  client is closing). Distinguishes a graceful client exit — which
@@ -194,21 +172,21 @@ public class PvPLeaderboardPlugin extends Plugin
 	 *  freeze-log — from the plugin being toggled off mid-fight, which is
 	 *  a {@code plugin_disabled} ban offense. Volatile: ClientShutdown
 	 *  fires on the client thread, shutDown() reads it during teardown. */
-	private volatile boolean clientShutdownSeen = false;
+	private volatile boolean shutdownSeen = false;
 
 	public String getClientUniqueId()
 	{
-		return clientIdentityService.getClientUniqueId();
+		return identitySvc.getClientUniqueId();
 	}
 
 	/** True the moment {@link GameState#LOGGED_IN} fires, i.e. eagerly —
 	 *  before the 10-tick name-resolve delay that gates {@code
-	 *  lobbyJoinGate.onLogin()}. Lobby UI uses this to distinguish
+	 *  profileGate.onLogin()}. Lobby UI uses this to distinguish
 	 *  "truly logged out (Please log into the game)" from "logged in
 	 *  but the player name + match counts haven't resolved yet
 	 *  (Loading\u2026)" so the brief startup window doesn't flash a
 	 *  misleading "log in" prompt to a user who already did. */
-	public boolean isGameLoggedIn()
+	public boolean isInGame()
 	{
 		if (client == null) return false;
 		try
@@ -221,8 +199,8 @@ public class PvPLeaderboardPlugin extends Plugin
 		}
 	}
 
-	// Accessor for DashboardPanel to get local player name for debug logs
-	public String getLocalPlayerName()
+	// Accessor for Dashboard to get local player name for debug logs
+	public String getLocalName()
 	{
 		if (client == null)
 		{
@@ -240,15 +218,8 @@ public class PvPLeaderboardPlugin extends Plugin
 		}
 		catch (Exception e)
 		{
-			log.debug("Failed to get local player name", e);
 			return null;
 		}
-	}
-
-	// Helper for overlays to get displayed rank from overlay cache
-	public String getDisplayedRankFor(String playerName)
-	{
-		return rankOverlay != null ? rankOverlay.getCachedRankFor(playerName) : null;
 	}
 
 	@Override
@@ -257,111 +228,73 @@ public class PvPLeaderboardPlugin extends Plugin
 		// Identity must be loaded BEFORE the socket service starts so
 		// the reconnect-replay handler has a UUID to send with
 		// lobby/join. The socket itself only opens on LOGGED_IN below
-		// — but webSocketLobbyService.start() subscribes to push
+		// — but lobbySvc.start() subscribes to push
 		// events and the connect-listener now so they're ready when
 		// the first frame arrives.
-		clientIdentityService.loadOrGenerateId();
-		webSocketLobbyService.start();
+		identitySvc.ensureId();
+		lobbySvc.start();
 		// Plan 10 step 7: the queue + tournament transports subscribe to
 		// their pushes (and the reconnect re-sync) the same way. The session
 		// tracker feeds the bucket pin + the opponent outline; the auto-switch
 		// listener flips the bucket when a round opens.
-		webSocketQueueService.start();
-		webSocketTournamentService.start();
-		webSocketTournamentService.addListener(tournamentSessionTracker);
-		webSocketTournamentService.addListener(tournamentBucketAutoSwitch);
+		queueSvc.start();
+		tourneySvc.start();
+		tourneySvc.addListener(oppTracker);
+		tourneySvc.addListener(bucketSwitch);
 		// Wire the anti-smurf gate's identity suppliers BEFORE the
 		// dashboard ctor so the first listener fire (still empty counts)
 		// triggers the panel's "Loading your match count…" state. The
 		// suppliers resolve at refresh time, not now, so it's fine that
 		// the local player isn't loaded yet.
-		lobbyJoinGate.configure(this::getLocalPlayerName, this::getClientUniqueId);
-		webSocketLobbyService.setJoinAllowed(() -> false);
-		dashboardPanel = new DashboardPanel(this, pvpDataService, discordAuthService,
-			webSocketLobbyService, lobbyJoinGate, lobbyPreferences);
+		profileGate.configure(this::getLocalName);
+		dashPanel = new Dashboard(this, pvpApi, discordLogin,
+			lobbySvc, profileGate, lobbyPrefs);
 		// Plan 10 step 7: queue section + Tournaments sub-tab, per the two
 		// config flags; the in-combat probe drives tournament/in_combat.
 		applyPlan10Services();
-		dashboardPanel.setTournamentInCombatProvider(fightMonitor::isInCombat);
+		dashPanel.setTournamentInCombatProvider(fightMonitor::isInCombat);
 
 		navButton = NavigationButton.builder()
 			.tooltip("PvP Leaderboard")
 			.icon(PANEL_ICON)
 			.priority(5)
-			.panel(dashboardPanel)
+			.panel(dashPanel)
 			.build();
 		clientToolbar.addNavigation(navButton);
 
-		// Register overlay. Snapshot the injected field to a local so
-		// Eclipse's null analysis can carry the null-check across both
-		// calls (field reads otherwise lose narrowing between statements).
-		final RankOverlay overlay = rankOverlay;
-		if (overlay != null)
-		{
-			overlayManager.add(overlay);
-			eventBus.register(overlay);
-		}
-
-		// Lobby invite popup overlay — drawn into the game viewport
-		// when another player invites the user to a fight. Config-gated
-		// inside the overlay itself; safe to register unconditionally.
-		final LobbyInviteNotificationOverlay invitePopup = lobbyInviteNotificationOverlay;
-		if (invitePopup != null)
-		{
-			overlayManager.add(invitePopup);
-			// Wire the in-combat probe so the suppress-in-combat
-			// config toggle has a signal source. FightMonitor::isInCombat
-			// reads !activeFights.isEmpty() filtered by the
-			// COMBAT_WINDOW_MS recency window — see FightMonitor for
-			// the contract. Safe to call before fightMonitor.init() —
-			// isInCombat short-circuits to false on an empty map.
-			invitePopup.setInCombatProvider(fightMonitor::isInCombat);
-			// Hand the overlay reference to the panel as a lambda so
-			// the panel doesn't carry an Overlay-typed field (keeps
-			// unit tests free of RuneLite-client dependencies).
-			dashboardPanel.setLobbyInviteNotifier(invitePopup::showInvite);
-		}
+		// Register overlay. Guice injects every @Inject field (none is
+		// @Nullable) or the plugin does not load, so none is null here.
+		overlayManager.add(rankOverlay);
 
 		// Match-found popup overlay — drawn the moment a matchmaking
 		// fight locks in (lobby/fight_proposed) so the user notices
-		// even when they're not watching the sidepanel. Same lifecycle
-		// and config-gated-internally contract as the invite popup.
-		final MatchFoundNotificationOverlay matchFoundPopup = matchFoundNotificationOverlay;
-		if (matchFoundPopup != null)
-		{
-			overlayManager.add(matchFoundPopup);
-			matchFoundPopup.setInCombatProvider(fightMonitor::isInCombat);
-			dashboardPanel.setMatchFoundNotifier(matchFoundPopup::showMatch);
-		}
+		// even when they're not watching the sidepanel. Config-gated
+		// internally.
+		overlayManager.add(matchPopup);
+		dashPanel.setMatchFoundNotifier(matchPopup::showMatch);
 
-		// LMS plugin-disable ban warning popup. Registered as a mouse
-		// listener so its OK button is clickable; the dismiss callback
+		// LMS plugin-disable ban warning popup. Its mouse adapter is
+		// registered so its OK button is clickable; the dismiss callback
 		// clears the persisted pending-warning marker so it shows exactly
-		// once per offense. Not config-gated — a ban warning must always
+		// once per offense (the overlay logs and swallows anything the
+		// callback throws). Not config-gated — a ban warning must always
 		// surface.
-		final PluginDisableWarningOverlay disableWarning = pluginDisableWarningOverlay;
-		if (disableWarning != null)
-		{
-			overlayManager.add(disableWarning);
-			disableWarning.setOnDismiss(this::clearPendingDisableWarning);
-			mouseManager.registerMouseListener(disableWarning);
-		}
+		overlayManager.add(warnOverlay);
+		warnOverlay.setOnDismiss(() -> configManager.unsetConfiguration(
+			FightMonitor.CONFIG_GROUP, FightMonitor.LMS_WARN_KEY));
+		mouseManager.registerMouseListener(warnOverlay.mouse);
 
 		// The outline around the current tournament opponent: the tracker
-		// names every name the opponent is logged in with while
-		// tournament/opponent_highlight is in force and null otherwise.
-		final TournamentOpponentOverlay opponentOutline = tournamentOpponentOverlay;
-		if (opponentOutline != null)
-		{
-			opponentOutline.setOpponentNamesSupplier(tournamentSessionTracker::getHighlightedOpponentNames);
-			overlayManager.add(opponentOutline);
-		}
+		// answers the canonical keys of every name the opponent is logged in
+		// with while tournament/opponent_highlight is in force and null otherwise.
+		oppOverlay.setOpponentKeysSupplier(oppTracker::getHighlightedOpponentKeys);
+		overlayManager.add(oppOverlay);
 		fightMonitor.setCombatSink(this::onOwnHit);
 		// Plan 10 F.2 (AS-72): while the player is in a RUNNING tournament the
 		// fight auto-switch lands on the Tournament bucket instead of the
 		// fight's style; once they leave the bracket the next fight switches
 		// back like every bucket.
-		fightMonitor.setTournamentBucketPin(() -> config.autoSwitchTournamentBucket() && tournamentSessionTracker.isActiveParticipant());
+		fightMonitor.setTournamentBucketPin(() -> config.autoSwitchTournamentBucket() && oppTracker.isPlaying());
 
 		// One-shot startup diagnostic — pins the in-combat suppression
 		// config toggle state + whether each overlay's provider got
@@ -373,29 +306,22 @@ public class PvPLeaderboardPlugin extends Plugin
 		// DEBUG lines emitted by the overlay {@code showInvite} /
 		// {@code showMatch} entry points and the rate-limited
 		// {@code FightMonitor.isInCombat} decision log.
-		log.debug("[Plugin] popup suppression wired - suppressInCombat={} invitePopupRegistered={}"
-				+ " inviteProviderWired={} matchPopupRegistered={} matchProviderWired={}",
-			config.suppressNotificationsInCombat(),
-			invitePopup != null,
-			invitePopup != null,
-			matchFoundPopup != null,
-			matchFoundPopup != null);
 
 		// BOARD row 33: the movable kill-streak box. Config-gated inside the
-		final com.pvp.leaderboard.overlay.WinStreakOverlay streakBox = winStreakOverlay;
-		if (streakBox != null)
+		// overlay. Each fight feeds the streak tracker, then the side panel's
+		// streak line; the panel exists from here on and is never nulled.
+		overlayManager.add(winStreakOverlay);
+		dashPanel.setWinStreakTracker(winStreakTracker);
+		fightMonitor.setStreakSink((bucketKey, result) ->
 		{
-			streakBox.setAutoSwitchTargetSupplier(fightMonitor::getAutoSwitchTarget);
-			streakBox.setInsideFfaPortalSupplier(fightMonitor::isInsideFfaPortal);
-			overlayManager.add(streakBox);
-		}
-		dashboardPanel.setWinStreakTracker(winStreakTracker);
-		fightMonitor.setStreakSink(this::onFightStreak);
+			winStreakTracker.onFight(bucketKey, result);
+			dashPanel.refreshLine(bucketKey);
+		});
 		// The side panel's own rating rows follow the post-fight profile refresh.
-		fightMonitor.setProfileRefreshSink(this::onOwnProfileRefreshed);
+		fightMonitor.setProfileRefreshSink(dashPanel::refreshOwn);
 
 		// Init menu handler with RankOverlay
-		menuHandler.init(dashboardPanel, navButton);
+		menuHandler.init(dashPanel, navButton);
 
 		// Init fight monitor with RankOverlay for MMR notifications
 		fightMonitor.init(rankOverlay);
@@ -408,35 +334,32 @@ public class PvPLeaderboardPlugin extends Plugin
 				&& config.showRankToOthers()
 				&& !whitelistService.isHeartbeatActive())
 			{
-				log.debug("[Plugin] Already logged in on startUp, resuming heartbeat for: {}", self);
 				whitelistService.onLogin(self);
 			}
 			// Resume the rank-overlay membership feed (names-only snapshot +
 			// delta). Self-gates on enableWhitelistRanks(); independent of
 			// showRankToOthers (that only governs whether OTHERS see us).
-			membershipService.onLogin();
+			memberFeed.onLogin();
 			// Resume the socket too — the player is past $connect's
 			// prerequisites (UUID stamped, MMR snapshot taken) so the
 			// server already has its trusted dict for SMURF_GUARD.
 			// Pass the active in-game name so the server's conn row
 			// pins to the current session instead of falling back to
 			// the alphabetical default from the MMR row's player_names.
-			String uuid = getClientUniqueId();
-			if (uuid != null) webSocketManager.connect(uuid, self);
+			connectSocket(self);
 			// Player is logged in already (plugin toggled off/on while
 			// in-game) — kick the gate so the dashboard shows real
 			// counts from the get-go instead of "Not yet refreshed".
-			lobbyJoinGate.onLogin();
+			profileGate.onLogin();
 			// If the plugin was just re-enabled after a mid-fight disable
 			// offense, the pending-warning marker is set — surface it now.
-			maybeShowPendingDisableWarning();
+			maybeWarn();
 			// Same for a pending freeze-log MMR delta: replay it as the
 			// normal -XX.XX MMR overlay now the session is back.
-			fightMonitor.showPendingFreezeLogMmrNotification();
+			fightMonitor.showLmsMmr();
 		}
 
-		startGearCheck();
-		log.debug("PvP Leaderboard started!");
+		startCheck();
 	}
 
 	@Override
@@ -449,83 +372,52 @@ public class PvPLeaderboardPlugin extends Plugin
 		// plugin off mid-fight → plugin_disabled (2x loss + ban
 		// escalation + warning marker). Submit synchronously with a
 		// bounded wait so plugin teardown doesn't kill the HTTP call.
+		CompletableFuture<Boolean> freezeLog = null;
 		try
 		{
-			String reason = clientShutdownSeen ? "logout" : "plugin_disabled";
-			CompletableFuture<Boolean> freezeLog = fightMonitor.handleLogoutFreezeLog(reason);
-			if (freezeLog != null)
-			{
-				try
-				{
-					freezeLog.get(3, TimeUnit.SECONDS);
-				}
-				catch (Exception waitEx)
-				{
-					log.debug("[LMSFreeze] shutdown submit wait ended: {}", waitEx.getMessage());
-				}
-			}
+			freezeLog = fightMonitor.handleFreeze(shutdownSeen ? "logout" : "plugin_disabled");
+			if (freezeLog != null) freezeLog.get(3, TimeUnit.SECONDS);
 		}
 		catch (Exception e)
 		{
-			log.debug("[LMSFreeze] shutdown freeze-log detection failed: {}", e.getMessage());
 		}
 
-		stopGearCheck();
+		stopCheck();
 		menuHandler.shutdown();
-		if (rankOverlay != null)
-		{
-			eventBus.unregister(rankOverlay);
-			overlayManager.remove(rankOverlay);
-		}
-		if (lobbyInviteNotificationOverlay != null)
-		{
-			overlayManager.remove(lobbyInviteNotificationOverlay);
-			lobbyInviteNotificationOverlay.clear();
-		}
-		if (matchFoundNotificationOverlay != null)
-		{
-			overlayManager.remove(matchFoundNotificationOverlay);
-			matchFoundNotificationOverlay.clear();
-		}
-		if (pluginDisableWarningOverlay != null)
-		{
-			mouseManager.unregisterMouseListener(pluginDisableWarningOverlay);
-			overlayManager.remove(pluginDisableWarningOverlay);
-			pluginDisableWarningOverlay.clear();
-		}
+		overlayManager.remove(rankOverlay);
+		overlayManager.remove(matchPopup);
+		matchPopup.clear();
+		mouseManager.unregisterMouseListener(warnOverlay.mouse);
+		overlayManager.remove(warnOverlay);
+		warnOverlay.clear();
 		// Plan 10 step 7: drop the opponent outline, forget the tournament
 		// session (bucket pin + highlight) and stop the sub-tab's ticker.
-		if (tournamentOpponentOverlay != null)
-		{
-			overlayManager.remove(tournamentOpponentOverlay);
-		}
+		overlayManager.remove(oppOverlay);
 		fightMonitor.setCombatSink(null);
-		tournamentSessionTracker.clear();
-		if (dashboardPanel != null) dashboardPanel.shutdown();
+		oppTracker.clear();
+		// Null only when a start-up threw before the panel existed (RuneLite
+		// then stops the plugin too).
+		if (dashPanel != null) dashPanel.shutdown();
 		clientToolbar.removeNavigation(navButton);
 		whitelistService.onLogout();
-		membershipService.onLogout();
+		memberFeed.onLogout();
 		// Tear down the lobby service's periodic rank-retry task so it
 		// doesn't keep firing on RuneLite's shared scheduler after the
 		// plugin is gone. Best-effort: never let teardown abort the
 		// rest of the shutdown sequence.
-		try { webSocketLobbyService.stop(); } catch (Exception ignored) { /* hard shutdown */ }
-		if (winStreakOverlay != null)
-		{
-			overlayManager.remove(winStreakOverlay);
-			winStreakOverlay.clear();
-		}
+		try { lobbySvc.stop(); } catch (Exception ignored) { /* hard shutdown */ }
+		overlayManager.remove(winStreakOverlay);
+		winStreakOverlay.clear();
 		fightMonitor.setStreakSink(null);
 		fightMonitor.setProfileRefreshSink(null);
 		winStreakTracker.clear();
 		// Hard-close the socket and forbid future reconnects — the
-		// plugin is going away. WebSocketManager.shutdown() is
+		// plugin is going away. SocketMgr.shutdown() is
 		// idempotent + safe to call without ever having connected.
-		webSocketManager.shutdown();
+		socketMgr.shutdown();
 		// Cancel the gate's hourly auto-refresh + clear cached counts
 		// so a re-toggle of the plugin starts fresh.
-		lobbyJoinGate.onLogout();
-		log.debug("PvP Leaderboard stopped!");
+		profileGate.onLogout();
 	}
 
 	/** RuneLite fires this when the whole client is closing. We latch it
@@ -536,93 +428,61 @@ public class PvPLeaderboardPlugin extends Plugin
 	@Subscribe
 	public void onClientShutdown(ClientShutdown event)
 	{
-		clientShutdownSeen = true;
+		shutdownSeen = true;
 	}
 
 	/** Show the LMS plugin-disable ban warning if the persisted marker is
 	 *  set. The marker is cleared only when the popup is dismissed (OK
 	 *  click or the 10 s window elapses), so it shows exactly once per
 	 *  offense even across client restarts. */
-	private void maybeShowPendingDisableWarning()
+	private void maybeWarn()
 	{
 		try
 		{
 			String pending = configManager.getConfiguration(
-				com.pvp.leaderboard.game.FightMonitor.CONFIG_GROUP,
-				com.pvp.leaderboard.game.FightMonitor.LMS_PENDING_WARNING_KEY);
-			if ("true".equals(pending) && pluginDisableWarningOverlay != null)
+				FightMonitor.CONFIG_GROUP,
+				FightMonitor.LMS_WARN_KEY);
+			if ("true".equals(pending))
 			{
-				log.debug("[LMSWarn] pending disable warning marker set - showing popup");
-				pluginDisableWarningOverlay.showWarning();
+				warnOverlay.showWarning();
 			}
 		}
 		catch (Exception e)
 		{
-			log.debug("[LMSWarn] maybeShowPendingDisableWarning failed: {}", e.getMessage());
-		}
-	}
-
-	/** Dismiss callback wired into the warning overlay — clears the
-	 *  persisted marker so the warning does not re-show. */
-	private void clearPendingDisableWarning()
-	{
-		try
-		{
-			configManager.unsetConfiguration(
-				com.pvp.leaderboard.game.FightMonitor.CONFIG_GROUP,
-				com.pvp.leaderboard.game.FightMonitor.LMS_PENDING_WARNING_KEY);
-		}
-		catch (Exception e)
-		{
-			log.debug("[LMSWarn] clearPendingDisableWarning failed: {}", e.getMessage());
 		}
 	}
 
 	/** Plan 10 step 7: hands the queue + tournament transports to the
-	 *  dashboard according to the two config flags — the inert services
-	 *  when a flag is off (the gate hides the queue block, the Tournaments
-	 *  sub-tab greys). EDT-only: the dashboard mutates Swing. */
+	 *  dashboard according to the two config flags — the inert queue service
+	 *  and no tournament service ({@code null}) when a flag is off (the gate
+	 *  hides the queue block, the Tournaments sub-tab greys). EDT-only: the
+	 *  dashboard mutates Swing. */
 	private void applyPlan10Services()
 	{
-		if (dashboardPanel == null) return;
-		dashboardPanel.setQueueService(config.enableQuickMatch() ? webSocketQueueService : new NoOpQueueService());
-		dashboardPanel.setTournamentService(config.enableTournaments() ? webSocketTournamentService : new NoOpTournamentService());
-	}
-
-	private void onFightStreak(String bucketKey, String result)
-	{
-		winStreakTracker.onFight(bucketKey, result);
-		DashboardPanel panel = dashboardPanel;
-		if (panel != null) panel.refreshStreakLine(bucketKey);
-	}
-
-	private void onOwnProfileRefreshed(String playerName)
-	{
-		DashboardPanel panel = dashboardPanel;
-		if (panel != null) panel.refreshOwnRatingRows(playerName);
+		dashPanel.setQueue(config.enableQuickMatch() ? queueSvc : new NoOpQueue());
+		dashPanel.setTournamentService(config.enableTournaments() ? tourneySvc : null);
 	}
 
 	/** Plan 10 F.2: the auto-switch's action — pins the side panel + overlay
 	 *  to the Tournament bucket when a round opens with an opponent. The
 	 *  switch back happens at the next ordinary fight through
-	 *  {@link FightMonitor}, like every bucket (AS-72). */
-	private void pinTournamentBucket()
+	 *  {@link FightMonitor}, like every bucket (AS-72). Already on Tournament,
+	 *  RuneLite's setConfiguration stores nothing and fires no ConfigChanged. */
+	private void pinBucket()
 	{
 		try
 		{
-			if (config.rankBucket() == PvPLeaderboardConfig.RankBucket.TOURNAMENT) return;
 			configManager.setConfiguration("PvPLeaderboard", "rankBucket", PvPLeaderboardConfig.RankBucket.TOURNAMENT.name());
 		}
 		catch (Exception e)
 		{
-			log.debug("[Tournament] bucket auto-switch failed: {}", e.getMessage());
 		}
 	}
 
 	private void onOwnHit(String playerName, int world)
 	{
-		if (!tournamentSessionTracker.isAwaitingCombat()) return;
-		SwingUtilities.invokeLater(() -> tournamentSessionTracker.onCombatWith(playerName, world));
+		if (!oppTracker.isAwaiting()) return;
+		SwingUtilities.invokeLater(() -> oppTracker.onCombatWith(playerName, world));
 	}
 
 	@Subscribe
@@ -630,54 +490,36 @@ public class PvPLeaderboardPlugin extends Plugin
 	{
 		try
 		{
-			if (event == null) return;
-			if (!"PvPLeaderboard".equals(event.getGroup())) return;
-
-			if ("enablePvpLookupMenu".equals(event.getKey()))
+			if (event == null || !"PvPLeaderboard".equals(event.getGroup()) || event.getKey() == null) return;
+			switch (event.getKey())
 			{
-				menuHandler.refreshMenuOption();
-				return;
-			}
-
-			// Ensure self rank refreshes when bucket changes
-			if ("rankBucket".equals(event.getKey()))
-			{
-				if (rankOverlay != null)
-				{
-					rankOverlay.scheduleSelfRankRefresh(0L);
-				}
-			}
-
-			// "Show your rank to others" toggled: the opt-out flag is
-			// captured server-side at $connect (like is_mod), so reconnect
-			// the socket to re-send the show_rank flag promptly instead of
-			// waiting for the next natural reconnect.
-			if ("showRankToOthers".equals(event.getKey()))
-			{
-				webSocketManager.reconnectForConfigChange();
-			}
-
-			// Plan 10 step 7: the queue / tournaments flags re-wire the
-			// dashboard (inert services when off). Marshalled to the EDT —
-			// config events arrive off it and the setters touch Swing.
-			if ("enableQuickMatch".equals(event.getKey()) || "enableTournaments".equals(event.getKey()))
-			{
-				SwingUtilities.invokeLater(this::applyPlan10Services);
-			}
-
-			// "Display other players ranks" toggled: start/stop the
-			// membership feed sync (it self-gates, but stop releases the
-			// 10-min poll immediately when disabled).
-			if ("enableWhitelistRanks".equals(event.getKey()))
-			{
-				if (config.enableWhitelistRanks())
-				{
-					membershipService.onLogin();
-				}
-				else
-				{
-					membershipService.onLogout();
-				}
+				case "enablePvpLookupMenu":
+					menuHandler.refreshMenu();
+					break;
+				// Ensure self rank refreshes when bucket changes
+				case "rankBucket":
+					rankOverlay.scheduleSelf();
+					break;
+				// "Show your rank to others" toggled: the opt-out flag is
+				// captured server-side at $connect (like is_mod), so reconnect
+				// the socket to re-send the show_rank flag promptly instead of
+				// waiting for the next natural reconnect.
+				case "showRankToOthers":
+					socketMgr.reconnectNow();
+					break;
+				// Plan 10 step 7: the queue / tournaments flags re-wire the
+				// dashboard (inert services when off). Marshalled to the EDT —
+				// config events arrive off it and the setters touch Swing.
+				case "enableQuickMatch":
+				case "enableTournaments":
+					SwingUtilities.invokeLater(this::applyPlan10Services);
+					break;
+				// "Display other players ranks" toggled: start/stop the
+				// membership feed sync (it self-gates, but stop releases the
+				// 10-min poll immediately when disabled).
+				case "enableWhitelistRanks":
+					if (config.enableWhitelistRanks()) memberFeed.onLogin();
+					else memberFeed.onLogout();
 			}
 		}
 		catch (Exception e)
@@ -689,124 +531,107 @@ public class PvPLeaderboardPlugin extends Plugin
 	@Subscribe
 	public void onMenuOptionClicked(MenuOptionClicked event)
 	{
-		menuHandler.handleMenuOptionClicked(event);
+		menuHandler.onMenuClick(event);
 	}
 
 	@Subscribe
-	public void onGameStateChanged(GameStateChanged gameStateChanged)
+	public void onGameStateChanged(GameStateChanged stateChange)
 	{
 		try
 		{
-			if (gameStateChanged.getGameState() == GameState.LOGGED_IN)
+			switch (stateChange.getGameState())
 			{
-				// Use tick-based scheduling: wait 10 ticks (approx 6.0s) for player to fully load
-				// This handles the delay between LOGGED_IN state and player actually being ready
-				pendingSelfRankLookupTicks = 10;
-				pendingHeartbeatStart = true;
-				log.debug("[Plugin] LOGGED_IN - scheduling delayed init in 10 ticks");
-				// Eagerly refresh the lobby gate notice so the user
-				// sees "Loading…" immediately instead of the
-				// pre-login "Please log into the game" copy during
-				// the 10-tick name-resolve window. The gate listener
-				// itself only fires after lobbyJoinGate.onLogin()
-				// (called once the name resolves), so without this
-				// poke the "Loading…" phase would be invisible.
-				if (dashboardPanel != null) dashboardPanel.refreshLobbyLoginView();
-				// Open the socket immediately — UUID is available on
-				// startUp() via clientIdentityService and the server
-				// resolves the trusted MMR snapshot at $connect time
-				// (no need to wait for the player to be fully loaded
-				// in-game like the heartbeat path does).
-				//
-				// Only fire connect() here if the local-player name
-				// is ALREADY resolved. LOGGED_IN can fire a few ticks
-				// before client.getLocalPlayer() populates, in which
-				// case getLocalPlayerName() returns null. If we
-				// connect with null now, WebSocketManager opens the
-				// socket without a {@code &name=} query parameter and
-				// the server's $connect handler falls back to
-				// sorted(player_names)[0] (typically the wrong alt) —
-				// then the 10-tick Init-complete branch below fires a
-				// SECOND connect() with the real name, which the
-				// (uuid, name) no-op guard rejects and triggers a
-				// name_change close + reopen. That's the
-				// double-reconnect tax surfaced in the 21:01:51-57 QA
-				// log. Deferring to Init-complete when the name isn't
-				// ready collapses the two-reconnect cycle into one.
-				//
-				// startUp() already fires connect() if the player was
-				// logged in before the plugin toggled on, so the
-				// "plugin reload mid-session" path still gets the
-				// socket up without waiting for a LOGGED_IN event.
-				String uuid = getClientUniqueId();
-				String selfName = getLocalPlayerName();
-				if (uuid != null && selfName != null && !selfName.trim().isEmpty())
-				{
-					webSocketManager.connect(uuid, selfName);
-				}
-
-				// Surface a pending LMS plugin-disable ban warning now
-				// that the viewport is available again (offense happened
-				// on a prior session that was disabled mid-fight).
-				maybeShowPendingDisableWarning();
-				// Replay the doubled freeze-log MMR loss as the normal
-				// -XX.XX MMR overlay: a freeze-log submitted at last
-				// logout couldn't poll for its delta, so we deferred the
-				// notification to this login.
-				fightMonitor.showPendingFreezeLogMmrNotification();
-			}
-			else if (gameStateChanged.getGameState() == GameState.LOGIN_SCREEN)
-			{
-				// LMS freeze-log detection MUST run before resetFightState
-				// wipes the active fights: a logout / connection-lost
-				// mid-fight inside an LMS arena is submitted as a doubled
-				// loss (reason=logout, no ban).
-				fightMonitor.handleLogoutFreezeLog("logout");
-				// Fully clear fight state on logout
-				fightMonitor.resetFightState();
-				arenaKitStore.clearSession();
-				// Symmetric refresh: GameState dropped to LOGIN_SCREEN,
-				// flip the lobby gate notice back to the pre-login
-				// copy without waiting for lobbyJoinGate.onLogout()
-				// to broadcast (it does fire, but this poke makes
-				// the transition feel snappy).
-				if (dashboardPanel != null) dashboardPanel.refreshLobbyLoginView();
-				// Stop heartbeats
-				whitelistService.onLogout();
-				membershipService.onLogout();
-				pendingHeartbeatStart = false;
-				// Close the socket (CLOSE_GOING_AWAY: intentional
-				// logout, no reconnect).
-				webSocketManager.disconnect();
-				// Stop the hourly auto-refresh + clear cached counts so
-				// the next login (potentially a different character)
-				// doesn't see stale stats.
-				lobbyJoinGate.onLogout();
-				// End the init session — this is the boundary a world
-				// hop deliberately doesn't cross, so logging back in
-				// re-runs the full init while hopping doesn't.
-				sessionInitTracker.onLogout();
-				// Plan 10: forget the tournament session (bucket pin +
-				// opponent outline); tournament/status re-syncs it on the
-				tournamentSessionTracker.clear();
-			}
-			else if (gameStateChanged.getGameState() == GameState.HOPPING || gameStateChanged.getGameState() == GameState.LOADING)
-			{
-				try
-				{
-					if (rankOverlay != null)
-					{
-						rankOverlay.resetLookupStateOnWorldHop();
-					}
+				case LOGGED_IN:
+					// Use tick-based scheduling: wait 10 ticks (approx 6.0s) for player to fully load
+					// This handles the delay between LOGGED_IN state and player actually being ready
+					selfRankWait = 10;
+					heartbeatDue = true;
+					// Eagerly refresh the lobby gate notice so the user
+					// sees "Loading…" immediately instead of the
+					// pre-login "Please log into the game" copy during
+					// the 10-tick name-resolve window. The gate listener
+					// itself only fires after profileGate.onLogin()
+					// (called once the name resolves), so without this
+					// poke the "Loading…" phase would be invisible.
+					dashPanel.syncLogins();
+					// Open the socket immediately — UUID is available on
+					// startUp() via identitySvc and the server
+					// resolves the trusted MMR snapshot at $connect time
+					// (no need to wait for the player to be fully loaded
+					// in-game like the heartbeat path does).
+					//
+					// Only connect here if the local-player name is ALREADY
+					// resolved. LOGGED_IN can fire a few ticks before
+					// client.getLocalPlayer() populates; connecting with
+					// null opens the socket without a {@code &name=}
+					// parameter, the server falls back to
+					// sorted(player_names)[0] (typically the wrong alt), and
+					// the 10-tick Init-complete branch below then has to
+					// close and reopen with the real name (the
+					// double-reconnect tax surfaced in the 21:01:51-57 QA
+					// log). Deferring to Init-complete when the name isn't
+					// ready collapses the two-reconnect cycle into one.
+					//
+					// startUp() already connects if the player was logged in
+					// before the plugin toggled on, so the "plugin reload
+					// mid-session" path still gets the socket up without
+					// waiting for a LOGGED_IN event.
+					String selfName = getLocalName();
+					if (selfName != null && !selfName.trim().isEmpty()) connectSocket(selfName);
+					// Surface a pending LMS plugin-disable ban warning now
+					// that the viewport is available again (offense happened
+					// on a prior session that was disabled mid-fight).
+					maybeWarn();
+					// Replay the doubled freeze-log MMR loss as the normal
+					// -XX.XX MMR overlay: a freeze-log submitted at last
+					// logout couldn't poll for its delta, so we deferred the
+					// notification to this login.
+					fightMonitor.showLmsMmr();
+					break;
+				case LOGIN_SCREEN:
+					// LMS freeze-log detection MUST run before resetFight
+					// wipes the active fights: a logout / connection-lost
+					// mid-fight inside an LMS arena is submitted as a doubled
+					// loss (reason=logout, no ban).
+					fightMonitor.handleFreeze("logout");
+					// Fully clear fight state on logout
+					fightMonitor.resetFight();
+					kitStore.clearSession();
+					// Symmetric refresh: GameState dropped to LOGIN_SCREEN,
+					// flip the lobby gate notice back to the pre-login
+					// copy without waiting for profileGate.onLogout()
+					// to broadcast (it does fire, but this poke makes
+					// the transition feel snappy).
+					dashPanel.syncLogins();
+					// Stop heartbeats
+					whitelistService.onLogout();
+					memberFeed.onLogout();
+					heartbeatDue = false;
+					// Close the socket (CLOSE_GOING_AWAY: intentional
+					// logout, no reconnect).
+					socketMgr.disconnect();
+					// Stop the hourly auto-refresh + clear cached counts so
+					// the next login (potentially a different character)
+					// doesn't see stale stats.
+					profileGate.onLogout();
+					// End the init session — this is the boundary a world
+					// hop deliberately doesn't cross, so logging back in
+					// re-runs the full init while hopping doesn't.
+					initTracker.onLogout();
+					// Plan 10: forget the tournament session (bucket pin +
+					// opponent outline); tournament/status re-syncs it on the
+					// next login.
+					oppTracker.clear();
+					break;
+				case HOPPING:
+				case LOADING:
+					rankOverlay.onWorldHop();
 					// Schedule self rank overlay refresh only - don't refresh panel
-					pendingSelfRankLookupTicks = 8;
-				}
-				catch (Exception ignore) {}
+					selfRankWait = 8;
 			}
 		}
 		catch (Exception e)
 		{
-			log.debug("Uncaught exception in onGameStateChanged", e);
 		}
 	}
 
@@ -816,110 +641,85 @@ public class PvPLeaderboardPlugin extends Plugin
 		try
 		{
 			// Delegate logic to FightMonitor
-			fightMonitor.handleGameTick(tick);
+			fightMonitor.handleTick(tick);
 
 			// Handle pending init after login (tick-based delay for player to be ready)
-			if (pendingSelfRankLookupTicks > 0)
+			if (selfRankWait > 0 && --selfRankWait == 0)
 			{
-				pendingSelfRankLookupTicks--;
-				if (pendingSelfRankLookupTicks == 0)
+				selfRankWait = -1;
+				String self = getLocalName();
+				if (self != null && !self.trim().isEmpty())
 				{
-					pendingSelfRankLookupTicks = -1;
-					
-					if (client.getLocalPlayer() != null)
+					// Everything from here to the fullInit branch is
+					// safe to repeat: the socket connect no-ops on an
+					// unchanged (uuid, name) tuple, and the overlay's
+					// self-rank genuinely does need re-fetching after
+					// onWorldHop() cleared it.
+					boolean fullInit = initTracker.shouldInit(self);
+
+					// Re-issue connect(uuid, name) now that the
+					// local player name has resolved. SocketMgr
+					// no-ops if the (uuid, name) tuple matches the
+					// current connection; otherwise it tears down
+					// and reopens with the correct name in the
+					// query string. This is what pins the server's
+					// conn row to the active in-game character instead
+					// of the alphabetical fallback.
+					connectSocket(self);
+
+					// Schedule self rank refresh for overlay. Outside
+					// the fullInit guard on purpose — a world hop
+					// runs onWorldHop(), so the
+					// overlay has nothing to draw until this reruns.
+					rankOverlay.scheduleSelf();
+
+					// Everything below re-fetches data that can't
+					// change within a session, so it runs on a
+					// genuine login only — not on the region loads
+					// and world hops that arm the same countdown.
+					if (fullInit)
 					{
-						String self = client.getLocalPlayer().getName();
-						
-						if (self != null && !self.trim().isEmpty())
+						// Load dashboard data
+						dashPanel.loadIfIdle(self);
+
+						// Start heartbeat (fires now, then every 5 mins)
+						if (heartbeatDue)
 						{
-							// Everything from here to the fullInit branch is
-							// safe to repeat: the socket connect no-ops on an
-							// unchanged (uuid, name) tuple, and the overlay's
-							// self-rank genuinely does need re-fetching after
-							// resetLookupStateOnWorldHop() cleared it.
-							boolean fullInit = sessionInitTracker.shouldRunFullInit(self);
-							log.debug("[Plugin] Init complete for: {} (fullInit={})", self, fullInit);
-
-							// Re-issue connect(uuid, name) now that the
-							// local player name has resolved. WebSocketManager
-							// no-ops if the (uuid, name) tuple matches the
-							// current connection; otherwise it tears down
-							// and reopens with the correct name in the
-							// query string. This is what pins the server's
-							// conn row + lobby member row to the active
-							// in-game character instead of the alphabetical
-							// fallback.
-							String uuid = getClientUniqueId();
-							if (uuid != null) webSocketManager.connect(uuid, self);
-
-							// Force refresh DMM worlds on every login so they're cached before any fights occur
-							// This prevents a race condition where the first DMM fight would be
-							// incorrectly classified because the async fetch hadn't completed yet
-							pvpDataService.refreshDmmWorlds();
-							
-							// Schedule self rank refresh for overlay. Outside
-							// the fullInit guard on purpose — a world hop
-							// runs resetLookupStateOnWorldHop(), so the
-							// overlay has nothing to draw until this reruns.
-							if (rankOverlay != null)
-							{
-								rankOverlay.scheduleSelfRankRefresh(0L);
-							}
-
-							// Everything below re-fetches data that can't
-							// change within a session, so it runs on a
-							// genuine login only — not on the region loads
-							// and world hops that arm the same countdown.
-							if (fullInit)
-							{
-								// Load dashboard data
-								if (dashboardPanel != null)
-								{
-									dashboardPanel.loadMatchHistoryIfNotViewing(self);
-								}
-
-								// Start heartbeat (fires now, then every 5 mins)
-								if (pendingHeartbeatStart)
-								{
-									log.debug("[Plugin] Starting heartbeat for: {}", self);
-									whitelistService.onLogin(self);
-									pendingHeartbeatStart = false;
-								}
-
-								// Start the rank-overlay membership feed (idempotent;
-								// self-gates on enableWhitelistRanks()).
-								membershipService.onLogin();
-
-								// Kick the anti-smurf gate now that the local
-								// player name resolves. We delay this 10 ticks
-								// instead of firing on LOGGED_IN directly so
-								// the name supplier (client.getLocalPlayer().
-								// getName()) has actually populated — firing
-								// at LOGGED_IN would bail with the empty-name
-								// branch.
-								lobbyJoinGate.onLogin();
-							}
+							whitelistService.onLogin(self);
+							heartbeatDue = false;
 						}
+
+						// Start the rank-overlay membership feed (idempotent;
+						// self-gates on enableWhitelistRanks()).
+						memberFeed.onLogin();
+
+						// Kick the anti-smurf gate now that the local
+						// player name resolves. We delay this 10 ticks
+						// instead of firing on LOGGED_IN directly so
+						// the name supplier (client.getLocalPlayer().
+						// getName()) has actually populated — firing
+						// at LOGGED_IN would bail with the empty-name
+						// branch.
+						profileGate.onLogin();
 					}
 				}
 			}
 		}
 		catch (Exception e)
 		{
-			log.debug("Uncaught exception in onGameTick", e);
 		}
 	}
 
 	@Subscribe
 	public void onHitsplatApplied(HitsplatApplied hitsplatApplied)
 	{
-		fightMonitor.handleHitsplatApplied(hitsplatApplied);
+		fightMonitor.handleHit(hitsplatApplied);
 	}
 
 	@Subscribe
 	public void onActorDeath(ActorDeath actorDeath)
 	{
-		fightMonitor.handleActorDeath(actorDeath);
+		fightMonitor.handleDeath(actorDeath);
 	}
 
 	@Provides
@@ -928,143 +728,141 @@ public class PvPLeaderboardPlugin extends Plugin
 		return configManager.getConfig(PvPLeaderboardConfig.class);
 	}
 
-	public Client getClient()
+	private void startCheck()
 	{
-		return client;
-	}
-
-	private void startGearCheck()
-	{
-		final com.pvp.leaderboard.tournament.GearEventTracker tracker = new com.pvp.leaderboard.tournament.GearEventTracker(webSocketTournamentService::status);
-		final com.pvp.leaderboard.tournament.GearStatusReporter reporter = new com.pvp.leaderboard.tournament.GearStatusReporter(webSocketTournamentService, tracker,
-			new com.pvp.leaderboard.game.GearKitRouter(arenaKitStore, duelKitReader, gearWatcher, arenaLocator),
-			new com.pvp.leaderboard.tournament.GearMatcher(runePouchRunes::isRune), fightMonitor::isInCombat,
-			System::currentTimeMillis, () -> java.util.concurrent.ThreadLocalRandom.current().nextDouble());
-		gearEventTracker = tracker;
-		gearStatusReporter = reporter;
-		webSocketTournamentService.addListener(tracker);
-		webSocketTournamentService.addListener(reporter);
+		final var tracker = new GearTracker(tourneySvc::status);
+		final var reporter = new GearReporter(tourneySvc, tracker,
+			new KitRouter(kitStore, kitReader, gearWatcher, arenaLocator),
+			new GearMatcher(ItemVariationMapping::map, gearWatcher::isRune), fightMonitor::isInCombat,
+			System::currentTimeMillis, () -> ThreadLocalRandom.current().nextDouble());
+		gearTracker = tracker;
+		gearReporter = reporter;
+		tourneySvc.addListener(tracker);
+		tourneySvc.addListener(reporter);
 		gearWatcher.setActive(() ->
 		{
-			com.pvp.leaderboard.tournament.GearEventTracker.GearEvent e = tracker.current();
+			GearTracker.GearEvent e = tracker.current();
 			return e != null && !e.arena;
 		});
-		duelKitReader.setActive(() ->
+		kitReader.setActive(() ->
 		{
-			com.pvp.leaderboard.tournament.GearEventTracker.GearEvent e = tracker.current();
+			GearTracker.GearEvent e = tracker.current();
 			return e != null && e.arena;
 		});
-		gearSearchHelper.setMissingSupplier(this::gearMissingOutsideTheArena);
-		eventBus.register(duelKitReader);
-		eventBus.register(gearWatcher);
-		eventBus.register(runePouchRunes);
-		eventBus.register(arenaLocator);
-		eventBus.register(gearSearchHelper);
-		eventBus.register(arenaGearOverlay);
-		arenaGearOverlay.setViewSupplier(reporter::view);
-		overlayManager.add(arenaGearOverlay);
-		tournamentGearCard = new com.pvp.leaderboard.ui.TournamentGearCard(this::applyItemIcon, new com.pvp.leaderboard.ui.TournamentGearCard.Actions()
+		gearSearch.setMissing(this::missingGear);
+		gearParts().forEach(eventBus::register);
+		gearOverlay.setView(reporter::view);
+		overlayManager.add(gearOverlay);
+		var card = new GearCard(this::applyIcon, new GearCard.Actions()
 		{
 			@Override
-			public void findItem(int itemId, java.util.List<Integer> altIds, String name)
+			public void findItem(int itemId, List<Integer> altIds, String name)
 			{
-				gearSearchHelper.onItemClicked(itemId, altIds, name);
+				gearSearch.onItemClicked(itemId, altIds, name);
 			}
 
 			@Override
-			public void copySetup(com.pvp.leaderboard.tournament.GearKit kit)
+			public void copySetup(GearKit kit)
 			{
-				copyToClipboard(com.pvp.leaderboard.tournament.GearCapture.toCatalogJson(kit));
+				copyText(GearCapture.toCatalog(kit));
 			}
 
 			@Override
-			public void showMissingInBank(java.util.List<Integer> itemIds)
+			public void showMissing(List<Integer> itemIds)
 			{
-				gearSearchHelper.showMissingInBank(itemIds);
+				gearSearch.showMissing(itemIds);
 			}
 
 			@Override
 			public void openPanel()
 			{
-				openTournamentsPanel();
+				openTourneys();
 			}
 		}, () -> config.gearAutoOpenPanel());
-		reporter.addViewListener(tournamentGearCard::render);
-		dashboardPanel.setTournamentGearCard(tournamentGearCard);
-		gearTicker = new javax.swing.Timer(1000, e -> reporter.tick());
-		gearTicker.setRepeats(true);
+		reporter.addViewListener(card::render);
+		dashPanel.setTournamentGearCard(card);
+		// A Swing Timer repeats by default.
+		gearTicker = new Timer(1000, e -> reporter.tick());
 		gearTicker.start();
 	}
 
-	private void stopGearCheck()
+	/** The kit check's event subscribers, registered and unregistered in this order. */
+	private List<Object> gearParts()
+	{
+		return List.of(kitReader, gearWatcher, arenaLocator, gearSearch, gearOverlay);
+	}
+
+	private void stopCheck()
 	{
 		if (gearTicker != null) gearTicker.stop();
 		gearTicker = null;
-		if (gearStatusReporter != null) webSocketTournamentService.removeListener(gearStatusReporter);
-		if (gearEventTracker != null) webSocketTournamentService.removeListener(gearEventTracker);
-		eventBus.unregister(duelKitReader);
-		eventBus.unregister(gearWatcher);
-		eventBus.unregister(runePouchRunes);
-		eventBus.unregister(arenaLocator);
-		eventBus.unregister(gearSearchHelper);
-		eventBus.unregister(arenaGearOverlay);
-		overlayManager.remove(arenaGearOverlay);
-		arenaGearOverlay.setViewSupplier(null);
-		duelKitReader.setActive(null);
+		// Both null after a start-up that threw first: removing null is a no-op.
+		tourneySvc.removeListener(gearReporter);
+		tourneySvc.removeListener(gearTracker);
+		gearParts().forEach(eventBus::unregister);
+		overlayManager.remove(gearOverlay);
+		gearOverlay.setView(null);
+		kitReader.setActive(null);
 		gearWatcher.setActive(null);
-		gearSearchHelper.setMissingSupplier(null);
-		if (dashboardPanel != null) dashboardPanel.setTournamentGearCard(null);
-		arenaKitStore.clearSession();
-		gearStatusReporter = null;
-		gearEventTracker = null;
-		tournamentGearCard = null;
+		gearSearch.setMissing(null);
+		// Null only when a start-up threw before the panel existed.
+		if (dashPanel != null) dashPanel.setTournamentGearCard(null);
+		kitStore.clearSession();
+		gearReporter = null;
+		gearTracker = null;
 	}
 
-	private java.util.Collection<Integer> gearMissingOutsideTheArena()
+	private Collection<Integer> missingGear()
 	{
-		com.pvp.leaderboard.tournament.GearStatusReporter reporter = gearStatusReporter;
-		if (reporter == null) return java.util.Collections.emptyList();
-		com.pvp.leaderboard.tournament.GearStatusReporter.View v = reporter.view();
-		return v.event != null && !v.event.arena ? v.missingIds() : java.util.Collections.<Integer>emptyList();
+		GearReporter reporter = gearReporter;
+		if (reporter == null) return Collections.emptyList();
+		GearReporter.View v = reporter.view();
+		return v.event != null && !v.event.arena ? v.missingIds() : Collections.<Integer>emptyList();
 	}
 
-	private void applyItemIcon(javax.swing.JLabel label, int itemId, int qty, boolean stackable)
+	private void applyIcon(JLabel label, int itemId, int qty, boolean stackable)
 	{
 		try
 		{
-			net.runelite.client.util.AsyncBufferedImage image = itemManager.getImage(itemId, qty, stackable);
+			AsyncBufferedImage image = itemManager.getImage(itemId, qty, stackable);
 			if (image != null) image.addTo(label);
 		}
 		catch (RuntimeException e)
 		{
-			log.debug("[Gear] item icon {} failed: {}", itemId, e.getMessage());
 		}
 	}
 
-	private void copyToClipboard(String text)
+	private void copyText(String text)
 	{
 		if (text == null) return;
 		try
 		{
-			java.awt.Toolkit.getDefaultToolkit().getSystemClipboard().setContents(new java.awt.datatransfer.StringSelection(text), null);
+			Toolkit.getDefaultToolkit().getSystemClipboard().setContents(new StringSelection(text), null);
 		}
 		catch (RuntimeException e)
 		{
-			log.debug("[Gear] clipboard copy failed: {}", e.getMessage());
 		}
 	}
 
-	private void openTournamentsPanel()
+	/** Opens (or keeps) the socket as {@code name}, once the client UUID is known. */
+	private void connectSocket(String name)
 	{
-		if (navButton == null || dashboardPanel == null || !config.enableTournaments()) return;
+		String uuid = getClientUniqueId();
+		if (uuid != null) socketMgr.connect(uuid, name);
+	}
+
+	/** The gear card's action; the card exists only after start-up set the
+	 *  button and the panel, which are never nulled. */
+	private void openTourneys()
+	{
+		if (!config.enableTournaments()) return;
 		try
 		{
 			clientToolbar.openPanel(navButton);
 		}
 		catch (RuntimeException | AssertionError e)
 		{
-			log.debug("[Gear] openPanel failed: {}", e.getMessage());
 		}
-		dashboardPanel.showTournamentsTab();
+		dashPanel.showTourneys();
 	}
 }

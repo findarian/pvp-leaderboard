@@ -1,10 +1,9 @@
 package com.pvp.leaderboard.util;
 
-import java.util.Locale;
+import java.util.*;
 
 public final class NameUtils
 {
-	private NameUtils() {}
 
 	public static String normalizeDisplayName(String name)
 	{

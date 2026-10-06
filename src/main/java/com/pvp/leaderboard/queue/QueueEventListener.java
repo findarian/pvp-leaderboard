@@ -1,13 +1,14 @@
 package com.pvp.leaderboard.queue;
 
-import com.google.gson.JsonObject;
+import com.google.gson.*;
 
 /**
  * Server-push callbacks for the matchmaking queue (Plan 10 Part B / F.1),
  * registered with a {@link QueueService}. Every callback is delivered on
  * the Swing EDT (the {@code WebSocketQueueService} marshals), so panels
  * may mutate Swing components directly. All methods are {@code default}
- * no-ops.
+ * no-ops. A queue match ({@code queue/matched}) is the lobby service's:
+ * its {@code lobby/fight_proposed} drives the Confirm Fight view.
  */
 public interface QueueEventListener
 {
@@ -15,11 +16,6 @@ public interface QueueEventListener
      *  tick while searching. {@code state == idle} with a {@code reason}
      *  means the worker tore a proposed fight down (expired / declined). */
     default void onQueueState(QueueState state) {}
-
-    /** {@code queue/matched} — a pair was found. The lobby's
-     *  {@code lobby/fight_proposed} arrives alongside and drives the
-     *  existing Confirm Fight view; this is the "Match found!" moment. */
-    default void onQueueMatched(QueueMatch match) {}
 
     /** {@code queue/timeout} — the wait preference elapsed; the user is
      *  out of the queue. */

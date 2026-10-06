@@ -1,13 +1,11 @@
 package com.pvp.leaderboard.ui;
 
-import javax.swing.*;
-import javax.swing.event.ChangeEvent;
-import javax.swing.event.ChangeListener;
+import lombok.*;
 import java.awt.*;
-import java.awt.event.MouseAdapter;
-import java.awt.event.MouseEvent;
-import java.awt.event.MouseMotionAdapter;
-import java.util.ArrayList;
+import java.awt.event.*;
+import java.util.*;
+import javax.swing.*;
+import javax.swing.event.*;
 import java.util.List;
 
 /**
@@ -40,17 +38,17 @@ public class RangeSlider extends JComponent
      *  thumbs can sit half-off the track at the extremes. */
     private static final int THUMB_SIZE = 14;
     /** Reserve room above + below the track so the thumbs aren't clipped. */
-    private static final int PREFERRED_HEIGHT = 24;
+    private static final int PREF_HEIGHT = 24;
 
-    private static final Color TRACK_COLOR = new Color(0x40, 0x40, 0x40);
-    private static final Color RANGE_COLOR = new Color(0xff, 0x6b, 0x00);
-    private static final Color THUMB_COLOR = new Color(0xee, 0xee, 0xee);
-    private static final Color THUMB_BORDER = new Color(0x22, 0x22, 0x22);
+    private static final Color TRACK_COLOR = Ui.DIVIDER;
+    private static final Color RANGE_COLOR = new Color(0xff6b00);
+    private static final Color THUMB_COLOR = new Color(0xeeeeee);
+    private static final Color THUMB_BORDER = new Color(0x222222);
 
     private final int min;
     private final int max;
-    private int low;
-    private int high;
+    @Getter private int low;
+    @Getter private int high;
     /** {@code 0} = low handle, {@code 1} = high handle, {@code -1} = no drag. */
     private int draggingHandle = -1;
     private boolean adjusting;
@@ -63,16 +61,12 @@ public class RangeSlider extends JComponent
         this.max = max;
         this.low = clamp(low, min, max);
         this.high = clamp(high, this.low, max);
-        setOpaque(false);
-        setPreferredSize(new Dimension(120, PREFERRED_HEIGHT));
-        setMinimumSize(new Dimension(60, PREFERRED_HEIGHT));
-        setMaximumSize(new Dimension(Integer.MAX_VALUE, PREFERRED_HEIGHT));
+        setPreferredSize(new Dimension(120, PREF_HEIGHT));
+        setMinimumSize(new Dimension(60, PREF_HEIGHT));
+        setMaximumSize(new Dimension(Integer.MAX_VALUE, PREF_HEIGHT));
         setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
-        installMouseHandlers();
+        installMouse();
     }
-
-    public int getLow()  { return low; }
-    public int getHigh() { return high; }
     public boolean getValueIsAdjusting() { return adjusting; }
 
     public void setLow(int v)
@@ -95,18 +89,18 @@ public class RangeSlider extends JComponent
 
     public void addChangeListener(ChangeListener l)
     {
-        if (l != null) listeners.add(l);
+        listeners.add(l);
     }
 
     private void fireChange()
     {
-        ChangeEvent ev = new ChangeEvent(this);
+        var ev = new ChangeEvent(this);
         for (ChangeListener l : listeners) l.stateChanged(ev);
     }
 
     // -------------------- Mouse handling --------------------
 
-    private void installMouseHandlers()
+    private void installMouse()
     {
         addMouseListener(new MouseAdapter()
         {
@@ -147,38 +141,31 @@ public class RangeSlider extends JComponent
         return Math.abs(xPx - xLow) <= Math.abs(xPx - xHigh) ? 0 : 1;
     }
 
+    /** Moves the dragged handle (0 = low, 1 = high; the only values while a
+     *  drag runs) to the value under {@code xPx}, which is always within
+     *  {@code [min, max]}, so the setters' clamp is the drag's own bound. */
     private void dragTo(int xPx)
     {
         int v = xToValue(xPx);
-        if (draggingHandle == 0)
-        {
-            int nv = Math.min(v, high);
-            if (nv != low) { low = nv; fireChange(); repaint(); }
-        }
-        else if (draggingHandle == 1)
-        {
-            int nv = Math.max(v, low);
-            if (nv != high) { high = nv; fireChange(); repaint(); }
-        }
+        if (draggingHandle == 0) setLow(v);
+        else setHigh(v);
     }
 
     // -------------------- Geometry --------------------
 
-    /** Effective track region. Reserves THUMB_SIZE/2 on each side so a thumb
-     *  centered on the extreme value sits flush with the panel edge. */
-    private int trackLeft() { return THUMB_SIZE / 2; }
-    private int trackRight() { return getWidth() - THUMB_SIZE / 2; }
-    private int trackWidth() { return Math.max(1, trackRight() - trackLeft()); }
+    /** Effective track width. The track reserves THUMB_SIZE/2 on each side so
+     *  a thumb centered on the extreme value sits flush with the panel edge. */
+    private int trackWidth() { return Math.max(1, getWidth() - THUMB_SIZE); }
 
     private int valueToX(int v)
     {
         double t = (double) (v - min) / (max - min);
-        return trackLeft() + (int) Math.round(t * trackWidth());
+        return THUMB_SIZE / 2 + (int) Math.round(t * trackWidth());
     }
 
     private int xToValue(int x)
     {
-        double t = (double) (x - trackLeft()) / trackWidth();
+        double t = (double) (x - THUMB_SIZE / 2) / trackWidth();
         t = Math.max(0.0, Math.min(1.0, t));
         return min + (int) Math.round(t * (max - min));
     }
@@ -193,17 +180,15 @@ public class RangeSlider extends JComponent
     @Override
     protected void paintComponent(Graphics g)
     {
-        Graphics2D g2 = (Graphics2D) g.create();
+        var g2 = (Graphics2D) g.create();
         try
         {
             g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
 
             int trackY = getHeight() / 2 - TRACK_HEIGHT / 2;
-            int xL = trackLeft();
-            int w = trackWidth();
 
             g2.setColor(TRACK_COLOR);
-            g2.fillRoundRect(xL, trackY, w, TRACK_HEIGHT, 4, 4);
+            g2.fillRoundRect(THUMB_SIZE / 2, trackY, trackWidth(), TRACK_HEIGHT, 4, 4);
 
             int xLow = valueToX(low);
             int xHigh = valueToX(high);

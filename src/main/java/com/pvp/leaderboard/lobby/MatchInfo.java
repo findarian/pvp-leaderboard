@@ -18,7 +18,7 @@ package com.pvp.leaderboard.lobby;
  */
 public final class MatchInfo
 {
-    public final String fightSessionId;
+    public final String fightId;
     public final LobbyMember opponent;
     public final Style style;
     public final BuildType build;
@@ -26,10 +26,10 @@ public final class MatchInfo
     public final String world;
     public final String meetingPlace;
 
-    public MatchInfo(String fightSessionId, LobbyMember opponent, Style style, BuildType build,
+    public MatchInfo(String fightId, LobbyMember opponent, Style style, BuildType build,
                      String location, String world, String meetingPlace)
     {
-        this.fightSessionId = fightSessionId;
+        this.fightId = fightId;
         this.opponent = opponent;
         this.style = style;
         this.build = build;

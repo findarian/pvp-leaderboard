@@ -1,12 +1,7 @@
 package com.pvp.leaderboard.service.socket;
 
-import com.google.gson.Gson;
-import com.google.gson.JsonObject;
-import com.google.gson.JsonParseException;
-
-import java.util.Collections;
-import java.util.HashSet;
-import java.util.Set;
+import com.google.gson.*;
+import java.util.*;
 
 /**
  * Pure helper for socket-lobby wire encoding/decoding + the
@@ -30,63 +25,35 @@ import java.util.Set;
  *
  * <p>Keepalive is RFC 6455 native ping/pong (handled by
  * {@code OkHttpClient.Builder.pingInterval(8 min)} in
- * {@link WebSocketManager}) — there is no {@code system/ping} cmd in
+ * {@link SocketMgr}) — there is no {@code system/ping} cmd in
  * this release per the protocol doc's locked decision §0.1.
  */
 public final class SocketProtocol
 {
     /**
-     * The 10 lobby cmds the plugin is allowed to send. Anything outside
-     * this set throws from {@link #encode(Gson, String, JsonObject)}.
+     * The cmds the plugin is allowed to send (the lobby's confirm, block and
+     * unblock). Anything outside this set throws from
+     * {@link #encode(Gson, String, JsonObject)}.
      *
      * <p>Plan 10 (2026-09-21) appended the five {@code queue/*} cmds and
      * the nine {@code tournament/*} cmds (WEBSOCKET_PROTOCOL.md 6.2b / 6.3);
-     * {@code WebSocketQueueService} / {@code WebSocketTournamentService}
+     * {@code WebSocketQueueService} / {@code TourneySvc}
      * are the only senders.
      *
      * <p>Server-only outbound cmds ({@code lobby/roster},
      * {@code lobby/invite_received}, etc.) are NEVER in this set —
      * they're inbound-only on the client. Listening for them is via
-     * {@link SocketEventBus#register(String, java.util.function.Consumer)}.
+     * {@link SocketBus#register(String, java.util.function.Consumer)}.
      */
-    public static final Set<String> ALLOWED_OUTGOING;
-    static
-    {
-        Set<String> s = new HashSet<>();
-        s.add("lobby/join");
-        s.add("lobby/leave");
-        s.add("lobby/invite");
-        s.add("lobby/cancel_invite");
-        s.add("lobby/accept");
-        s.add("lobby/decline");
-        s.add("lobby/confirm");
-        s.add("lobby/block");
-        s.add("lobby/unblock");
-        // Rank-slider live-delta cmd (WebSocketLobbyService.sendRangeUpdateNow).
-        // Added 2026-06-27: it was being dropped here (and in the backend
-        // ALLOWED_COMMANDS env), so live range changes never reached peers
-        // until a rejoin. Mirrors backend/core/socket_protocol.py default.
-        s.add("lobby/update_range");
+    public static final Set<String> ALLOWED_OUTGOING = Set.of(
+        "lobby/confirm", "lobby/block", "lobby/unblock",
         // Plan 10 (2026-09-21): the matchmaking queue (Part B, WebSocketQueueService)
-        // and the Swiss tournaments (Part C, WebSocketTournamentService). Mirrors the
+        // and the Swiss tournaments (Part C, TourneySvc). Mirrors the
         // backend additive ALLOWED_COMMANDS_EXTRA / ALLOWED_COMMANDS_TOURNAMENT env lines.
-        s.add("queue/join");
-        s.add("queue/leave");
-        s.add("queue/expand_range");
-        s.add("queue/set_prefs");
-        s.add("queue/status");
-        s.add("tournament/list");
-        s.add("tournament/register");
-        s.add("tournament/withdraw");
-        s.add("tournament/status");
-        s.add("tournament/subscribe");
-        s.add("tournament/unsubscribe");
-        s.add("tournament/in_combat");
-        s.add("tournament/round_end_reply");
-        s.add("tournament/report_problem");
-        s.add("tournament/gear_status");
-        ALLOWED_OUTGOING = Collections.unmodifiableSet(s);
-    }
+        "queue/join", "queue/leave", "queue/expand_range", "queue/set_prefs", "queue/status",
+        "tournament/list", "tournament/register", "tournament/withdraw", "tournament/status",
+        "tournament/subscribe", "tournament/unsubscribe", "tournament/in_combat",
+        "tournament/round_end_reply", "tournament/report_problem", "tournament/gear_status");
 
     /**
      * Encodes a cmd + payload pair into the wire envelope string.
@@ -102,7 +69,7 @@ public final class SocketProtocol
      */
     public static String encode(Gson gson, String cmd, JsonObject data)
     {
-        if (!ALLOWED_OUTGOING.contains(cmd))
+        if (cmd == null || !ALLOWED_OUTGOING.contains(cmd))
         {
             throw new IllegalArgumentException(
                 "cmd not in ALLOWED_OUTGOING: " + cmd);
@@ -113,48 +80,27 @@ public final class SocketProtocol
     /**
      * Decodes a server-pushed wire frame into a {@link SocketCommand}.
      * Returns {@code null} for any malformed input (empty string,
-     * non-JSON, JSON that isn't an object, missing/empty {@code cmd},
-     * missing/non-object {@code data}). Callers treat {@code null} as
-     * "drop this frame silently".
+     * non-JSON, JSON that isn't an object, missing/empty/non-string
+     * {@code cmd}); a missing or non-object {@code data} reads as
+     * {@code {}}. Callers treat {@code null} as "drop this frame silently".
      */
     public static SocketCommand decode(Gson gson, String wire)
     {
-        if (wire == null || wire.isEmpty()) return null;
         try
         {
+            // Gson reads null, empty and blank input as null. isJsonPrimitive()
+            // is true for numbers + booleans too; the wire spec says cmd is a
+            // string. Per protocol §2 data must always be an object; anything
+            // else is a server bug and SocketCommand renders it as empty.
             JsonObject root = gson.fromJson(wire, JsonObject.class);
-            if (root == null) return null;
-            if (!root.has("cmd") || !root.get("cmd").isJsonPrimitive()) return null;
-            // isJsonPrimitive() is true for numbers + booleans too; the
-            // wire spec says cmd is a string. Reject anything else.
-            if (!root.get("cmd").getAsJsonPrimitive().isString()) return null;
-            String cmd = root.get("cmd").getAsString();
-            if (cmd == null || cmd.isEmpty()) return null;
-            JsonObject data;
-            if (!root.has("data") || root.get("data").isJsonNull())
-            {
-                data = new JsonObject();
-            }
-            else if (root.get("data").isJsonObject())
-            {
-                data = root.getAsJsonObject("data");
-            }
-            else
-            {
-                // Per protocol §2 data must always be an object.
-                // Anything else is a server bug; render as empty.
-                data = new JsonObject();
-            }
-            return new SocketCommand(cmd, data);
+            JsonElement c = root == null ? null : root.get("cmd");
+            if (c == null || !c.isJsonPrimitive() || !c.getAsJsonPrimitive().isString() || c.getAsString().isEmpty()) return null;
+            JsonElement d = root.get("data");
+            return new SocketCommand(c.getAsString(), d != null && d.isJsonObject() ? d.getAsJsonObject() : null);
         }
         catch (JsonParseException | IllegalStateException | ClassCastException e)
         {
             return null;
         }
-    }
-
-    private SocketProtocol()
-    {
-        // utility class — no instantiation
     }
 }

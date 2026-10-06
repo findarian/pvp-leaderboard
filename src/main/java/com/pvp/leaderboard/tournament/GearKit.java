@@ -1,135 +1,89 @@
 package com.pvp.leaderboard.tournament;
 
-import com.google.gson.JsonArray;
-import com.google.gson.JsonElement;
-import com.google.gson.JsonObject;
-import com.google.gson.JsonParser;
-import com.pvp.leaderboard.util.JsonLenient;
-
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.Collections;
-import java.util.HashSet;
-import java.util.List;
-import java.util.Objects;
-import java.util.Set;
+import com.google.gson.*;
+import com.pvp.leaderboard.util.*;
+import java.util.*;
+import java.util.function.*;
+import static com.pvp.leaderboard.util.JsonLenient.*;
 
 public final class GearKit
 {
-    public static final String SOURCE_DUEL_KIT = "duel_kit";
+    public static final String SOURCE_DUEL = "duel_kit";
     public static final String SOURCE_SUPPLIES = "supplies";
     public static final String SOURCE_CONTAINERS = "containers";
     public static final String SOURCE_SAVED = "saved_kit";
-    public static final Set<Integer> RUNE_POUCH_IDS = Collections.unmodifiableSet(new HashSet<>(Arrays.asList(12791, 24416, 27281, 27509)));
-
-    public static final class Item
-    {
-        public final int id;
-        public final int qty;
-        public final String name;
-        public final String slot;
-        public final boolean stackable;
-        public final boolean noted;
-
-        public Item(int id, int qty, String name, String slot, boolean stackable, boolean noted)
-        {
-            this.id = id;
-            this.qty = qty;
-            this.name = name;
-            this.slot = slot;
-            this.stackable = stackable;
-            this.noted = noted;
-        }
-
-        @Override
-        public boolean equals(Object o)
-        {
-            if (this == o) return true;
-            if (!(o instanceof Item)) return false;
-            Item i = (Item) o;
-            return id == i.id && qty == i.qty && stackable == i.stackable && noted == i.noted
-                && Objects.equals(name, i.name) && Objects.equals(slot, i.slot);
-        }
-
-        @Override
-        public int hashCode()
-        {
-            return Objects.hash(id, qty, name, slot, stackable, noted);
-        }
-
-        @Override
-        public String toString()
-        {
-            return qty + "x" + id + (slot == null ? "" : "@" + slot) + (noted ? "(noted)" : "");
-        }
-    }
+    public static final Set<Integer> POUCH_IDS = Set.of(12791, 24416, 27281, 27509);
 
     public final String source;
     public final String build;
     public final String spellbook;
-    public final List<Item> worn;
-    public final List<Item> carried;
-    public final List<Item> pouch;
+    public final List<GearItem> worn;
+    public final List<GearItem> carried;
+    public final List<GearItem> pouch;
     public final boolean pouchKnown;
     public final long readAtMs;
     public final long loadoutSig;
     public final long pouchSig;
     public final boolean stale;
 
-    private GearKit(Builder b)
+    /** A null {@code source} reads as {@link #SOURCE_CONTAINERS}; the lists are copied without their null entries. */
+    public GearKit(String source, String build, String spellbook, List<GearItem> worn, List<GearItem> carried, List<GearItem> pouch,
+                   boolean pouchKnown, long readAtMs, long loadoutSig, long pouchSig, boolean stale)
     {
-        this.source = b.source;
-        this.build = b.build;
-        this.spellbook = b.spellbook;
-        this.worn = immutable(b.worn);
-        this.carried = immutable(b.carried);
-        this.pouch = immutable(b.pouch);
-        this.pouchKnown = b.pouchKnown;
-        this.readAtMs = b.readAtMs;
-        this.loadoutSig = b.loadoutSig;
-        this.pouchSig = b.pouchSig;
-        this.stale = b.stale;
+        this.source = source == null ? SOURCE_CONTAINERS : source;
+        this.build = build;
+        this.spellbook = spellbook;
+        this.worn = immutable(worn);
+        this.carried = immutable(carried);
+        this.pouch = immutable(pouch);
+        this.pouchKnown = pouchKnown;
+        this.readAtMs = readAtMs;
+        this.loadoutSig = loadoutSig;
+        this.pouchSig = pouchSig;
+        this.stale = stale;
     }
 
-    private static List<Item> immutable(List<Item> items)
+    private static List<GearItem> immutable(List<GearItem> items)
     {
         if (items == null || items.isEmpty()) return Collections.emptyList();
-        List<Item> out = new ArrayList<>(items.size());
-        for (Item i : items) if (i != null) out.add(i);
+        List<GearItem> out = new ArrayList<>(items.size());
+        for (GearItem i : items) if (i != null) out.add(i);
         return Collections.unmodifiableList(out);
     }
 
-    public static Builder builder(String source)
+    /** {@code s}'s answer; false when it throws. */
+    public static boolean safe(BooleanSupplier s)
     {
-        return new Builder(source);
-    }
-
-    public Builder toBuilder()
-    {
-        return new Builder(source).forBuild(build).spellbook(spellbook).worn(worn).carried(carried).pouch(pouch, pouchKnown)
-            .readAt(readAtMs).signatures(loadoutSig, pouchSig).stale(stale);
+        try
+        {
+            return s.getAsBoolean();
+        }
+        catch (RuntimeException e)
+        {
+            return false;
+        }
     }
 
     public boolean hasRunePouch()
     {
-        for (Item i : carried) if (RUNE_POUCH_IDS.contains(i.id)) return true;
-        for (Item i : worn) if (RUNE_POUCH_IDS.contains(i.id)) return true;
+        for (GearItem i : carried) if (POUCH_IDS.contains(i.id)) return true;
+        for (GearItem i : worn) if (POUCH_IDS.contains(i.id)) return true;
         return false;
     }
 
     public GearKit asStale()
     {
-        return toBuilder().stale(true).build();
+        return new GearKit(source, build, spellbook, worn, carried, pouch, pouchKnown, readAtMs, loadoutSig, pouchSig, true);
     }
 
     public GearKit withSource(String newSource)
     {
-        return toBuilder().source(newSource).build();
+        return new GearKit(newSource, build, spellbook, worn, carried, pouch, pouchKnown, readAtMs, loadoutSig, pouchSig, stale);
     }
 
-    public GearKit withPouch(List<Item> runes, boolean known, long newPouchSig)
+    public GearKit withPouch(List<GearItem> runes, boolean known, long newPouchSig)
     {
-        return toBuilder().pouch(runes, known).signatures(loadoutSig, newPouchSig).build();
+        return new GearKit(source, build, spellbook, worn, carried, runes, known, readAtMs, loadoutSig, newPouchSig, stale);
     }
 
     public boolean sameContent(GearKit o)
@@ -146,7 +100,7 @@ public final class GearKit
 
     public String toJson()
     {
-        JsonObject o = new JsonObject();
+        var o = new JsonObject();
         o.addProperty("build", build);
         o.addProperty("spellbook", spellbook);
         o.add("worn", itemsJson(worn));
@@ -173,15 +127,9 @@ public final class GearKit
         }
         if (e == null || !e.isJsonObject()) return null;
         JsonObject o = e.getAsJsonObject();
-        return builder(SOURCE_SAVED)
-            .forBuild(JsonLenient.optString(o, "build", null))
-            .spellbook(JsonLenient.optString(o, "spellbook", null))
-            .worn(itemsFrom(JsonLenient.optArray(o, "worn")))
-            .carried(itemsFrom(JsonLenient.optArray(o, "carried")))
-            .pouch(itemsFrom(JsonLenient.optArray(o, "pouch")), JsonLenient.optBool(o, "pouch_known", false))
-            .readAt(JsonLenient.optLong(o, "read_at", 0L))
-            .signatures(longOf(o, "loadout_sig"), longOf(o, "pouch_sig"))
-            .build();
+        return new GearKit(SOURCE_SAVED, optString(o, "build", null), optString(o, "spellbook", null),
+            itemsFrom(optArray(o, "worn")), itemsFrom(optArray(o, "carried")), itemsFrom(optArray(o, "pouch")),
+            optBool(o, "pouch_known", false), optLong(o, "read_at", 0L), longOf(o, "loadout_sig"), longOf(o, "pouch_sig"), false);
     }
 
     private static long longOf(JsonObject o, String key)
@@ -198,12 +146,12 @@ public final class GearKit
         }
     }
 
-    private static JsonArray itemsJson(List<Item> items)
+    private static JsonArray itemsJson(List<GearItem> items)
     {
-        JsonArray a = new JsonArray();
-        for (Item i : items)
+        var a = new JsonArray();
+        for (GearItem i : items)
         {
-            JsonObject o = new JsonObject();
+            var o = new JsonObject();
             o.addProperty("id", i.id);
             o.addProperty("qty", i.qty);
             o.addProperty("name", i.name);
@@ -215,107 +163,19 @@ public final class GearKit
         return a;
     }
 
-    private static List<Item> itemsFrom(JsonArray a)
+    private static List<GearItem> itemsFrom(JsonArray a)
     {
-        List<Item> out = new ArrayList<>();
+        List<GearItem> out = new ArrayList<>();
         for (JsonElement e : a)
         {
             if (e == null || !e.isJsonObject()) continue;
             JsonObject o = e.getAsJsonObject();
-            Integer id = JsonLenient.optInteger(o, "id");
-            Integer qty = JsonLenient.optInteger(o, "qty");
+            Integer id = optInteger(o, "id");
+            Integer qty = optInteger(o, "qty");
             if (id == null || id < 1 || qty == null || qty < 1) continue;
-            out.add(new Item(id, qty, JsonLenient.optString(o, "name", "Item " + id), JsonLenient.optString(o, "slot", null),
-                JsonLenient.optBool(o, "stackable", false), JsonLenient.optBool(o, "noted", false)));
+            out.add(new GearItem(id, qty, optString(o, "name", "Item " + id), optString(o, "slot", null),
+                optBool(o, "stackable", false), optBool(o, "noted", false), null, null));
         }
         return out;
-    }
-
-    @Override
-    public String toString()
-    {
-        return "GearKit{" + source + " " + build + " " + spellbook + " worn=" + worn.size() + " carried=" + carried.size()
-            + " pouch=" + (pouchKnown ? pouch.size() : "?") + (stale ? " stale" : "") + "}";
-    }
-
-    public static final class Builder
-    {
-        private String source;
-        private String build;
-        private String spellbook;
-        private List<Item> worn = Collections.emptyList();
-        private List<Item> carried = Collections.emptyList();
-        private List<Item> pouch = Collections.emptyList();
-        private boolean pouchKnown;
-        private long readAtMs;
-        private long loadoutSig;
-        private long pouchSig;
-        private boolean stale;
-
-        private Builder(String source)
-        {
-            source(source);
-        }
-
-        public Builder source(String s)
-        {
-            this.source = s == null ? SOURCE_CONTAINERS : s;
-            return this;
-        }
-
-        public Builder forBuild(String b)
-        {
-            this.build = b;
-            return this;
-        }
-
-        public Builder spellbook(String s)
-        {
-            this.spellbook = s;
-            return this;
-        }
-
-        public Builder worn(List<Item> items)
-        {
-            this.worn = items;
-            return this;
-        }
-
-        public Builder carried(List<Item> items)
-        {
-            this.carried = items;
-            return this;
-        }
-
-        public Builder pouch(List<Item> runes, boolean known)
-        {
-            this.pouch = runes;
-            this.pouchKnown = known;
-            return this;
-        }
-
-        public Builder readAt(long ms)
-        {
-            this.readAtMs = ms;
-            return this;
-        }
-
-        public Builder signatures(long loadout, long pouchVarp)
-        {
-            this.loadoutSig = loadout;
-            this.pouchSig = pouchVarp;
-            return this;
-        }
-
-        public Builder stale(boolean s)
-        {
-            this.stale = s;
-            return this;
-        }
-
-        public GearKit build()
-        {
-            return new GearKit(this);
-        }
     }
 }

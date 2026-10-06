@@ -1,35 +1,34 @@
 package com.pvp.leaderboard.tournament;
 
-import com.google.gson.JsonElement;
-import com.google.gson.JsonObject;
-import com.pvp.leaderboard.util.JsonLenient;
+import com.google.gson.*;
+import com.pvp.leaderboard.game.*;
+import com.pvp.leaderboard.util.*;
+import java.util.*;
+import lombok.*;
+import static com.pvp.leaderboard.util.JsonLenient.*;
 
-import java.util.ArrayList;
-import java.util.Collection;
-import java.util.Collections;
-import java.util.LinkedHashSet;
-import java.util.List;
-import java.util.Set;
-
+/** One item: a row of a gear set, or an item read from a kit ({@code noted} only there; {@code variants} and
+ *  {@code altIds} only on set rows). */
+@EqualsAndHashCode
 public final class GearItem
 {
-    static final String[] WORN_SLOTS = {"head", "cape", "neck", "weapon", "body", "shield", "legs", "hands", "feet", "ring", "ammo"};
-
     public final int id;
     public final int qty;
     public final String name;
     public final String slot;
     public final boolean stackable;
+    public final boolean noted;
     public final String variants;
     public final List<Integer> altIds;
 
-    public GearItem(int id, int qty, String name, String slot, boolean stackable, String variants, Collection<Integer> altIds)
+    public GearItem(int id, int qty, String name, String slot, boolean stackable, boolean noted, String variants, Collection<Integer> altIds)
     {
         this.id = id;
         this.qty = qty;
         this.name = name;
         this.slot = slot;
         this.stackable = stackable;
+        this.noted = noted;
         this.variants = variants;
         this.altIds = alternatives(id, altIds);
     }
@@ -38,12 +37,12 @@ public final class GearItem
     {
         if (e == null || !e.isJsonObject()) return null;
         JsonObject o = e.getAsJsonObject();
-        Integer id = JsonLenient.optInteger(o, "id");
-        Integer qty = JsonLenient.optInteger(o, "qty");
+        Integer id = optInteger(o, "id");
+        Integer qty = optInteger(o, "qty");
         if (id == null || id < 1 || qty == null || qty < 1) return null;
-        String name = JsonLenient.optString(o, "name", "").trim();
-        return new GearItem(id, qty, name.isEmpty() ? "Item " + id : name, wornSlot(JsonLenient.optString(o, "slot", null)),
-            JsonLenient.optBool(o, "stackable", false), variantsMode(JsonLenient.optString(o, "variants", null)), altIdsOf(o));
+        String name = optString(o, "name").trim();
+        return new GearItem(id, qty, name.isEmpty() ? "Item " + id : name, wornSlot(optString(o, "slot", null)),
+            optBool(o, "stackable", false), false, variantsMode(optString(o, "variants", null)), altIdsOf(o));
     }
 
     public List<Integer> ids()
@@ -62,7 +61,7 @@ public final class GearItem
     static List<Integer> altIdsOf(JsonObject o)
     {
         List<Integer> out = new ArrayList<>();
-        for (JsonElement a : JsonLenient.optArray(o, "alt_ids"))
+        for (JsonElement a : optArray(o, "alt_ids"))
         {
             Integer v = wholeNumber(a);
             if (v != null) out.add(v);
@@ -99,7 +98,7 @@ public final class GearItem
     static String wornSlot(String s)
     {
         if (s == null) return null;
-        for (String slot : WORN_SLOTS) if (slot.equals(s)) return slot;
+        for (String slot : ArenaWidgets.SLOT_NAMES) if (slot.equals(s)) return slot;
         return null;
     }
 

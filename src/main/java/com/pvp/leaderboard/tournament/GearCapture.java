@@ -1,16 +1,15 @@
 package com.pvp.leaderboard.tournament;
 
-import java.util.ArrayList;
-import java.util.LinkedHashMap;
-import java.util.List;
-import java.util.Map;
+import com.google.gson.*;
+import java.util.*;
+import lombok.*;
 
 public final class GearCapture
 {
-    private GearCapture() {}
 
     private static final String NAME_CHARS = "[^A-Za-z0-9 .,!'()+\\-/&]";
 
+    @RequiredArgsConstructor
     private static final class Row
     {
         final int id;
@@ -19,25 +18,19 @@ public final class GearCapture
         String slot;
         boolean stackable;
         boolean alsoCarried;
-
-        Row(int id, String name)
-        {
-            this.id = id;
-            this.name = name;
-        }
     }
 
-    public static String toCatalogJson(GearKit kit)
+    public static String toCatalog(GearKit kit)
     {
         if (kit == null) return null;
         Map<Integer, Row> rows = new LinkedHashMap<>();
-        for (GearKit.Item i : kit.worn) add(rows, i, true);
-        for (GearKit.Item i : kit.carried) add(rows, i, false);
-        if (kit.pouchKnown) for (GearKit.Item i : kit.pouch) add(rows, i, false);
+        for (GearItem i : kit.worn) add(rows, i, true);
+        for (GearItem i : kit.carried) add(rows, i, false);
+        if (kit.pouchKnown) for (GearItem i : kit.pouch) add(rows, i, false);
         if (rows.isEmpty()) return null;
 
         String build = GearSet.BUILDS.contains(kit.build) ? kit.build : "main";
-        StringBuilder sb = new StringBuilder("{\n");
+        var sb = new StringBuilder("{\n");
         field(sb, "set_id", quote("capture-" + build));
         field(sb, "name", quote("Captured " + GearSet.buildLabel(build).replace('/', '-') + " kit"));
         field(sb, "version", "1");
@@ -50,7 +43,7 @@ public final class GearCapture
         List<String> lines = new ArrayList<>();
         for (Row r : rows.values())
         {
-            StringBuilder line = new StringBuilder("    {\"id\": ").append(r.id)
+            var line = new StringBuilder("    {\"id\": ").append(r.id)
                 .append(", \"name\": ").append(quote(r.name))
                 .append(", \"qty\": ").append(r.qty);
             boolean keepSlot = r.slot != null && (r.stackable || (!r.alsoCarried && r.qty == 1));
@@ -62,7 +55,7 @@ public final class GearCapture
         return sb.toString();
     }
 
-    private static void add(Map<Integer, Row> rows, GearKit.Item i, boolean worn)
+    private static void add(Map<Integer, Row> rows, GearItem i, boolean worn)
     {
         if (i == null || i.noted || i.id <= 0 || i.qty <= 0) return;
         Row r = rows.computeIfAbsent(i.id, k -> new Row(i.id, cleanName(i.name, i.id)));
@@ -86,12 +79,6 @@ public final class GearCapture
 
     private static String quote(String s)
     {
-        StringBuilder q = new StringBuilder("\"");
-        for (char c : s.toCharArray())
-        {
-            if (c == '"' || c == '\\') q.append('\\');
-            q.append(c);
-        }
-        return q.append('"').toString();
+        return new JsonPrimitive(s).toString();
     }
 }

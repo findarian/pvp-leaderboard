@@ -1,26 +1,26 @@
 package com.pvp.leaderboard.queue;
 
-import com.google.gson.JsonObject;
-import com.pvp.leaderboard.util.JsonLenient;
+import com.google.gson.*;
+import com.pvp.leaderboard.util.*;
+import static com.pvp.leaderboard.util.JsonLenient.*;
 
 /**
  * Immutable snapshot of the local user's matchmaking-queue state, parsed
  * from a {@code queue/state} (or {@code queue/timeout}) push — Plan 10
- * Part B / F.1 (2026-09-21). Mirrors the backend's
- * {@code matchmaking_queue.public_state}:
+ * Part B / F.1 (2026-09-21). The part of the backend's
+ * {@code matchmaking_queue.public_state} the plugin shows:
  *
  * <pre>
  * state            searching | idle | timeout
  * window           ±rating window (100/200/400/800) or null = anyone in the style
  * expanded         true once the search is open to everyone
- * rank_range       {min_rank_idx, max_rank_idx} or null
- * elapsed_s / wait_pref_s / remaining_s / next_expand_in_s (null when expanded)
- * matches_last_hour / matches_today   the pinned-message counters
+ * elapsed_s / wait_pref_s
  * reason           idle only: "expired" | "opponent_declined" (Part E, additive)
  * fight_session_id idle with a reason: the fight session the server ended
- * style / build / region
  * </pre>
  *
+ * The server also sends the rank range, the remaining and next-expansion
+ * times, the match counters, style, build and region; nothing reads them.
  * Missing keys degrade to neutral values so a partial push never throws
  * on the socket read thread. No UUIDs — the queue is keyed on
  * {@code player_id} server-side and the plugin only ever sees names.
@@ -33,80 +33,35 @@ public final class QueueState
     /** {@code null} = the search is open to anyone in the style. */
     public final Integer window;
     public final boolean expanded;
-    public final int rankMinIdx;
-    public final int rankMaxIdx;
     public final int elapsedS;
     public final int waitPrefS;
-    public final int remainingS;
-    /** {@code null} once expanded (no next expansion). */
-    public final Integer nextExpandInS;
-    public final int matchesLastHour;
-    public final int matchesToday;
     public final String reason;
-    public final String style;
-    public final String build;
-    public final String region;
     /** The fight session an idle state's {@code reason} is about; {@code null} when the push names none. */
-    public final String fightSessionId;
+    public final String fightId;
 
-    /** A state that names no fight session. */
-    public QueueState(String state, Integer window, boolean expanded, int rankMinIdx, int rankMaxIdx,
-                      int elapsedS, int waitPrefS, int remainingS, Integer nextExpandInS,
-                      int matchesLastHour, int matchesToday, String reason, String style, String build, String region)
-    {
-        this(state, window, expanded, rankMinIdx, rankMaxIdx, elapsedS, waitPrefS, remainingS, nextExpandInS,
-            matchesLastHour, matchesToday, reason, style, build, region, null);
-    }
-
-    public QueueState(String state, Integer window, boolean expanded, int rankMinIdx, int rankMaxIdx,
-                      int elapsedS, int waitPrefS, int remainingS, Integer nextExpandInS,
-                      int matchesLastHour, int matchesToday, String reason, String style, String build, String region,
-                      String fightSessionId)
+    public QueueState(String state, Integer window, boolean expanded, int elapsedS, int waitPrefS, String reason,
+                      String fightId)
     {
         this.state = state == null ? "idle" : state;
         this.window = window;
         this.expanded = expanded;
-        this.rankMinIdx = rankMinIdx;
-        this.rankMaxIdx = rankMaxIdx;
         this.elapsedS = elapsedS;
         this.waitPrefS = waitPrefS;
-        this.remainingS = remainingS;
-        this.nextExpandInS = nextExpandInS;
-        this.matchesLastHour = matchesLastHour;
-        this.matchesToday = matchesToday;
         this.reason = reason;
-        this.style = style;
-        this.build = build;
-        this.region = region;
-        this.fightSessionId = fightSessionId == null || fightSessionId.isEmpty() ? null : fightSessionId;
+        this.fightId = fightId == null || fightId.isEmpty() ? null : fightId;
     }
 
     public static QueueState fromJson(JsonObject d)
     {
         if (d == null) d = new JsonObject();
-        int rmin = UNKNOWN, rmax = UNKNOWN;
-        JsonObject rr = JsonLenient.optObject(d, "rank_range");
-        if (rr != null)
-        {
-            rmin = JsonLenient.optInt(rr, "min_rank_idx", UNKNOWN);
-            rmax = JsonLenient.optInt(rr, "max_rank_idx", UNKNOWN);
-        }
         return new QueueState(
-            JsonLenient.optString(d, "state", "idle"),
-            JsonLenient.optInteger(d, "window"),
-            JsonLenient.optBool(d, "expanded", false),
-            rmin, rmax,
-            JsonLenient.optInt(d, "elapsed_s", 0),
-            JsonLenient.optInt(d, "wait_pref_s", 0),
-            JsonLenient.optInt(d, "remaining_s", 0),
-            JsonLenient.optInteger(d, "next_expand_in_s"),
-            JsonLenient.optInt(d, "matches_last_hour", 0),
-            JsonLenient.optInt(d, "matches_today", 0),
-            JsonLenient.optString(d, "reason", null),
-            JsonLenient.optString(d, "style", null),
-            JsonLenient.optString(d, "build", null),
-            JsonLenient.optString(d, "region", null),
-            JsonLenient.optString(d, "fight_session_id", null));
+            optString(d, "state", "idle"),
+            optInteger(d, "window"),
+            optBool(d, "expanded", false),
+            optInt(d, "elapsed_s", 0),
+            optInt(d, "wait_pref_s", 0),
+            optString(d, "reason", null),
+            optString(d, "fight_session_id", null));
     }
 
     public boolean isSearching()
@@ -119,11 +74,6 @@ public final class QueueState
     public boolean endsMatch()
     {
         return "idle".equals(state) && ("expired".equals(reason) || "opponent_declined".equals(reason));
-    }
-
-    public boolean hasRankRange()
-    {
-        return rankMinIdx != UNKNOWN && rankMaxIdx != UNKNOWN;
     }
 
     @Override

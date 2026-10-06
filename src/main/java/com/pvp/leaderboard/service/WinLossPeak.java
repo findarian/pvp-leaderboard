@@ -1,12 +1,9 @@
 package com.pvp.leaderboard.service;
 
-import com.google.gson.JsonElement;
-import com.google.gson.JsonObject;
-import com.pvp.leaderboard.util.JsonLenient;
-
-import java.util.Collections;
-import java.util.HashMap;
-import java.util.Map;
+import com.google.gson.*;
+import com.pvp.leaderboard.util.*;
+import java.util.*;
+import static com.pvp.leaderboard.util.JsonLenient.*;
 
 public final class WinLossPeak
 {
@@ -25,25 +22,25 @@ public final class WinLossPeak
 	{
 		if (profile == null) return EMPTY;
 		Map<String, int[]> records = new HashMap<>();
-		JsonObject cum = JsonLenient.optObject(profile, "cumulative_stats");
+		JsonObject cum = optObject(profile, "cumulative_stats");
 		if (cum != null)
 		{
 			for (Map.Entry<String, JsonElement> e : cum.entrySet())
 			{
-				JsonObject b = JsonLenient.optObject(cum, e.getKey());
+				JsonObject b = optObject(cum, e.getKey());
 				if (b == null) continue;
 				records.put(e.getKey(), new int[]{
-					Math.max(0, JsonLenient.optInt(b, "wins", 0)),
-					Math.max(0, JsonLenient.optInt(b, "losses", 0))});
+					Math.max(0, optInt(b, "wins", 0)),
+					Math.max(0, optInt(b, "losses", 0))});
 			}
 		}
 		Map<String, String> peaks = new HashMap<>();
-		JsonObject peakMap = JsonLenient.optObject(profile, "peaks");
+		JsonObject peakMap = optObject(profile, "peaks");
 		if (peakMap != null)
 		{
 			for (Map.Entry<String, JsonElement> e : peakMap.entrySet())
 			{
-				String text = peakText(JsonLenient.optObject(peakMap, e.getKey()));
+				String text = peakText(optObject(peakMap, e.getKey()));
 				if (text != null) peaks.put(e.getKey(), text);
 			}
 		}
@@ -52,26 +49,31 @@ public final class WinLossPeak
 
 	private static String peakText(JsonObject peak)
 	{
-		String rank = JsonLenient.optString(peak, "rank", "").trim();
+		String rank = optString(peak, "rank").trim();
 		if (rank.isEmpty()) return null;
-		int division = JsonLenient.optInt(peak, "division", 0);
+		int division = optInt(peak, "division", 0);
 		return division > 0 ? rank + " " + division : rank;
 	}
 
 	public int wins(String bucketKey)
 	{
-		int[] v = bucketKey == null ? null : records.get(bucketKey);
-		return v == null ? 0 : v[0];
+		return count(bucketKey, 0);
 	}
 
 	public int losses(String bucketKey)
 	{
-		int[] v = bucketKey == null ? null : records.get(bucketKey);
-		return v == null ? 0 : v[1];
+		return count(bucketKey, 1);
 	}
 
+	/** Both maps are a HashMap or an empty map: either answers a null key with null. */
 	public String peak(String bucketKey)
 	{
-		return bucketKey == null ? null : peaks.get(bucketKey);
+		return peaks.get(bucketKey);
+	}
+
+	private int count(String bucketKey, int i)
+	{
+		int[] v = records.get(bucketKey);
+		return v == null ? 0 : v[i];
 	}
 }

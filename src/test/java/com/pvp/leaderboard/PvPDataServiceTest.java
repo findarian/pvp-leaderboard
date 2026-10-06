@@ -3,7 +3,7 @@ package com.pvp.leaderboard;
 import com.google.gson.Gson;
 import com.google.gson.JsonObject;
 import com.pvp.leaderboard.config.PvPLeaderboardConfig;
-import com.pvp.leaderboard.service.PvPDataService;
+import com.pvp.leaderboard.service.PvpApi;
 import okhttp3.*;
 import org.junit.Before;
 import org.junit.Test;
@@ -19,7 +19,7 @@ public class PvPDataServiceTest {
     private OkHttpClient okHttpClient;
     private TestInterceptor testInterceptor;
     private PvPLeaderboardConfig config;
-    private PvPDataService dataService;
+    private PvpApi dataService;
     private final Gson gson = new Gson();
 
     // Fake data for testing
@@ -34,8 +34,8 @@ public class PvPDataServiceTest {
                 .addInterceptor(testInterceptor)
                 .build();
         config = new MockConfig();
-        // clientIdentityService is unused in tests, passing null
-        dataService = new PvPDataService(okHttpClient, gson, config, null);
+        // identitySvc is unused in tests, passing null
+        dataService = new PvpApi(okHttpClient, gson, null);
     }
 
     @Test
@@ -56,7 +56,7 @@ public class PvPDataServiceTest {
         testInterceptor.setNextResponse(200, gson.toJson(fakeResponseJson));
 
         // Execute
-        CompletableFuture<JsonObject> future = dataService.getPlayerMatches(FAKE_PLAYER_ID, null, 10);
+        CompletableFuture<JsonObject> future = dataService.getMatches(null, FAKE_PLAYER_ID, null, 10, false);
         JsonObject result = future.get();
 
         // Verify
@@ -71,39 +71,6 @@ public class PvPDataServiceTest {
     }
 
     @Test
-    public void testGetPlayerTier_Success() throws ExecutionException, InterruptedException, IOException {
-        // getPlayerTier delegates to getTierFromProfile, which reads the
-        // /user contract: "rank" (tier name) + "division" (1-3), combined
-        // as e.g. "Dragon 3". There is NO flat "tier" field on /user — that
-        // only exists in the S3 shard payloads (see extractTierFromUserResponse).
-        JsonObject fakeUserJson = new JsonObject();
-        fakeUserJson.addProperty("player_id", FAKE_PLAYER_ID);
-        fakeUserJson.addProperty("rank", "Dragon");
-        fakeUserJson.addProperty("division", 3);
-
-        testInterceptor.setNextResponse(200, gson.toJson(fakeUserJson));
-
-        // Execute
-        CompletableFuture<String> future = dataService.getPlayerTier(FAKE_PLAYER_ID, "nh");
-        String tier = future.get();
-
-        // Verify rank + division are combined per the /user contract.
-        assertEquals("Dragon 3", tier);
-    }
-
-    @Test
-    public void testGetPlayerTier_NotFound() throws ExecutionException, InterruptedException, IOException {
-        testInterceptor.setNextResponse(404, "");
-
-        // Execute
-        CompletableFuture<String> future = dataService.getPlayerTier(FAKE_PLAYER_ID, "nh");
-        String tier = future.get();
-
-        // Verify
-        assertNull(tier);
-    }
-
-    @Test
     public void testGetUserProfile_Success() throws ExecutionException, InterruptedException, IOException {
         JsonObject fakeProfile = new JsonObject();
         fakeProfile.addProperty("player_id", FAKE_PLAYER_ID);
@@ -112,7 +79,7 @@ public class PvPDataServiceTest {
         testInterceptor.setNextResponse(200, gson.toJson(fakeProfile));
 
         // Execute
-        CompletableFuture<JsonObject> future = dataService.getUserProfile(FAKE_PLAYER_ID, "unique-id");
+        CompletableFuture<JsonObject> future = dataService.getProfile(FAKE_PLAYER_ID, false);
         JsonObject result = future.get();
 
         assertNotNull(result);
@@ -120,21 +87,29 @@ public class PvPDataServiceTest {
         assertEquals(1500.5, result.get("mmr").getAsDouble(), 0.001);
     }
 
+    /** The client's acct_sha: SHA-256 of its identifier as 64 lower-case hex characters, leading zeros kept
+     *  (expected values from Python's hashlib). */
     @Test
-    public void testGenerateAcctSha_ValidFormat() throws Exception {
-        // Test SHA256 hash generation for UUID -> acct_sha conversion
-        String hash = dataService.generateAcctSha("550e8400-e29b-41d4-a716-446655440000");
-        assertNotNull(hash);
-        assertEquals(64, hash.length()); // SHA256 produces 64 hex chars
-        assertTrue(hash.matches("[0-9a-f]{64}")); // All lowercase hex
-        
-        // Verify same input produces same hash (deterministic)
-        String hash2 = dataService.generateAcctSha("550e8400-e29b-41d4-a716-446655440000");
-        assertEquals(hash, hash2);
-        
-        // Verify different inputs produce different hashes
-        String otherHash = dataService.generateAcctSha("660e8400-e29b-41d4-a716-446655440001");
-        assertNotEquals(hash, otherHash);
+    public void testSelfAcctSha_isTheLowerHexSha256OfTheIdentifier() throws Exception {
+        assertEquals("a3a9e1ed9732cab28868127be00f1ce921acaefdd5c3b23a6e9e0072bd9c1a34", selfAcctSha(FAKE_UUID));
+        assertEquals("00020ac787456de06541d6df16016c4d78ae127f7e9478b992888cdfda66722f", selfAcctSha("client-8588"));
+        String other = selfAcctSha("660e8400-e29b-41d4-a716-446655440001");
+        assertTrue(other.matches("[0-9a-f]{64}"));
+        assertNotEquals(selfAcctSha(FAKE_UUID), other);
+    }
+
+    @Test
+    public void testSelfAcctSha_withoutAnIdentifier_isNull() throws Exception {
+        assertNull(selfAcctSha(null));
+        assertNull(selfAcctSha(""));
+        assertNull("no identity service", dataService.getSelfSha());
+    }
+
+    private String selfAcctSha(String uuid) {
+        com.pvp.leaderboard.service.IdentitySvc identity =
+            org.mockito.Mockito.mock(com.pvp.leaderboard.service.IdentitySvc.class);
+        org.mockito.Mockito.when(identity.getClientUniqueId()).thenReturn(uuid);
+        return new PvpApi(okHttpClient, gson, identity).getSelfSha();
     }
 
     @Test
@@ -149,7 +124,7 @@ public class PvPDataServiceTest {
     }
     
     private String getShardKeyForName(String name) {
-        // Replicate the shard key logic from PvPDataService.getShardRankByName()
+        // Replicate the shard key logic from PvpApi.getShardRank()
         String canonicalName = name.toLowerCase().trim().replaceAll("\\s+", " ");
         return canonicalName.length() >= 2 
             ? canonicalName.substring(0, 2).toLowerCase() 

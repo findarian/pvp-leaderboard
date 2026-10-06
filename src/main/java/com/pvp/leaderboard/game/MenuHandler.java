@@ -1,19 +1,16 @@
 package com.pvp.leaderboard.game;
 
-import com.pvp.leaderboard.config.PvPLeaderboardConfig;
-import com.pvp.leaderboard.ui.DashboardPanel;
-import javax.inject.Inject;
-import javax.inject.Singleton;
-import javax.swing.SwingUtilities;
-import lombok.extern.slf4j.Slf4j;
-import net.runelite.api.MenuAction;
-import net.runelite.api.events.MenuOptionClicked;
-import net.runelite.client.menus.MenuManager;
-import net.runelite.client.ui.ClientToolbar;
-import net.runelite.client.ui.NavigationButton;
-import net.runelite.client.util.Text;
+import com.pvp.leaderboard.config.*;
+import com.pvp.leaderboard.ui.*;
+import com.pvp.leaderboard.util.*;
+import javax.inject.*;
+import javax.swing.*;
+import net.runelite.api.*;
+import net.runelite.api.events.*;
+import net.runelite.client.menus.*;
+import net.runelite.client.ui.*;
+import net.runelite.client.util.*;
 
-@Slf4j
 @Singleton
 public class MenuHandler
 {
@@ -22,7 +19,7 @@ public class MenuHandler
     private final ClientToolbar clientToolbar;
 
     // Dependencies set after startup via init/update
-    private DashboardPanel dashboardPanel;
+    private Dashboard dashPanel;
     private NavigationButton navButton;
 
     @Inject
@@ -33,20 +30,15 @@ public class MenuHandler
         this.clientToolbar = clientToolbar;
     }
 
-    public void init(DashboardPanel dashboardPanel, NavigationButton navButton)
+    public void init(Dashboard dashPanel, NavigationButton navButton)
     {
-        this.dashboardPanel = dashboardPanel;
+        this.dashPanel = dashPanel;
         this.navButton = navButton;
         
-        refreshMenuOption();
+        refreshMenu();
     }
 
-    public void updateNavButton(NavigationButton navButton)
-    {
-        this.navButton = navButton;
-    }
-
-    public void refreshMenuOption()
+    public void refreshMenu()
     {
         try {
             if (config.enablePvpLookupMenu()) {
@@ -62,7 +54,7 @@ public class MenuHandler
         menuManager.removePlayerMenuItem("PvP lookup");
     }
 
-    public void handleMenuOptionClicked(MenuOptionClicked event)
+    public void onMenuClick(MenuOptionClicked event)
     {
         try
         {
@@ -88,24 +80,24 @@ public class MenuHandler
             cleaned = cleaned.replaceAll("\\([^)]*\\)", "");
             // Normalize without converting underscores/hyphens to spaces
             // (RuneScape treats space, underscore, hyphen as equivalent, but we preserve original format)
-            String playerName = cleaned.replace('\u00A0', ' ').trim().replaceAll("\\s+", " ");
+            String playerName = NameUtils.normalizeDisplayName(cleaned);
 
             // Open plugin side panel first so the panel exists/visible by the time
-            // we ask it to switch tabs. openPlayerLookup() handles its own EDT
+            // we ask it to switch tabs. openLookup() handles its own EDT
             // marshalling + forces the Player Lookup tab to the foreground (the
             // 2-tab revamp introduced the Matchmaking Lobby as the default; the
             // old single-view code didn't need to switch).
-            if (clientToolbar != null && navButton != null) {
+            if (navButton != null) {
                 SwingUtilities.invokeLater(() -> clientToolbar.openPanel(navButton));
             }
 
-            if (dashboardPanel != null) {
-                dashboardPanel.openPlayerLookup(playerName);
+            if (dashPanel != null) {
+                dashPanel.openLookup(playerName);
             }
         }
         catch (Exception e)
         {
-             // log.debug("Uncaught exception in handleMenuOptionClicked", e);
+             // log.debug("Uncaught exception in onMenuClick", e);
         }
     }
 }

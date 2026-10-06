@@ -1,6 +1,6 @@
 package com.pvp.leaderboard.service.socket;
 
-import com.google.gson.JsonObject;
+import com.google.gson.*;
 
 /**
  * Immutable wire-envelope value object for socket-lobby traffic. Both
@@ -27,12 +27,11 @@ public final class SocketCommand
     public final String cmd;
     public final JsonObject data;
 
+    /** {@code cmd} is non-empty: both callers ({@link SocketProtocol#encode}
+     *  after its allowlist test, {@link SocketProtocol#decode} after its own
+     *  test) never pass anything else. */
     public SocketCommand(String cmd, JsonObject data)
     {
-        if (cmd == null || cmd.isEmpty())
-        {
-            throw new IllegalArgumentException("cmd must be non-empty");
-        }
         this.cmd = cmd;
         // Defensive: tolerate callers passing null by substituting an
         // empty object. The wire spec disallows null data but a

@@ -1,39 +1,26 @@
 package com.pvp.leaderboard.game;
 
-import com.google.gson.JsonObject;
-import com.pvp.leaderboard.PvPLeaderboardConstants;
-import com.pvp.leaderboard.config.PvPLeaderboardConfig;
-import com.pvp.leaderboard.lobby.UserProfileLobbyJoinGate;
-import com.pvp.leaderboard.overlay.RankOverlay;
-import com.pvp.leaderboard.overlay.WinStreakOverlay;
-import com.pvp.leaderboard.service.ClientIdentityService;
-import com.pvp.leaderboard.service.MatchResult;
-import com.pvp.leaderboard.service.MatchResultService;
-import com.pvp.leaderboard.service.PortalRatingCap;
-import com.pvp.leaderboard.service.PvPDataService;
-import com.pvp.leaderboard.util.NameUtils;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Map;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.atomic.AtomicLong;
-import javax.inject.Inject;
-import javax.inject.Singleton;
-import lombok.extern.slf4j.Slf4j;
-import net.runelite.api.Client;
-import net.runelite.api.HitsplatID;
-import net.runelite.api.Player;
-import net.runelite.api.Varbits;
-import net.runelite.api.coords.LocalPoint;
-import net.runelite.api.coords.WorldPoint;
-import net.runelite.api.events.ActorDeath;
-import net.runelite.api.events.GameTick;
-import net.runelite.api.events.HitsplatApplied;
-import net.runelite.client.config.ConfigManager;
+import lombok.*;
+import com.google.gson.*;
+import com.pvp.leaderboard.*;
+import com.pvp.leaderboard.config.*;
+import com.pvp.leaderboard.config.PvPLeaderboardConfig.*;
+import com.pvp.leaderboard.lobby.*;
+import com.pvp.leaderboard.overlay.*;
+import com.pvp.leaderboard.service.*;
+import com.pvp.leaderboard.util.*;
+import java.util.*;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.*;
+import java.util.function.*;
+import javax.inject.*;
+import net.runelite.api.*;
+import net.runelite.api.coords.*;
+import net.runelite.api.events.*;
+import net.runelite.client.config.*;
+import static java.lang.System.*;
+import static java.util.concurrent.TimeUnit.*;
 
-@Slf4j
 @Singleton
 @SuppressWarnings("deprecation")
 public class FightMonitor
@@ -42,71 +29,62 @@ public class FightMonitor
     private final PvPLeaderboardConfig config;
     private final ConfigManager configManager;
     private final ScheduledExecutorService scheduler;
-    private final MatchResultService matchResultService;
-    private final PvPDataService pvpDataService;
-    private final ClientIdentityService clientIdentityService;
-    private final UserProfileLobbyJoinGate lobbyJoinGate;
+    private final ResultSender resultSender;
+    private final PvpApi pvpApi;
+    private final IdentitySvc identitySvc;
+    private final ProfileGate profileGate;
 
     // RankOverlay reference for MMR notifications
     private RankOverlay rankOverlay;
 
-    // --- Fight State ---
-    private String opponent = null;
-
     // Tracks multiple simultaneous fights (per-opponent) - damage is now tracked per-FightEntry
     private final ConcurrentHashMap<String, FightEntry> activeFights = new ConcurrentHashMap<>();
-    
+
     // Tick counters
-    private int suppressFightStartTicks = 0;
-    private final ConcurrentHashMap<String, Integer> perOpponentSuppressUntilTicks = new ConcurrentHashMap<>();
-    private final ConcurrentHashMap<String, Boolean> shardPresence = new ConcurrentHashMap<>();
-    
-    private static final int OUT_OF_COMBAT_TICKS = 16;
-    private int gcTicksCounter = 0;
+    private int muteTicks;
+    private final ConcurrentHashMap<String, Integer> oppMuteUntil = new ConcurrentHashMap<>();
+    /** Opponents whose overall shard lookup has answered (only membership is ever read). */
+    private final Set<String> shardPresence = ConcurrentHashMap.newKeySet();
+
+    private static final int IDLE_TICKS = 16;
+    private int gcTicks;
 
     /** Wall-clock timestamp (ms) of the most recent inbound damage
      *  hitsplat where the attacker is identifiable as another Player
      *  (not an NPC, not a self-deal). Updated on every qualifying
-     *  hit in {@link #handleHitsplatApplied}; used by
-     *  {@link #updateInCombatFlag()} to gate popup suppression for
+     *  hit in {@link #handleHit}; used by
+     *  {@link #syncInCombat()} to gate popup suppression for
      *  the "passively-attacked, not yet retaliated" case —
      *  {@link #activeFights} is only populated by OUTBOUND damage
-     *  (see resolveInboundAttacker's intentional null-on-no-existing-fight
+     *  (see findAttacker's intentional null-on-no-existing-fight
      *  contract), so without this separate signal a user being
      *  ganked / opener-attacked in a matchmaking arena reads as
      *  out-of-combat for the ~600ms–4s window before they retaliate,
      *  and an invite popup arriving in that window slips through
      *  the suppression gate (QA bug 2026-05-25). */
-    private volatile long lastInboundPvpDamageMs = 0L;
+    private volatile long inboundHitMs;
 
-    /** Push-model cache for {@link #isInCombat()}. The previous
-     *  pull model recomputed the answer on every popup-render frame
-     *  (~50 FPS × 2 overlays ≈ 100 calls/sec): walk
-     *  {@link #activeFights}, read {@link #lastInboundPvpDamageMs},
-     *  call {@link #isInCombatDecision}, emit a rate-limited DEBUG
-     *  log. The user (2026-05-26) called out the obvious smell:
-     *  combat is <em>state</em>, not a derived predicate, so it
-     *  should be cached and updated only at the mutation sites that
-     *  can change it. The cached field is updated by
-     *  {@link #updateInCombatFlag()}, which is called from every
+    /** Push-model cache for {@link #isInCombat()}: combat is state, so it
+     *  is cached and updated only at the mutation sites that can change
+     *  it, by {@link #syncInCombat()}, which is called from every
      *  site that mutates {@link #activeFights} or
-     *  {@link #lastInboundPvpDamageMs}:
+     *  {@link #inboundHitMs}:
      *  <ul>
-     *    <li>{@link #handleHitsplatApplied} — after recording inbound
+     *    <li>{@link #handleHit} — after recording inbound
      *        damage and/or seeding/touching a {@link FightEntry}.</li>
-     *    <li>{@link #handleGameTick} — after the 33-tick GC pass
+     *    <li>{@link #handleTick} — after the 33-tick GC pass
      *        evicts stale entries (combat exit edge).</li>
      *    <li>{@link #endFightFor} — after the conditional
-     *        {@link #shouldClearInboundSignalAfterSubmission} clear
+     *        {@link #shouldClear} clear
      *        on kill/death.</li>
-     *    <li>{@link #clearFightFor} — covers the other entry-removal
+     *    <li>{@link #clearFight} — covers the other entry-removal
      *        path used post-fight.</li>
-     *    <li>{@link #resetFightState} — login/logout bounce reset.</li>
+     *    <li>{@link #resetFight} — login/logout bounce reset.</li>
      *  </ul>
      *  Default value {@code false} is the correct login/startup
      *  reading: a fresh plugin start has never seen a combat event
      *  and must not read as in-combat until one fires. */
-    private volatile boolean inCombat = false;
+    @Getter private volatile boolean inCombat;
 
     // --- LMS freeze-log detection state ---
 
@@ -118,7 +96,7 @@ public class FightMonitor
      *  {@code plugin_disabled} freeze-log is submitted, so the warning
      *  survives the plugin being toggled off; read + cleared by the
      *  plugin on the next {@code LOGGED_IN}. */
-    public static final String LMS_PENDING_WARNING_KEY = "lmsDisablePendingWarning";
+    public static final String LMS_WARN_KEY = "lmsDisablePendingWarning";
 
     /** Config keys for the "show the doubled freeze-log MMR delta on next
      *  login" marker. A freeze-log is submitted at logout / shutdown, so
@@ -128,46 +106,44 @@ public class FightMonitor
      *  persisted here (surviving the plugin being toggled off) and read
      *  back on the next {@code LOGGED_IN} to run the identical delta
      *  fetch + {@link RankOverlay#showMmrDelta} display. */
-    public static final String LMS_PENDING_MMR_OPPONENT_KEY = "lmsFreezeMmrOpponent";
-    public static final String LMS_PENDING_MMR_ENDTS_KEY = "lmsFreezeMmrEndTs";
+    public static final String LMS_OPP_KEY = "lmsFreezeMmrOpponent";
+    public static final String LMS_END_KEY = "lmsFreezeMmrEndTs";
 
     /** How long an in-progress fight is retained for freeze-log
      *  purposes while the player is in an LMS arena. Much longer than
      *  the normal 10s idle-GC window because LMS freeze-logging
      *  happens deliberately after the combat timer has lapsed. */
-    static final long LMS_FREEZE_RETENTION_MS = 90_000L;
+    static final long LMS_KEEP_MS = 90_000L;
 
     /** How recently (ms) the player must have been confirmed inside an
      *  LMS arena for a logout to count as a freeze-log. Game ticks fire
-     *  ~every 600ms while logged in, so {@link #lastInLmsAreaMs} is
+     *  ~every 600ms while logged in, so {@link #lmsSeenMs} is
      *  sub-second-fresh at a genuine mid-arena logout; the window is
      *  padded to absorb a couple of missed ticks. */
-    static final long LMS_AREA_RECENCY_MS = 10_000L;
+    static final long LMS_AREA_MS = 10_000L;
 
     /** Wall-clock ms of the last game tick on which the local player
-     *  was confirmed standing inside an {@link PvPLeaderboardConstants#LMS_AREAS}
+     *  was confirmed standing inside an {@link PvpConsts#LMS_AREAS}
      *  rectangle on an LMS world. Cached because at {@code LOGIN_SCREEN}
      *  (and during {@code shutDown}) the local player object is gone. */
-    private volatile long lastInLmsAreaMs = 0L;
+    private volatile long lmsSeenMs;
 
-    /** World number captured alongside {@link #lastInLmsAreaMs}. */
-    private volatile int lastLmsWorld = 0;
+    /** World number captured alongside {@link #lmsSeenMs}. */
+    private volatile int lastLmsWorld;
 
     /** Local player name captured on the last tick it was resolvable,
      *  used as the {@code player_id} for a freeze-log submission when
      *  the live player object is already gone. */
-    private volatile String lastKnownSelfName = null;
+    private volatile String lastSelfName;
 
     /** In-memory guard so a pending freeze-log MMR replay is scheduled at
      *  most once per login session. Both {@code startUp}'s already-logged-in
      *  branch and the {@code LOGGED_IN} event call
-     *  {@link #showPendingFreezeLogMmrNotification()}, and a world hop
-     *  re-fires {@code LOGGED_IN}. Reset on {@link #resetFightState()}
+     *  {@link #showLmsMmr()}, and a world hop
+     *  re-fires {@code LOGGED_IN}. Reset on {@link #resetFight()}
      *  (logout) so a genuine relog re-attempts when the prior login's
      *  fetch failed and left the persistent marker intact. */
-    private volatile boolean freezeLogMmrReplayInFlight = false;
-
-    // MMR tracking - no longer using pre-fight profile, using match history API instead
+    private volatile boolean mmrReplaying;
 
     @Inject
     public FightMonitor(
@@ -175,19 +151,19 @@ public class FightMonitor
         PvPLeaderboardConfig config,
         ConfigManager configManager,
         ScheduledExecutorService scheduler,
-        MatchResultService matchResultService,
-        PvPDataService pvpDataService,
-        ClientIdentityService clientIdentityService,
-        UserProfileLobbyJoinGate lobbyJoinGate)
+        ResultSender resultSender,
+        PvpApi pvpApi,
+        IdentitySvc identitySvc,
+        ProfileGate profileGate)
     {
         this.client = client;
         this.config = config;
         this.configManager = configManager;
         this.scheduler = scheduler;
-        this.matchResultService = matchResultService;
-        this.pvpDataService = pvpDataService;
-        this.clientIdentityService = clientIdentityService;
-        this.lobbyJoinGate = lobbyJoinGate;
+        this.resultSender = resultSender;
+        this.pvpApi = pvpApi;
+        this.identitySvc = identitySvc;
+        this.profileGate = profileGate;
     }
 
     /**
@@ -204,89 +180,64 @@ public class FightMonitor
      *  flip the panel to NH. Cleared by the session tracker when the player
      *  leaves the bracket; the next ordinary fight then switches like every
      *  bucket. Wired by the plugin; defaults to "never pinned". */
-    private volatile java.util.function.BooleanSupplier tournamentBucketPin = () -> false;
-
-    public void setTournamentBucketPin(java.util.function.BooleanSupplier pin)
-    {
-        this.tournamentBucketPin = pin == null ? () -> false : pin;
-    }
+    @Setter private volatile BooleanSupplier tournamentBucketPin = () -> false;
 
     /** The bucket the auto-switch should land on: the Tournament bucket while
      *  pinned, else the fight's own bucket (may be {@code null} when unmapped). */
-    static PvPLeaderboardConfig.RankBucket resolveAutoSwitchTarget(PvPLeaderboardConfig.RankBucket fightBucket, boolean tournamentPinned)
+    static RankBucket resolveAutoSwitchTarget(RankBucket fightBucket, boolean isPinned)
     {
-        return tournamentPinned ? PvPLeaderboardConfig.RankBucket.TOURNAMENT : fightBucket;
+        return isPinned ? RankBucket.TOURNAMENT : fightBucket;
     }
 
-    public void resetFightState()
+    public void resetFight()
     {
-        opponent = null;
-        suppressFightStartTicks = 2;
+        muteTicks = 2;
         activeFights.clear();
-        perOpponentSuppressUntilTicks.clear();
+        oppMuteUntil.clear();
         shardPresence.clear();
         // Reset the inbound-PvP-damage signal too — a logout/login
         // or game-state bounce should not leave the popup-suppression
         // gate stuck on "in combat" indefinitely.
-        lastInboundPvpDamageMs = 0L;
+        inboundHitMs = 0L;
         // Allow the freeze-log MMR replay to re-attempt on the next login
         // (logout clears the in-session guard, not the persistent marker).
-        freezeLogMmrReplayInFlight = false;
-        updateInCombatFlag();
-        try { log.debug("[Fight] state reset; suppressTicks={}", suppressFightStartTicks); } catch (Exception ignore) {}
+        mmrReplaying = false;
+        syncInCombat();
     }
 
     /** The bucket of the last fight this session classified — the
      *  kill-streak box's "current style" (BOARD row 33); {@code null} until
-     *  then. Deliberately not cleared by {@link #resetFightState()}: a relog
+     *  then. Deliberately not cleared by {@link #resetFight()}: a relog
      *  does not change the style you were last fighting in. */
-    private volatile PvPLeaderboardConfig.RankBucket lastFightBucket = null;
-
-    /** Records the bucket {@link #determineBucket} classified a finished fight as. */
-    void recordFightBucket(String fightBucket)
-    {
-        lastFightBucket = bucketStringToEnum(fightBucket);
-    }
+    private volatile RankBucket lastBucket;
 
     /** Where the bucket auto-switch would land right now: the Tournament
      *  bucket while pinned, else the last classified fight's bucket, else
      *  {@code null} (no fight yet this session). The kill-streak box reads
      *  this so "which style am I in" has one source of truth. */
-    public PvPLeaderboardConfig.RankBucket getAutoSwitchTarget()
+    public RankBucket getAutoSwitchTarget()
     {
-        return resolveAutoSwitchTarget(lastFightBucket, tournamentBucketPin.getAsBoolean());
+        return resolveAutoSwitchTarget(lastBucket, tournamentBucketPin.getAsBoolean());
     }
 
-    private volatile java.util.function.BiConsumer<String, String> streakSink;
+    @Setter private volatile BiConsumer<String, String> streakSink;
 
-    public void setStreakSink(java.util.function.BiConsumer<String, String> sink)
+    @Setter private volatile Consumer<String> profileRefreshSink;
+
+    Consumer<JsonObject> streakResolver(String guessBucket, String guessResult)
     {
-        this.streakSink = sink;
-    }
-
-    private volatile java.util.function.Consumer<String> profileRefreshSink;
-
-    /** Told the local player's name after each post-fight refresh of their own profile. */
-    public void setProfileRefreshSink(java.util.function.Consumer<String> sink)
-    {
-        this.profileRefreshSink = sink;
-    }
-
-    java.util.function.Consumer<JsonObject> streakResolver(String guessBucket, String guessResult)
-    {
-        java.util.concurrent.atomic.AtomicBoolean settled = new java.util.concurrent.atomic.AtomicBoolean();
+        var settled = new AtomicBoolean();
         return row -> {
-            java.util.function.BiConsumer<String, String> sink = streakSink;
+            BiConsumer<String, String> sink = streakSink;
             if (sink == null || !settled.compareAndSet(false, true)) return;
-            String bucket = nonBlank(com.pvp.leaderboard.util.JsonLenient.optString(row, "bucket", null), guessBucket);
-            String result = nonBlank(com.pvp.leaderboard.util.JsonLenient.optString(row, "result", null), guessResult);
+            String bucket = nonBlank(JsonLenient.optString(row, "bucket", null), guessBucket);
+            String result = nonBlank(JsonLenient.optString(row, "result", null), guessResult);
             try
             {
                 sink.accept(bucket, result);
             }
             catch (RuntimeException e)
             {
-                log.debug("[Streak] sink threw for bucket={} result={}: {}", bucket, result, e.getMessage());
             }
         };
     }
@@ -297,13 +248,13 @@ public class FightMonitor
     }
 
     /** Recency window (ms) for {@link #isInCombat()}. Matches the GC
-     *  threshold inside {@link #handleGameTick} (line ~157) so the
+     *  threshold inside {@link #handleTick} so the
      *  popup-suppression window is coherent with when stale fights
      *  drop out of {@link #activeFights}. */
-    static final long COMBAT_WINDOW_MS = 10_000L;
+    static final long COMBAT_MS = 10_000L;
 
-    /** Pure recency predicate. {@code true} iff {@code lastActivityMs}
-     *  sits within {@link #COMBAT_WINDOW_MS} of {@code nowMs}.
+    /** Pure recency predicate. {@code true} iff {@code activityMs}
+     *  sits within {@link #COMBAT_MS} of {@code nowMs}.
      *
      *  <p>Edge cases (pinned in {@code FightMonitorCombatWindowTest}):
      *  <ul>
@@ -314,105 +265,52 @@ public class FightMonitor
      *        dismissed.</li>
      *  </ul>
      */
-    static boolean isWithinCombatWindow(long lastActivityMs, long nowMs)
+    static boolean isInWindow(long activityMs, long nowMs)
     {
-        long elapsed = nowMs - lastActivityMs;
+        long elapsed = nowMs - activityMs;
         if (elapsed < 0L) return true;
-        return elapsed <= COMBAT_WINDOW_MS;
-    }
-
-    /** Push-model accessor — returns the cached {@link #inCombat}
-     *  flag. Single volatile read, no map walk, no decision math,
-     *  no per-call log emission. The value is updated only at the
-     *  mutation sites enumerated on {@link #inCombat}; see that
-     *  field's javadoc for the full transition list and rationale.
-     *
-     *  <p>Used by the popup notification overlays to suppress
-     *  in-game popups while the user is in PvP. The user-facing
-     *  config gate
-     *  {@link com.pvp.leaderboard.config.PvPLeaderboardConfig#suppressNotificationsInCombat()}
-     *  decides whether to consult this.
-     *
-     *  <p>"PvP combat" specifically — both update sites
-     *  ({@link #handleHitsplatApplied} for inbound damage,
-     *  {@link #touchFight} for outbound) filter hitsplats so only
-     *  player-vs-player damage seeds either signal; an item trade,
-     *  NPC tick, or skilling action will never flip this flag. */
-    public boolean isInCombat()
-    {
-        return inCombat;
+        return elapsed <= COMBAT_MS;
     }
 
     /** Recompute {@link #inCombat} from the current values of
-     *  {@link #activeFights} and {@link #lastInboundPvpDamageMs}.
+     *  {@link #activeFights} and {@link #inboundHitMs}.
      *  Called from every site that mutates either of those (see
      *  {@link #inCombat} field docs for the enumerated list).
      *
-     *  <p><b>Decision rule</b> (unchanged from the pre-2026-05-26
-     *  pull model — only the trigger model flipped, not the truth
-     *  table): in combat iff EITHER any non-finalized entry exists
-     *  in {@link #activeFights} (regardless of recency — let the
-     *  33-tick GC at {@link #handleGameTick} decide when to evict),
-     *  OR {@link #lastInboundPvpDamageMs} is within
-     *  {@link #COMBAT_WINDOW_MS} of now. Both branches are pinned
+     *  <p><b>Decision rule:</b> in combat iff EITHER any non-finalized
+     *  entry exists in {@link #activeFights} (regardless of recency — let
+     *  the 33-tick GC at {@link #handleTick} decide when to evict),
+     *  OR {@link #inboundHitMs} is within
+     *  {@link #COMBAT_MS} of now. Both branches are pinned
      *  by {@link FightMonitorCombatWindowTest}.
      *
-     *  <p><b>Why this method is package-private:</b> not for tests
-     *  (those rely solely on the public {@link #isInCombat()} surface
-     *  to avoid reflection / over-fitting to internals). It's
-     *  package-private so the same-package overlay diagnostics
-     *  could trigger a recompute on demand if a future regression
-     *  needs it; production code only ever calls this from the
-     *  five enumerated mutation sites.
-     *
-     *  <p><b>Logging:</b> emits a single DEBUG line per
-     *  {@code false→true} or {@code true→false} transition,
-     *  capturing which branch of {@link #isInCombatDecision}
-     *  carried it (active-fight-count + inbound-damage age). Steady
-     *  state is silent — that's the central refactor win, replacing
-     *  the previous rate-limited 1-line-per-second polling spam. */
-    void updateInCombatFlag()
+     *  <p><b>Logging:</b> one DEBUG line per {@code false→true} or
+     *  {@code true→false} transition; steady state is silent. */
+    void syncInCombat()
     {
-        long now = System.currentTimeMillis();
-        int activeFightCount = 0;
+        long now = currentTimeMillis();
+        int fightCount = 0;
         for (FightEntry fe : activeFights.values())
         {
-            if (fe == null) continue;
-            if (fe.finalized) continue;
-            activeFightCount++;
+            if (!fe.finalized) fightCount++;
         }
-        boolean hasActiveFight = activeFightCount > 0;
-        long inboundMs = lastInboundPvpDamageMs;
-        boolean newValue = isInCombatDecision(inboundMs, hasActiveFight, now);
+        long inboundMs = inboundHitMs;
+        boolean newValue = isInCombatDecision(inboundMs, fightCount > 0, now);
 
         if (newValue != inCombat)
         {
-            long inboundAgeMs = (inboundMs > 0L) ? (now - inboundMs) : -1L;
-            try
-            {
-                log.debug("[FightMonitor] in-combat transition {} -> {} hasActiveFight={}"
-                        + " activeFightCount={} inboundAgeMs={} combatWindowMs={}",
-                    inCombat, newValue, hasActiveFight, activeFightCount, inboundAgeMs,
-                    COMBAT_WINDOW_MS);
-            }
-            catch (Exception ignore)
-            {
-                // Logger may be uninitialized in some test paths; the
-                // flag update itself MUST still happen.
-            }
             inCombat = newValue;
         }
     }
 
     /** Pure decision helper: in combat iff EITHER
-     *  {@code lastInboundPvpDamageMs} is within
-     *  {@link #COMBAT_WINDOW_MS} of {@code nowMs}, OR
-     *  {@code hasActiveFight} is true. Both signals are independent;
+     *  {@code inboundHitMs} is within
+     *  {@link #COMBAT_MS} of {@code nowMs}, OR
+     *  {@code inFight} is true. Both signals are independent;
      *  either alone is sufficient.
      *
      *  <p>The active-fight branch deliberately does NOT consult a
-     *  recency window — see {@link #isInCombat()} for the rationale.
-     *  In short: the source of truth for "match is over" is the GC
+     *  recency window: the source of truth for "match is over" is the GC
      *  pass that removes idle entries from {@link #activeFights},
      *  not a parallel 10s recency check that would un-suppress the
      *  popup before the GC actually runs. The inbound-damage branch
@@ -421,119 +319,75 @@ public class FightMonitor
      *
      *  <p>Extracted as a static helper so
      *  {@code FightMonitorCombatWindowTest} can pin the two-signal
-     *  OR-gate without instantiating FightMonitor (which has nine
-     *  injected dependencies). */
-    static boolean isInCombatDecision(long lastInboundPvpDamageMs, boolean hasActiveFight, long nowMs)
+     *  OR-gate without instantiating FightMonitor. */
+    static boolean isInCombatDecision(long inboundHitMs, boolean inFight, long nowMs)
     {
-        if (lastInboundPvpDamageMs > 0L
-            && isWithinCombatWindow(lastInboundPvpDamageMs, nowMs)) return true;
-        return hasActiveFight;
+        if (inboundHitMs > 0L
+            && isInWindow(inboundHitMs, nowMs)) return true;
+        return inFight;
     }
-    
+
     /**
      * Clear only a specific fight without affecting other ongoing fights.
      * Used when a fight ends but other multi-combat fights continue.
      */
-    private void clearFightFor(String opponentName)
+    private void clearFight(String opponentName)
     {
         activeFights.remove(opponentName);
-        perOpponentSuppressUntilTicks.put(opponentName, 5);
+        oppMuteUntil.put(opponentName, 5);
         shardPresence.remove(opponentName);
-        
+
         // Only reset global state if ALL fights are done
         if (activeFights.isEmpty())
         {
-            opponent = null;
-            suppressFightStartTicks = 2;
+            muteTicks = 2;
         }
         // Recompute the cached in-combat flag — removing a FightEntry
         // can flip the gate to false (singles kill, last multi
-        // opponent cleared, GC after fight-finalize). Without this
-        // the cache would lag the activeFights truth until the next
-        // unrelated mutation.
-        updateInCombatFlag();
+        // opponent cleared, GC after fight-finalize).
+        syncInCombat();
     }
 
-    public void handleGameTick(GameTick tick)
+    public void handleTick(GameTick tick)
     {
         try
         {
             // Handle fight suppression ticks
-            if (suppressFightStartTicks > 0)
+            if (muteTicks > 0)
             {
-                suppressFightStartTicks--;
+                muteTicks--;
             }
 
-            // Handle per-opponent suppression ticks
-            if (!perOpponentSuppressUntilTicks.isEmpty())
-            {
-                java.util.List<String> toRemove = new java.util.ArrayList<>();
-                perOpponentSuppressUntilTicks.forEach((name, ticks) -> {
-                    if (ticks <= 1) {
-                        toRemove.add(name);
-                    } else {
-                        perOpponentSuppressUntilTicks.put(name, ticks - 1);
-                    }
-                });
-                toRemove.forEach(perOpponentSuppressUntilTicks::remove);
-            }
+            // Per-opponent suppression: one tick less each; gone at zero.
+            oppMuteUntil.replaceAll((name, ticks) -> ticks - 1);
+            oppMuteUntil.values().removeIf(ticks -> ticks < 1);
 
             // Refresh the LMS-arena presence cache BEFORE the GC pass so
             // the extended-retention decision below sees the current
             // tick's position (and so a mid-arena logout has a fresh
-            // lastInLmsAreaMs to read after the player object is gone).
-            updateLmsAreaState();
-            updateFfaPortalState();
-            updateBountyHunterState();
+            // lmsSeenMs to read after the player object is gone).
+            updateLms();
+            updateAreaFlags();
 
             // Handle GC (every 33 ticks approx 20s)
-            gcTicksCounter++;
-            if (gcTicksCounter >= 33)
+            if (++gcTicks >= 33)
             {
-                gcTicksCounter = 0;
-                long now = System.currentTimeMillis();
+                gcTicks = 0;
+                long now = currentTimeMillis();
                 // While the player is inside an LMS arena, retain
                 // in-progress fights far longer (90s) so a deliberate
                 // freeze-log after the combat timer lapses still has a
                 // live FightEntry to submit as a doubled loss. Outside
                 // LMS the normal 10s idle window is unchanged.
-                final long idleThreshold =
-                    isInLmsAreaRecently(now) ? LMS_FREEZE_RETENTION_MS : 10_000L;
-                activeFights.entrySet().removeIf(e -> {
-                    FightEntry fe = e.getValue();
-                    if (fe == null) return true;
-                    if (!fe.finalized && now - fe.lastActivityMs > idleThreshold) {
-                        return true;
-                    }
-                    return false;
-                });
+                long idleLimit = isLmsRecent(lmsSeenMs, now) ? LMS_KEEP_MS : 10_000L;
+                activeFights.values().removeIf(fe -> !fe.finalized && now - fe.activityMs > idleLimit);
             }
 
-            // Combat window idle check - individual fight expiration is handled by GC above
-            // No global damage maps to clear anymore; damage is per-FightEntry
-
-            // Recompute the cached in-combat flag every tick. Two
-            // reasons this lives here rather than only at GC time:
-            //
-            //  (1) The {@code lastInboundPvpDamageMs} recency window
-            //      auto-expires without an event — no hitsplat fires
-            //      to mark the moment 10 seconds have elapsed since
-            //      the last inbound hit. The game tick (~600ms
-            //      cadence) is the natural carrier for this exit
-            //      transition. At ~1.7 ticks/sec we'll detect the
-            //      edge within one tick of {@link #COMBAT_WINDOW_MS}
-            //      elapsing, well below any user-visible latency.
-            //  (2) The 33-tick GC pass above can evict entries that
-            //      change the flag; sharing the recompute call with
-            //      the per-tick recency check keeps both edges on
-            //      the same code path.
-            //
-            // {@link #updateInCombatFlag} is a no-op when the
-            // computed value matches the cache, so 99%+ of ticks
-            // fire zero log lines and do only a small map walk —
-            // far cheaper than the previous ~100 calls/sec from
-            // the popup-render polling.
-            updateInCombatFlag();
+            // Recompute the cached in-combat flag every tick: the
+            // inbound-damage recency window expires without an event, and
+            // the GC pass above can evict entries. A no-op when the value
+            // is unchanged.
+            syncInCombat();
         }
         catch (Exception e)
         {
@@ -541,12 +395,7 @@ public class FightMonitor
         }
     }
 
-    private volatile java.util.function.ObjIntConsumer<String> combatSink;
-
-    public void setCombatSink(java.util.function.ObjIntConsumer<String> sink)
-    {
-        this.combatSink = sink;
-    }
+    @Setter private volatile ObjIntConsumer<String> combatSink;
 
     static boolean isOwnHitsplat(int hitsplatType, boolean isMine)
     {
@@ -555,7 +404,7 @@ public class FightMonitor
 
     private void reportOwnHit(String playerName)
     {
-        java.util.function.ObjIntConsumer<String> sink = combatSink;
+        ObjIntConsumer<String> sink = combatSink;
         if (sink == null) return;
         try
         {
@@ -563,32 +412,30 @@ public class FightMonitor
         }
         catch (RuntimeException e)
         {
-            log.debug("[Combat] sink threw for {}: {}", playerName, e.getMessage());
         }
     }
 
-    public void handleHitsplatApplied(HitsplatApplied event)
+    public void handleHit(HitsplatApplied event)
     {
         try
         {
             if (!(event.getActor() instanceof Player)) return;
-            if (client == null || config == null) return;
 
             Player hitPlayer = (Player) event.getActor();
             Player localPlayer = client.getLocalPlayer();
             if (localPlayer == null) return;
 
-            net.runelite.api.Hitsplat hs = event.getHitsplat();
+            Hitsplat hs = event.getHitsplat();
             if (hs == null) return;
 
             int hitsplatType = hs.getHitsplatType();
             int amt = hs.getAmount();
             boolean isMine = hs.isMine();
-            String hitPlayerName = hitPlayer.getName();
+            String hitName = hitPlayer.getName();
 
-            if (hitPlayer != localPlayer && hitPlayerName != null && isOwnHitsplat(hitsplatType, isMine))
+            if (hitPlayer != localPlayer && hitName != null && isOwnHitsplat(hitsplatType, isMine))
             {
-                reportOwnHit(hitPlayerName);
+                reportOwnHit(hitName);
             }
 
             // Only process relevant damage hitsplat types
@@ -602,29 +449,17 @@ public class FightMonitor
                     return;
                 }
             }
-            
+
             // Determine if this should start/continue a fight
             // For inbound damage (on us): any damage from opponent starts the fight
             // For outbound damage (on them): only OUR hitsplats count
-            boolean isDamageHitsplat = (amt > 0) && 
+            boolean isDamage = (amt > 0) &&
                 (hitsplatType == HitsplatID.DAMAGE_ME || hitsplatType == HitsplatID.DAMAGE_OTHER);
-            
+
             // Check if this is OUR damage - either isMine is true OR hitsplatType is DAMAGE_ME
             // DAMAGE_ME is the red hitsplat type shown specifically for YOUR damage on others
             // We check both because isMine can sometimes be incorrectly false
             boolean isOurDamage = isMine || (hitsplatType == HitsplatID.DAMAGE_ME);
-
-            // Debug log every hitsplat on players (commented out - enable for debugging)
-            // boolean isOnUs = (hitPlayer == localPlayer);
-            // if (amt > 0) {
-            //     log.debug("[Hitsplat] {} on={} amt={} type={} isMine={} isOurDmg={}", 
-            //         isOnUs ? "INBOUND" : "OUTBOUND",
-            //         hitPlayerName,
-            //         amt,
-            //         hitsplatTypeName,
-            //         isMine,
-            //         isOurDamage);
-            // }
 
             String opponentName = null;
             boolean startNow = false;
@@ -633,92 +468,67 @@ public class FightMonitor
             {
                 // Hitsplat on us = opponent dealt damage to us (inbound).
                 // Mark the inbound-PvP-damage timestamp BEFORE the
-                // resolveInboundAttacker call so the popup-suppression
+                // findAttacker call so the popup-suppression
                 // gate engages even when there's no active fight yet
-                // (which is the whole reason this branch exists —
-                // resolveInboundAttacker only returns existing fight
+                // (findAttacker only returns existing fight
                 // opponents, by design, to prevent NPC/trade/item-use
-                // damage from spawning false PvP fights). The "is
-                // there a real player attacker" check uses the cheap
-                // {@link #findActualKiller}-equivalent walk: any
-                // other Player whose getInteracting() is the local
-                // player is treated as our attacker for combat-state
-                // purposes only (still no fight registered, so no
-                // false match-tracking).
-                if (isDamageHitsplat && hasPlayerAttacker(localPlayer))
+                // damage from spawning false PvP fights). Any other Player
+                // whose getInteracting() is the local player counts as our
+                // attacker for combat-state purposes only.
+                if (isDamage && hasAttacker(localPlayer))
                 {
-                    lastInboundPvpDamageMs = System.currentTimeMillis();
+                    inboundHitMs = currentTimeMillis();
                 }
-                opponentName = resolveInboundAttacker(localPlayer);
-                if (opponentName != null)
-                {
-                    if (isDamageHitsplat) startNow = true;
-                }
+                opponentName = findAttacker(localPlayer);
+                startNow = opponentName != null && isDamage;
             }
             else
             {
                 // Hitsplat on another player (outbound)
-                if (hitPlayerName == null) return;
+                if (hitName == null) return;
 
                 // If this is OUR damage (DAMAGE_ME type), this player is definitely our opponent
                 // Don't rely on getInteracting() which can be unreliable in chaotic multi-combat
-                if (isOurDamage && isDamageHitsplat)
+                if (isOurDamage && isDamage)
                 {
-                    opponentName = hitPlayerName;
+                    opponentName = hitName;
                     startNow = true;
                 }
                 else
                 {
-                    // For non-damage hitsplats or other players' damage, use targeting checks
-                    boolean isActiveOpponent = activeFights.containsKey(hitPlayerName);
-                    Player interacting = (Player) localPlayer.getInteracting();
-                    boolean isCurrentTarget = interacting != null && interacting == hitPlayer;
-                    Player theirTarget = (Player) hitPlayer.getInteracting();
-                    boolean isTargetingUs = theirTarget != null && theirTarget == localPlayer;
+                    // For non-damage hitsplats or other players' damage, use targeting checks.
+                    // All three are read, and the casts stay: a non-player target throws
+                    // here and skips the rest of this hitsplat, as it always has.
+                    boolean isActiveOpponent = activeFights.containsKey(hitName);
+                    boolean isTarget = (Player) localPlayer.getInteracting() == hitPlayer;
+                    boolean targetsUs = (Player) hitPlayer.getInteracting() == localPlayer;
 
-                    if (isActiveOpponent || isCurrentTarget || isTargetingUs)
+                    if (isActiveOpponent || isTarget || targetsUs)
                     {
-                        opponentName = hitPlayerName;
+                        opponentName = hitName;
                     }
                 }
             }
 
             // Handle fight start/continuation
-            boolean validOpp = (opponentName != null && isPlayerOpponent(opponentName));
-            if (startNow && opponentName != null && validOpp)
+            boolean validOpp = (opponentName != null && isOpponent(opponentName));
+            if (startNow && validOpp)
             {
                 int tickNow = client.getTickCount();
 
                 if (opponentName.equals(localPlayer.getName())) return;
-                if (suppressFightStartTicks > 0) return;
-                if (perOpponentSuppressUntilTicks.containsKey(opponentName)) return;
+                if (muteTicks > 0) return;
+                if (oppMuteUntil.containsKey(opponentName)) return;
 
                 // Check if THIS opponent's fight is stale (no activity for 16+ ticks)
                 // If stale, remove only this opponent's fight entry so a fresh one is created
                 FightEntry existingFight = activeFights.get(opponentName);
-                if (existingFight != null && hitPlayer != localPlayer && existingFight.isStale(tickNow, OUT_OF_COMBAT_TICKS))
+                if (existingFight != null && hitPlayer != localPlayer && existingFight.isStale(tickNow, IDLE_TICKS))
                 {
-                    // log.debug("[FightStale] Clearing stale fight for {} (lastTick={} currentTick={} gap={})", 
-                    //     opponentName, existingFight.lastActivityTick, tickNow, 
-                    //     tickNow - existingFight.lastActivityTick);
                     activeFights.remove(opponentName);
-                    existingFight = null;
                 }
 
                 touchFight(opponentName);
-                
-                boolean localPlayerInMulti = client.getVarbitValue(Varbits.MULTICOMBAT_AREA) == 1;
-                if (localPlayerInMulti) {
-                    FightEntry fe = activeFights.get(opponentName);
-                    if (fe != null) {
-                        fe.markMultiIfNeeded(true);
-                    }
-                }
-                
-                // if (isNewFight)
-                // {
-                //     log.debug("[FightStart] NEW fight with opponent={}", opponentName);
-                // }
             }
 
             // Add the damage to per-fight tracking in FightEntry
@@ -728,59 +538,32 @@ public class FightMonitor
                 if (fe != null)
                 {
                     int currentTick = client.getTickCount();
-                    fe.markFfaPortalIfNeeded(insideFfaPortal);
-                    fe.markBountyHunterIfNeeded(insideBountyHunter);
-                    
+                    fe.mark(false, insideFfaPortal, insideBounty);
+
                     // Update combat timestamps for "hide rank out of combat" feature
                     if (rankOverlay != null)
                     {
                         rankOverlay.updateSelfCombatTime();
-                        rankOverlay.updatePlayerCombatTime(opponentName);
                     }
-                    
+
                     if (hitPlayer == localPlayer)
                     {
                         // Damage received from opponent
-                        fe.addDamageReceived(amt, currentTick);
-                        // log.debug("[DmgTrack] RECEIVED {} from {} (total received: {})", 
-                        //     amt, opponentName, fe.damageReceived.get());
+                        fe.addReceived(amt, currentTick);
                     }
                     else if (isOurDamage)
                     {
                         // Count damage dealt if it's OUR damage (isMine=true OR type=DAMAGE_ME)
-                        fe.addDamageDealt(amt, currentTick);
-                        // log.debug("[DmgTrack] DEALT {} to {} (total dealt: {}) [isMine={} type={}]", 
-                        //     amt, opponentName, fe.damageDealt.get(), isMine, hitsplatTypeName);
+                        fe.addDealt(amt, currentTick);
                     }
-                    // else
-                    // {
-                    //     // Not our damage - log why we're NOT counting it
-                    //     log.debug("[DmgTrack] SKIPPED {} on {} - not our damage (isMine={} type={})", 
-                    //         amt, opponentName, isMine, hitsplatTypeName);
-                    // }
                 }
-                // else
-                // {
-                //     // No FightEntry yet
-                //     log.debug("[DmgTrack] NO_ENTRY {} on {} - FightEntry doesn't exist yet", 
-                //         amt, hitPlayerName);
-                // }
             }
-            // else if (amt > 0 && opponentName == null)
-            // {
-            //     // Hitsplat on player but no opponent resolved
-            //     log.debug("[DmgTrack] NO_OPPONENT {} on {} - couldn't resolve as opponent", 
-            //         amt, hitPlayerName);
-            // }
 
             // Recompute the cached in-combat flag — this hitsplat
             // path is the primary "false→true" transition source
-            // (inbound damage seeds {@link #lastInboundPvpDamageMs};
-            // outbound damage seeds {@link #activeFights}). The
-            // recompute is a no-op when no signal changed (e.g. an
-            // NPC hitsplat that bailed early), so it's free in
-            // practice.
-            updateInCombatFlag();
+            // (inbound damage seeds {@link #inboundHitMs};
+            // outbound damage seeds {@link #activeFights}).
+            syncInCombat();
         }
         catch (Exception e)
         {
@@ -788,9 +571,8 @@ public class FightMonitor
         }
     }
 
-    public void handleActorDeath(ActorDeath event)
+    public void handleDeath(ActorDeath event)
     {
-        long t0 = System.nanoTime();
         try
         {
             if (!(event.getActor() instanceof Player)) return;
@@ -800,22 +582,21 @@ public class FightMonitor
             if (player == localPlayer)
             {
                 String killer = findKillerByDamage();
-                
-                if (killer == null) killer = findActualKiller(localPlayer);
-                if (killer == null) killer = opponent;
-                if (killer == null) killer = mostRecentActiveOpponent();
+
+                if (killer == null) killer = findKiller(localPlayer);
+                if (killer == null) killer = recentOpp();
 
                 if (killer != null)
                 {
                     endFightFor(killer, "loss");
                 }
-                
+
                 for (String remaining : new ArrayList<>(activeFights.keySet()))
                 {
-                    clearFightFor(remaining);
+                    clearFight(remaining);
                 }
-                
-                resetFightState();
+
+                resetFight();
             }
             else
             {
@@ -832,15 +613,6 @@ public class FightMonitor
         }
         catch (Exception e)
         {
-            log.debug("[Death] Exception in handleActorDeath: {}", e.getMessage(), e);
-        }
-        finally
-        {
-            long elapsed = (System.nanoTime() - t0) / 1_000_000;
-            if (elapsed > 5)
-            {
-                log.debug("[Death][PERF] handleActorDeath took {}ms (>5ms threshold)", elapsed);
-            }
         }
     }
 
@@ -848,120 +620,90 @@ public class FightMonitor
     {
         FightEntry fe = activeFights.get(opponentName);
         if (fe == null || fe.finalized) return;
-        
-        // Log final damage totals before finalizing
-        // log.debug("[FightEnd] opponent={} result={} FINAL_DMG_DEALT={} FINAL_DMG_RECEIVED={}", 
-        //     opponentName, result, fe.damageDealt.get(), fe.damageReceived.get());
-        
+
         fe.finalized = true;
         finalizeFight(opponentName, result, fe);
-        clearFightFor(opponentName);  // Use targeted clear instead of resetFightState
+        clearFight(opponentName);  // Use targeted clear instead of resetFight
 
         // Release the popup-suppression gate the moment the match is
-        // submitted, instead of waiting up to {@link #COMBAT_WINDOW_MS}
-        // for the lingering {@link #lastInboundPvpDamageMs} from the
-        // just-finished fight to age out (user spec 2026-05-25:
-        // "right after a match submission or when combat ends and
-        // the match is discarded"). Multi-opponent guard: stays
+        // submitted, instead of waiting up to {@link #COMBAT_MS}
+        // for the lingering {@link #inboundHitMs} from the
+        // just-finished fight to age out (user spec 2026-05-25). Stays
         // engaged while any other {@code activeFights} entry remains
-        // OR a fresh player attacker is interacting-with the local
-        // player. See
-        // {@link FightMonitorCombatWindowTest#shouldClearInboundSignalAfterSubmission_singlesKillNoAttacker_returnsTrue}
-        // and the multi/attacker companion tests for the contract.
-        Player local = (client != null) ? client.getLocalPlayer() : null;
-        boolean hasOtherActiveFights = !activeFights.isEmpty();
-        boolean hasCurrentAttacker = (local != null) && hasPlayerAttacker(local);
-        if (shouldClearInboundSignalAfterSubmission(hasOtherActiveFights, hasCurrentAttacker))
+        // OR a fresh player attacker is interacting-with the local player.
+        Player local = client.getLocalPlayer();
+        if (shouldClear(!activeFights.isEmpty(), local != null && hasAttacker(local)))
         {
-            lastInboundPvpDamageMs = 0L;
+            inboundHitMs = 0L;
         }
-        // Final recompute after all the kill-path mutations
-        // (clearFightFor above already triggered one, but the
-        // conditional inbound clear here can additionally flip the
-        // flag in the singles-no-attacker case where activeFights
-        // emptied AND inbound just zeroed in the same call).
-        updateInCombatFlag();
+        // Final recompute after all the kill-path mutations.
+        syncInCombat();
     }
 
-    /** Pure decision helper: should {@link #lastInboundPvpDamageMs}
+    /** Pure decision helper: should {@link #inboundHitMs}
      *  be cleared after {@link #endFightFor} finalizes a fight?
      *
      *  <p>Clear iff BOTH:
      *  <ul>
-     *    <li>{@code hasOtherActiveFights} is {@code false} — no
+     *    <li>{@code othersActive} is {@code false} — no
      *        multi-opponent FightEntry still in
      *        {@link #activeFights}. In multi the gate must stay
-     *        engaged until ALL multi-opponents are cleared (user
-     *        spec 2026-05-25: "they can't be in combat with anyone
-     *        since they may be in combat with multiple people").</li>
-     *    <li>{@code hasCurrentAttacker} is {@code false} — no Player
+     *        engaged until ALL multi-opponents are cleared.</li>
+     *    <li>{@code beingHit} is {@code false} — no Player
      *        on the scene whose {@code getInteracting()} is the local
-     *        player. Defends against the singles-with-fresh-attacker
-     *        flicker case: opp1 dies and the gate would briefly read
-     *        "out of combat" before opp2's first hitsplat re-seeds
-     *        {@code lastInboundPvpDamageMs}; that one-frame
-     *        un-suppression would surface a partial popup paint.</li>
+     *        player (the singles-with-fresh-attacker flicker case).</li>
      *  </ul>
      *
      *  <p>Extracted as a static helper so
      *  {@code FightMonitorCombatWindowTest} can pin the truth table
-     *  without instantiating FightMonitor (which has nine injected
-     *  dependencies). */
-    static boolean shouldClearInboundSignalAfterSubmission(boolean hasOtherActiveFights,
-                                                           boolean hasCurrentAttacker)
+     *  without instantiating FightMonitor. */
+    static boolean shouldClear(boolean othersActive,
+                                                           boolean beingHit)
     {
-        return !hasOtherActiveFights && !hasCurrentAttacker;
+        return !othersActive && !beingHit;
     }
 
-    private volatile boolean insideFfaPortal = false;
+    @Getter private volatile boolean insideFfaPortal;
 
-    public boolean isInsideFfaPortal()
+    static boolean isInFfa(WorldPoint wp)
     {
-        return insideFfaPortal;
+        return wp != null && PvpConsts.isFfaArea(wp.getX(), wp.getY());
     }
 
-    static boolean isInFfaPortal(WorldPoint wp)
+    private volatile boolean insideBounty;
+
+    static boolean isInBounty(WorldPoint wp)
     {
-        return wp != null && PvPLeaderboardConstants.isInFfaPortalArea(wp.getX(), wp.getY());
+        return wp != null && PvpConsts.isBountyArea(wp.getX(), wp.getY());
     }
 
-    private void updateFfaPortalState()
+    /** The local player's world tile ({@link WorldPoint#fromLocalInstance}: the
+     *  template tile in an instance), or {@code null} without a player or location. */
+    private WorldPoint selfPoint()
     {
-        boolean inside = false;
+        Player lp = client.getLocalPlayer();
+        LocalPoint lpnt = lp == null ? null : lp.getLocalLocation();
+        return lpnt == null ? null : WorldPoint.fromLocalInstance(client, lpnt);
+    }
+
+    /** Refresh the FFA portal and Bounty Hunter flags from one read of the
+     *  player's tile; anything thrown reads as outside both. */
+    private void updateAreaFlags()
+    {
+        boolean ffaPortal = false;
+        boolean bountyHunter = false;
         try
         {
-            Player lp = client == null ? null : client.getLocalPlayer();
-            LocalPoint lpnt = lp == null ? null : lp.getLocalLocation();
-            inside = lpnt != null && isInFfaPortal(WorldPoint.fromLocalInstance(client, lpnt));
+            WorldPoint wp = selfPoint();
+            ffaPortal = isInFfa(wp);
+            bountyHunter = isInBounty(wp);
         }
         catch (Exception ignore)
         {
             // Defensive: presence tracking must never break the tick loop.
         }
-        insideFfaPortal = inside;
-    }
-
-    private volatile boolean insideBountyHunter = false;
-
-    static boolean isInBountyHunter(WorldPoint wp)
-    {
-        return wp != null && PvPLeaderboardConstants.isInBountyHunterArea(wp.getX(), wp.getY());
-    }
-
-    private void updateBountyHunterState()
-    {
-        boolean inside = false;
-        try
-        {
-            Player lp = client == null ? null : client.getLocalPlayer();
-            LocalPoint lpnt = lp == null ? null : lp.getLocalLocation();
-            inside = lpnt != null && isInBountyHunter(WorldPoint.fromLocalInstance(client, lpnt));
-        }
-        catch (Exception ignore)
-        {
-            // Defensive: presence tracking must never break the tick loop.
-        }
-        insideBountyHunter = inside;
+        insideFfaPortal = ffaPortal;
+        insideBounty = bountyHunter;
     }
 
     // ------------------------------------------------------------------
@@ -969,70 +711,61 @@ public class FightMonitor
     // ------------------------------------------------------------------
 
     /** Pure recency predicate for LMS-arena presence — mirrors
-     *  {@link #isWithinCombatWindow}. A never-set ({@code <= 0})
+     *  {@link #isInWindow}. A never-set ({@code <= 0})
      *  timestamp reads as "not in area". Negative elapsed (clock skew)
      *  reads as in-area (safer side). */
-    static boolean isWithinLmsAreaWindow(long lastInLmsAreaMs, long nowMs)
+    static boolean isLmsRecent(long lmsSeenMs, long nowMs)
     {
-        if (lastInLmsAreaMs <= 0L) return false;
-        long elapsed = nowMs - lastInLmsAreaMs;
+        if (lmsSeenMs <= 0L) return false;
+        long elapsed = nowMs - lmsSeenMs;
         if (elapsed < 0L) return true;
-        return elapsed <= LMS_AREA_RECENCY_MS;
+        return elapsed <= LMS_AREA_MS;
     }
 
     /** Pure freeze-log gate: submit a doubled loss iff the player is on
      *  an LMS world, was inside an LMS arena recently, and an eligible
      *  in-progress fight exists. Extracted static so the truth table is
      *  unit-testable without the injected-client graph (mirrors
-     *  {@link #isInCombatDecision} / {@link #shouldClearInboundSignalAfterSubmission}). */
-    static boolean shouldFreezeLogSubmit(boolean lmsWorld,
-                                         boolean inLmsAreaRecently,
-                                         boolean hasEligibleFight)
+     *  {@link #isInCombatDecision} / {@link #shouldClear}). */
+    static boolean shouldFreeze(boolean lmsWorld,
+                                         boolean inLmsLately,
+                                         boolean hasEligible)
     {
-        return lmsWorld && inLmsAreaRecently && hasEligibleFight;
+        return lmsWorld && inLmsLately && hasEligible;
     }
 
     /** Normalise the caller-supplied reason to one of the two known
      *  wire values. Anything other than {@code "plugin_disabled"}
      *  (including null / blank) collapses to {@code "logout"} — the
      *  benign, no-ban variant. */
-    static String normalizeFreezeReason(String reason)
+    static String cleanReason(String reason)
     {
         return "plugin_disabled".equals(reason) ? "plugin_disabled" : "logout";
-    }
-
-    private boolean isInLmsAreaRecently(long nowMs)
-    {
-        return isWithinLmsAreaWindow(lastInLmsAreaMs, nowMs);
     }
 
     /** Refresh the cached LMS-arena presence + self name from the live
      *  client. No-op unless the player is on an LMS world, inside an
      *  instanced region, and physically within an {@link
-     *  PvPLeaderboardConstants#LMS_AREAS} rectangle (template coords via
+     *  PvpConsts#LMS_AREAS} rectangle (template coords via
      *  {@link WorldPoint#fromLocalInstance}). */
-    private void updateLmsAreaState()
+    private void updateLms()
     {
         try
         {
-            if (client == null) return;
             Player lp = client.getLocalPlayer();
             if (lp == null) return;
             String name = lp.getName();
             if (name != null && !name.trim().isEmpty())
             {
-                lastKnownSelfName = name;
+                lastSelfName = name;
             }
             int world = client.getWorld();
-            if (!PvPLeaderboardConstants.isLmsWorld(world)) return;
+            if (!PvpConsts.isLmsWorld(world)) return;
             if (!client.isInInstancedRegion()) return;
-            LocalPoint lpnt = lp.getLocalLocation();
-            if (lpnt == null) return;
-            WorldPoint wp = WorldPoint.fromLocalInstance(client, lpnt);
-            if (wp == null) return;
-            if (PvPLeaderboardConstants.isInLmsArea(wp.getX(), wp.getY()))
+            WorldPoint wp = selfPoint();
+            if (wp != null && PvpConsts.isInLmsArea(wp.getX(), wp.getY()))
             {
-                lastInLmsAreaMs = System.currentTimeMillis();
+                lmsSeenMs = currentTimeMillis();
                 lastLmsWorld = world;
             }
         }
@@ -1045,20 +778,20 @@ public class FightMonitor
     /** Pick the opponent for a freeze-log loss: the most-recently-active
      *  non-finalized fight that exchanged damage and is still within the
      *  extended LMS retention window. Returns null when none qualifies. */
-    private String findFreezeLogOpponent(long nowMs)
+    private String findLmsOpp(long nowMs)
     {
         String best = null;
         long bestActivity = -1L;
         for (Map.Entry<String, FightEntry> e : activeFights.entrySet())
         {
             FightEntry fe = e.getValue();
-            if (fe == null || fe.finalized) continue;
-            boolean damageExchanged = fe.damageDealt.get() > 0 || fe.damageReceived.get() > 0;
-            if (!damageExchanged) continue;
-            if (nowMs - fe.lastActivityMs > LMS_FREEZE_RETENTION_MS) continue;
-            if (fe.lastActivityMs > bestActivity)
+            if (fe.finalized) continue;
+            boolean damageTraded = fe.damageDealt.get() > 0 || fe.damageReceived.get() > 0;
+            if (!damageTraded) continue;
+            if (nowMs - fe.activityMs > LMS_KEEP_MS) continue;
+            if (fe.activityMs > bestActivity)
             {
-                bestActivity = fe.lastActivityMs;
+                bestActivity = fe.activityMs;
                 best = e.getKey();
             }
         }
@@ -1069,7 +802,7 @@ public class FightMonitor
      * Detect and submit an LMS freeze-log. Called from the plugin's
      * {@code LOGIN_SCREEN} (reason {@code "logout"}) and {@code shutDown}
      * (reason {@code "plugin_disabled"}) paths <b>before</b>
-     * {@link #resetFightState}. When an eligible in-progress fight is
+     * {@link #resetFight}. When an eligible in-progress fight is
      * found in an LMS arena, it is finalized as a {@code loss} carrying
      * the {@code lms_freeze_logout} flag (backend doubles the MMR loss).
      * For {@code plugin_disabled} it additionally persists a
@@ -1083,15 +816,15 @@ public class FightMonitor
      * @return the submission future when a freeze-log was submitted, or
      *         {@code null} when nothing qualified.
      */
-    public CompletableFuture<Boolean> handleLogoutFreezeLog(String reason)
+    public CompletableFuture<Boolean> handleFreeze(String reason)
     {
         try
         {
-            long now = System.currentTimeMillis();
-            boolean lmsWorld = PvPLeaderboardConstants.isLmsWorld(lastLmsWorld);
-            boolean inArea = isInLmsAreaRecently(now);
-            String oppName = (lmsWorld && inArea) ? findFreezeLogOpponent(now) : null;
-            if (!shouldFreezeLogSubmit(lmsWorld, inArea, oppName != null))
+            long now = currentTimeMillis();
+            boolean lmsWorld = PvpConsts.isLmsWorld(lastLmsWorld);
+            boolean inArea = isLmsRecent(lmsSeenMs, now);
+            String oppName = (lmsWorld && inArea) ? findLmsOpp(now) : null;
+            if (!shouldFreeze(lmsWorld, inArea, oppName != null))
             {
                 return null;
             }
@@ -1100,38 +833,31 @@ public class FightMonitor
             // Guard against double-submit across LOGIN_SCREEN + shutDown.
             fe.finalized = true;
 
-            String normReason = normalizeFreezeReason(reason);
-            log.debug("[LMSFreeze] submitting freeze-log loss opponent={} world={} reason={}",
-                oppName, lastLmsWorld, normReason);
+            String normReason = cleanReason(reason);
             CompletableFuture<Boolean> future =
-                finalizeFreezeLogFight(oppName, lastLmsWorld, fe, normReason);
+                finalizeLms(oppName, lastLmsWorld, fe, normReason);
             if ("plugin_disabled".equals(normReason))
             {
-                markPendingDisableWarning();
+                markWarning();
             }
             return future;
         }
         catch (Exception e)
         {
-            log.debug("[LMSFreeze] handleLogoutFreezeLog failed: {}", e.getMessage());
             return null;
         }
     }
 
     /** Persist the "show ban warning on next login" marker. Written to
      *  RuneLite config so it survives the plugin being toggled off. */
-    private void markPendingDisableWarning()
+    private void markWarning()
     {
         try
         {
-            if (configManager != null)
-            {
-                configManager.setConfiguration(CONFIG_GROUP, LMS_PENDING_WARNING_KEY, "true");
-            }
+            configManager.setConfiguration(CONFIG_GROUP, LMS_WARN_KEY, "true");
         }
         catch (Exception e)
         {
-            log.debug("[LMSFreeze] failed to persist pending warning: {}", e.getMessage());
         }
     }
 
@@ -1139,43 +865,34 @@ public class FightMonitor
      *  marker (opponent id + the fight_end_ts the loss was submitted
      *  with). Written to RuneLite config so it survives the plugin being
      *  toggled off / the client restarting. */
-    private void markPendingFreezeLogMmr(String opponentName, long endTs)
+    private void markLmsMmr(String opponentName, long endTs)
     {
         try
         {
-            if (configManager != null && opponentName != null)
-            {
-                configManager.setConfiguration(CONFIG_GROUP, LMS_PENDING_MMR_OPPONENT_KEY, opponentName);
-                configManager.setConfiguration(CONFIG_GROUP, LMS_PENDING_MMR_ENDTS_KEY, String.valueOf(endTs));
-            }
+            configManager.setConfiguration(CONFIG_GROUP, LMS_OPP_KEY, opponentName);
+            configManager.setConfiguration(CONFIG_GROUP, LMS_END_KEY, String.valueOf(endTs));
         }
         catch (Exception e)
         {
-            log.debug("[LMSFreeze] failed to persist pending MMR marker: {}", e.getMessage());
         }
     }
 
     /** Clear the pending freeze-log MMR marker (both keys). */
-    private void clearPendingFreezeLogMmr()
+    private void clearLmsMmr()
     {
         try
         {
-            if (configManager != null)
-            {
-                configManager.unsetConfiguration(CONFIG_GROUP, LMS_PENDING_MMR_OPPONENT_KEY);
-                configManager.unsetConfiguration(CONFIG_GROUP, LMS_PENDING_MMR_ENDTS_KEY);
-            }
+            configManager.unsetConfiguration(CONFIG_GROUP, LMS_OPP_KEY);
+            configManager.unsetConfiguration(CONFIG_GROUP, LMS_END_KEY);
         }
         catch (Exception e)
         {
-            log.debug("[LMSFreeze] failed to clear pending MMR marker: {}", e.getMessage());
         }
     }
 
     /**
      * Surface the doubled MMR loss from a prior-session freeze-log the
-     * next time the player logs in. If the pending marker is present it is
-     * cleared immediately (show-once, even across repeated relogs) and the
+     * next time the player logs in. If the pending marker is present the
      * <em>same</em> match-history delta fetch the normal post-fight path
      * uses is scheduled — so the player sees the identical {@code -XX.XX
      * MMR} overlay a real loss produces, just triggered on login instead
@@ -1183,17 +900,16 @@ public class FightMonitor
      *
      * <p>The fetch is deferred a few seconds so client identity (account
      * SHA) and the local player name resolve after login before the API
-     * call. The freeze-log match was submitted on the prior session, so
-     * the backend has long since processed it; the retry schedule inside
-     * {@link #fetchMmrDeltaFromMatchHistory} absorbs any residual lag.
+     * call. The marker is cleared only after the delta is displayed (the
+     * onDisplayed hook), so a bad-connection login where the fetch never
+     * lands leaves it intact to retry on the next login.
      */
-    public void showPendingFreezeLogMmrNotification()
+    public void showLmsMmr()
     {
         try
         {
-            if (configManager == null) return;
-            String opponent = configManager.getConfiguration(CONFIG_GROUP, LMS_PENDING_MMR_OPPONENT_KEY);
-            String endTsStr = configManager.getConfiguration(CONFIG_GROUP, LMS_PENDING_MMR_ENDTS_KEY);
+            String opponent = configManager.getConfiguration(CONFIG_GROUP, LMS_OPP_KEY);
+            String endTsStr = configManager.getConfiguration(CONFIG_GROUP, LMS_END_KEY);
             if (opponent == null || opponent.trim().isEmpty()
                 || endTsStr == null || endTsStr.trim().isEmpty())
             {
@@ -1208,72 +924,66 @@ public class FightMonitor
             catch (NumberFormatException nfe)
             {
                 // Corrupt marker — drop it so it can't wedge future logins.
-                clearPendingFreezeLogMmr();
+                clearLmsMmr();
                 return;
             }
 
             // In-session guard: startUp's logged-in branch AND the
             // LOGGED_IN event both call this, and a world hop re-fires
             // LOGGED_IN — schedule the replay at most once per login. The
-            // guard is reset on logout (resetFightState), so a genuine
+            // guard is reset on logout (resetFight), so a genuine
             // relog re-attempts if the prior login's fetch failed.
-            if (freezeLogMmrReplayInFlight)
+            if (mmrReplaying)
             {
                 return;
             }
-            freezeLogMmrReplayInFlight = true;
+            mmrReplaying = true;
 
-            // NOTE: the marker is deliberately NOT cleared here. It is
-            // cleared only after the delta is successfully displayed (the
-            // onDisplayed hook below), so a bad-connection login where the
-            // fetch never lands leaves the marker intact to retry on the
-            // next login instead of silently losing the notification.
-            final String selfName = lastKnownSelfName != null ? lastKnownSelfName : getLocalPlayerName();
-            final String targetOpponent = opponent;
-            final long submittedEndTs = endTs;
-            log.debug("[LMSFreeze] pending freeze-log MMR marker found opponent={} endTs={} - scheduling delta fetch",
-                targetOpponent, submittedEndTs);
+            String selfName = lastSelfName != null ? lastSelfName : getLocalName();
             scheduler.schedule(
-                () -> fetchMmrDeltaFromMatchHistory(selfName, targetOpponent, null, false, 0, submittedEndTs,
-                    this::clearPendingFreezeLogMmr),
-                5L, java.util.concurrent.TimeUnit.SECONDS);
+                () -> fetchDelta(selfName, opponent, false, 0, endTs, this::clearLmsMmr, null),
+                5L, SECONDS);
         }
         catch (Exception e)
         {
-            log.debug("[LMSFreeze] showPendingFreezeLogMmrNotification failed: {}", e.getMessage());
         }
+    }
+
+    /** The fight as the backend records it; the caller adds the client id and any flags. */
+    private static MatchResult.MatchResultBuilder matchOf(String self, String opponent, String result, int world, FightEntry fe,
+        long endTs, String startBook, String endSpellbook)
+    {
+        return MatchResult.builder()
+            .playerId(self)
+            .opponentId(opponent)
+            .result(result)
+            .world(world)
+            .fightStartTs(fe.startTs)
+            .fightEndTs(endTs)
+            .fightStartSpellbook(startBook)
+            .fightEndSpellbook(endSpellbook)
+            .wasInMulti(fe.wasInMulti)
+            .damageToOpponent(fe.damageDealt.get());
     }
 
     /** Build + submit the freeze-log loss using cached values (the live
      *  player object is already gone at logout / shutdown). Spellbook is
      *  best-effort from the fight's start value; the backend penalty is
      *  bucket-independent. */
-    private CompletableFuture<Boolean> finalizeFreezeLogFight(String opponentName,
+    private CompletableFuture<Boolean> finalizeLms(String opponentName,
                                                               int world,
                                                               FightEntry fe,
                                                               String reason)
     {
-        String selfName = lastKnownSelfName;
+        String selfName = lastSelfName;
         if (selfName == null)
         {
-            selfName = getLocalPlayerName();
+            selfName = getLocalName();
         }
-        long endTs = System.currentTimeMillis() / 1000;
-        long startTs = fe.startTs > 0 ? fe.startTs : endTs - 60;
-        String sb = getSpellbookName(fe.startSpellbook);
-        MatchResult match = MatchResult.builder()
-            .playerId(selfName)
-            .opponentId(opponentName)
-            .result("loss")
-            .world(world)
-            .fightStartTs(startTs)
-            .fightEndTs(endTs)
-            .fightStartSpellbook(sb)
-            .fightEndSpellbook(sb)
-            .wasInMulti(fe.wasInMulti)
-            .damageToOpponent(fe.damageDealt.get())
-            .clientUniqueId(clientIdentityService != null
-                ? clientIdentityService.getClientUniqueId() : null)
+        long endTs = currentTimeMillis() / 1000;
+        String sb = getBookName(fe.startBook);
+        MatchResult match = matchOf(selfName, opponentName, "loss", world, fe, endTs, sb, sb)
+            .clientUniqueId(identitySvc.getClientUniqueId())
             .lmsFreezeLogout(true)
             .lmsFreezeReason(reason)
             .build();
@@ -1281,234 +991,107 @@ public class FightMonitor
         // the player is logging out / disabling the plugin, so this session
         // can't poll for the resulting delta. On the next login we replay
         // the normal post-fight fetch keyed on this opponent + fight_end_ts.
-        markPendingFreezeLogMmr(opponentName, endTs);
-        return matchResultService.submitMatchResult(match);
-    }
-
-    private void finalizeFight(String opponentName, String result, FightEntry entry)
-    {
-        long t0 = System.nanoTime();
-        if (entry == null) return;
-        
-        final int currentSpellbook = client.getVarbitValue(Varbits.SPELLBOOK);
-        final int world = client.getWorld();
-        final long now = System.currentTimeMillis() / 1000;
-        final String selfName = getLocalPlayerName();
-
-        // Ensure valid timestamps - never send 0
-        // If start wasn't captured, set it to 60 seconds before end
-        // If end is somehow 0, set it to 60 seconds after start
-        long startTs = entry.startTs;
-        long endTs = now;
-        
-        if (startTs <= 0 && endTs > 0)
-        {
-            startTs = endTs - 60;
-            log.debug("[MatchSubmit] Start timestamp missing, using endTs-60: startTs={}", startTs);
-        }
-        else if (endTs <= 0 && startTs > 0)
-        {
-            endTs = startTs + 60;
-            log.debug("[MatchSubmit] End timestamp missing, using startTs+60: endTs={}", endTs);
-        }
-        else if (startTs <= 0 && endTs <= 0)
-        {
-            // Both missing - use current time and 60 seconds ago
-            endTs = System.currentTimeMillis() / 1000;
-            startTs = endTs - 60;
-            log.debug("[MatchSubmit] Both timestamps missing, using now and now-60: startTs={} endTs={}", startTs, endTs);
-        }
-        
-        final long finalStartTs = startTs;
-        final long finalEndTs = endTs;
-        final int startSb = entry.startSpellbook;
-        final boolean wasMulti = entry.wasInMulti;
-        entry.markFfaPortalIfNeeded(insideFfaPortal);
-        final boolean ffaPortal = entry.wasInFfaPortal;
-        entry.markBountyHunterIfNeeded(insideBountyHunter);
-        final boolean bountyHunter = entry.wasInBountyHunter;
-
-        final String resolvedOpponent = (opponentName != null) ? opponentName : "Unknown";
-        final long dmgOut = entry.damageDealt.get();  // Read from FightEntry
-
-        // Determine the bucket this fight will be classified as (server-side logic)
-        final String startSpellbookName = getSpellbookName(startSb);
-        final String endSpellbookName = getSpellbookName(currentSpellbook);
-        final String fightBucket = determineBucket(world, wasMulti, startSpellbookName, endSpellbookName, bountyHunter);
-        
-        log.debug("[MatchSubmit] Determined bucket: {} (world={} multi={} startSb={} endSb={} bountyHunter={})",
-            fightBucket, world, wasMulti, startSpellbookName, endSpellbookName, bountyHunter);
-        recordFightBucket(fightBucket);
-        final java.util.function.Consumer<JsonObject> streakOutcome =
-            streakResolver(tournamentBucketPin.getAsBoolean() ? "tournament" : fightBucket, result);
-
-        // Determine which bucket to use for API calls
-        // If auto-switch is enabled, use the fight bucket; otherwise use the user's manual selection
-        final String apiRefreshBucket;
-        boolean showBucketInMmr = false;  // Show bucket label in MMR notification when bucket differs
-        
-        // Check if fight bucket differs from user's current selection
-        PvPLeaderboardConfig.RankBucket currentBucket = config.rankBucket();
-        // Plan 10 F.2: a running tournament pins the target to the Tournament bucket.
-        final boolean tournamentPinned = tournamentBucketPin.getAsBoolean();
-        PvPLeaderboardConfig.RankBucket fightBucketEnum = resolveAutoSwitchTarget(bucketStringToEnum(fightBucket), tournamentPinned);
-        boolean fightBucketDiffers = (fightBucketEnum != null && currentBucket != fightBucketEnum);
-        
-        // Auto-switch leaderboard if enabled - always switch to match fight style
-        if (config.autoSwitchBucket())
-        {
-            log.debug("[AutoSwitch] Check: fightBucket={} currentBucket={} newBucket={}", 
-                fightBucket, currentBucket, fightBucketEnum);
-            
-            if (fightBucketEnum != null)
-            {
-                if (fightBucketDiffers)
-                {
-                    log.debug("[AutoSwitch] Switching leaderboard from {} to {}", currentBucket, fightBucketEnum);
-                    // Defer config write off the game thread — setConfiguration triggers
-                    // config change listeners, panel rebuilds, and disk I/O synchronously
-                    final PvPLeaderboardConfig.RankBucket targetBucket = fightBucketEnum;
-                    scheduler.execute(() -> configManager.setConfiguration("PvPLeaderboard", "rankBucket", targetBucket.name()));
-                    showBucketInMmr = true;
-                }
-                else
-                {
-                    log.debug("[AutoSwitch] Already on correct leaderboard: {}", fightBucketEnum);
-                }
-            }
-            else
-            {
-                log.debug("[AutoSwitch] Could not map fightBucket '{}' to enum", fightBucket);
-            }
-            
-            // Use fight bucket for API refresh when auto-switch is enabled;
-            // a pinned tournament game is rated in the tournament bucket (Plan 10 A.3).
-            apiRefreshBucket = tournamentPinned ? "tournament" : fightBucket;
-        }
-        else
-        {
-            log.debug("[AutoSwitch] Disabled - keeping manual selection: {}", currentBucket);
-            // Use user's manual selection for API refresh
-            apiRefreshBucket = getConfigBucketKey();
-            
-            // Show bucket label if fight was in a different bucket than user's selection
-            // This informs the user which bucket the MMR change applies to
-            if (fightBucketDiffers)
-            {
-                showBucketInMmr = true;
-            }
-        }
-
-        // Async Submission — chain MMR fetch off the 202 response
-        final String finalApiRefreshBucket = apiRefreshBucket;
-        final boolean finalShowBucketInMmr = showBucketInMmr;
-        submitMatchAndFetchMmr(result, finalEndTs, selfName, resolvedOpponent, world, finalStartTs, startSb, currentSpellbook, wasMulti, dmgOut, finalApiRefreshBucket, finalShowBucketInMmr, ffaPortal, bountyHunter, streakOutcome);
-
-        // Tier refreshes for overlay (don't depend on match being processed)
-        scheduleTierRefreshes(resolvedOpponent, apiRefreshBucket);
-        
-        long elapsed = (System.nanoTime() - t0) / 1_000_000;
-        log.debug("[Death][PERF] finalizeFight took {}ms for opponent={} result={}", elapsed, opponentName, result);
-    }
-
-    private CompletableFuture<Boolean> submitMatchResult(String result, long fightEndTime, String playerId, String opponentId, int world,
-                                   long fightStartTs, int fightStartSpellbookLocal, int fightEndSpellbookLocal,
-                                   boolean wasInMultiLocal, long damageToOpponentLocal, boolean ffaPortalLocal,
-                                   boolean bountyHunterLocal)
-    {
-        MatchResult match = MatchResult.builder()
-                .playerId(playerId)
-                .opponentId(opponentId)
-                .result(result)
-                .world(world)
-                .fightStartTs(fightStartTs)
-                .fightEndTs(fightEndTime)
-                .fightStartSpellbook(getSpellbookName(fightStartSpellbookLocal))
-                .fightEndSpellbook(getSpellbookName(fightEndSpellbookLocal))
-                .wasInMulti(wasInMultiLocal)
-                .damageToOpponent(damageToOpponentLocal)
-                .clientUniqueId(clientIdentityService.getClientUniqueId())
-                .ffaPortal(ffaPortalLocal)
-                .bountyHunter(bountyHunterLocal)
-                .build();
-
-        log.debug("[MatchSubmit] Submitting: player={} opponent={} result={} world={} startTs={} endTs={} dmgOut={} multi={} ffaPortal={} bountyHunter={}",
-                playerId, opponentId, result, world, fightStartTs, fightEndTime, damageToOpponentLocal, wasInMultiLocal, ffaPortalLocal, bountyHunterLocal);
-
-        return matchResultService.submitMatchResult(match).thenApply(success -> {
-            if (success) {
-                log.debug("[MatchSubmit] SUCCESS: match submitted for player={} vs opponent={} result={}", playerId, opponentId, result);
-            } else {
-                log.debug("[MatchSubmit] FAILED: match submission failed for player={} vs opponent={} result={}", playerId, opponentId, result);
-            }
-            return success;
-        });
+        markLmsMmr(opponentName, endTs);
+        return resultSender.submitResult(match);
     }
 
     /**
-     * Submit the match, then chain the MMR delta fetch off the 202 response.
-     * This ensures the fetch always happens AFTER the server acknowledges the submission,
-     * regardless of scheduler congestion from other plugins.
+     * Submit the finished fight and, once the server has answered (or the
+     * submit failed), fetch its rating change. The match is built on the
+     * client thread; the client id is read and the submit made on the
+     * scheduler, so the fetch always follows the server's acknowledgement.
      */
-    private void submitMatchAndFetchMmr(String result, long endTs, String selfName, String opponent, int world,
-                                         long startTs, int startSb, int endSb, boolean wasMulti,
-                                         long dmgOut, String displayBucket, boolean showBucketInMmr,
-                                         boolean ffaPortal,
-                                         boolean bountyHunter,
-                                         java.util.function.Consumer<JsonObject> streakOutcome) {
-        log.debug("[PostFight] Submitting match and chaining MMR fetch for opponent={}", opponent);
+    private void finalizeFight(String opponentName, String result, FightEntry entry)
+    {
+        int endSb = client.getVarbitValue(Varbits.SPELLBOOK);
+        int world = client.getWorld();
+        long endTs = currentTimeMillis() / 1000;
+        String selfName = getLocalName();
+        entry.mark(false, insideFfaPortal, insideBounty);
+        boolean ffaPortal = entry.wasInFfa;
+        String startBook = getBookName(entry.startBook);
+        String endSpellbook = getBookName(endSb);
+        MatchResult.MatchResultBuilder match = matchOf(selfName, opponentName, result, world, entry, endTs, startBook, endSpellbook)
+            .ffaPortal(ffaPortal)
+            .bountyHunter(entry.wasInBounty);
 
-        CompletableFuture<Boolean> submissionFuture = CompletableFuture.supplyAsync(() -> {
-            try {
-                return submitMatchResult(result, endTs, selfName, opponent, world, startTs, startSb, endSb, wasMulti, dmgOut, ffaPortal, bountyHunter);
-            } catch (Exception e) {
-                log.debug("[MatchSubmit] EXCEPTION in async submission: {}", e.getMessage(), e);
+        // Determine the bucket this fight will be classified as (server-side logic)
+        RankBucket fb = determineBucket(world, entry.wasInMulti, startBook, endSpellbook, entry.wasInBounty);
+        String fightBucket = RankBucket.key(fb);
+        lastBucket = fb;
+        Consumer<JsonObject> streakOutcome =
+            streakResolver(tournamentBucketPin.getAsBoolean() ? "tournament" : fightBucket, result);
+
+        // Show the bucket label on the rating pop-up when the fight's bucket is
+        // not the one the leaderboard shows; with auto-switch on, switch to it.
+        RankBucket currentBucket = config.rankBucket();
+        // Plan 10 F.2: a running tournament pins the target to the Tournament bucket.
+        boolean isPinned = tournamentBucketPin.getAsBoolean();
+        RankBucket target = resolveAutoSwitchTarget(fb, isPinned);
+        boolean bucketInMmr = currentBucket != target;
+        String apiBucket;
+        if (config.autoSwitchBucket())
+        {
+            if (bucketInMmr)
+            {
+                // Defer config write off the game thread — setConfiguration triggers
+                // config change listeners, panel rebuilds, and disk I/O synchronously
+                scheduler.execute(() -> configManager.setConfiguration(CONFIG_GROUP, "rankBucket", target.name()));
+            }
+            else
+            {
+            }
+            // Use fight bucket for API refresh when auto-switch is enabled;
+            // a pinned tournament game is rated in the tournament bucket (Plan 10 A.3).
+            apiBucket = isPinned ? "tournament" : fightBucket;
+        }
+        else
+        {
+            apiBucket = RankBucket.key(config.rankBucket());
+        }
+
+        Runnable postFight = () -> fetchLater(selfName, opponentName, bucketInMmr, endTs, ffaPortal, streakOutcome);
+        CompletableFuture.supplyAsync(() -> {
+            try
+            {
+                return resultSender.submitResult(match.clientUniqueId(identitySvc.getClientUniqueId()).build());
+            }
+            catch (Exception e)
+            {
                 return CompletableFuture.completedFuture(false);
             }
-        }, scheduler).thenCompose(f -> f);
-
-        submissionFuture.thenAccept(success -> {
+        }, scheduler).thenCompose(f -> f).thenAccept(success -> {
             if (Boolean.TRUE.equals(success))
             {
                 scheduleLobbyGateRefresh();
             }
-            log.debug("[PostFight] Submission done (success={}) for opponent={}", success, opponent);
-            schedulePostFightFetch(selfName, opponent, displayBucket, showBucketInMmr, endTs, ffaPortal, streakOutcome);
+            postFight.run();
         }).exceptionally(ex -> {
-            log.debug("[PostFight] Submission future failed, scheduling fallback MMR fetch: {}", ex.getMessage());
-            schedulePostFightFetch(selfName, opponent, displayBucket, showBucketInMmr, endTs, ffaPortal, streakOutcome);
+            postFight.run();
             return null;
         });
+
+        // Tier refreshes for overlay (don't depend on match being processed)
+        refreshTiers(opponentName, apiBucket);
     }
 
-    private void schedulePostFightFetch(String selfName, String opponent, String displayBucket,
-                                        boolean showBucketInMmr, long endTs, boolean ffaPortal,
-                                        java.util.function.Consumer<JsonObject> streakOutcome)
+    private void fetchLater(String selfName, String opponent, boolean bucketInMmr, long endTs,
+                                        boolean ffaPortal, Consumer<JsonObject> streakOutcome)
     {
         boolean wanted = config.showMmrChangeNotification() || (streakSink != null
             && WinStreakOverlay.isShown(config.showKillStreakBox(), config.killStreakBoxInFfaPortal(), ffaPortal));
-        if (!wanted || opponent == null || selfName == null)
+        if (!wanted || selfName == null)
         {
             settleStreak(streakOutcome, null);
             return;
         }
-        log.debug("[PostFight] Scheduling the post-fight match fetch in 3s for opponent={}", opponent);
-        scheduler.schedule(() -> {
-            fetchMmrDeltaFromMatchHistory(selfName, opponent, displayBucket, showBucketInMmr, 0, endTs, null, streakOutcome);
-        }, 3L, java.util.concurrent.TimeUnit.SECONDS);
+        scheduler.schedule(() -> fetchDelta(selfName, opponent, bucketInMmr, 0, endTs, null, streakOutcome),
+            3L, SECONDS);
     }
 
-    private static void settleStreak(java.util.function.Consumer<JsonObject> streakOutcome, JsonObject row)
+    private static void settleStreak(Consumer<JsonObject> streakOutcome, JsonObject row)
     {
-        if (streakOutcome == null) return;
-        try
-        {
-            streakOutcome.accept(row);
-        }
-        catch (RuntimeException e)
-        {
-            log.debug("[Streak] outcome consumer threw: {}", e.getMessage());
-        }
+        if (streakOutcome != null) streakOutcome.accept(row);
     }
 
     /** Re-fetch the local player's cumulative_stats for the lobby
@@ -1516,214 +1099,136 @@ public class FightMonitor
      *  the backend has time to fold the new fight into /user. */
     private void scheduleLobbyGateRefresh()
     {
-        if (lobbyJoinGate == null) return;
         scheduler.schedule(() -> {
             try
             {
-                if (lobbyJoinGate.isLoggedIn())
+                if (profileGate.isLoggedIn())
                 {
-                    lobbyJoinGate.refresh();
+                    profileGate.refresh();
                 }
             }
             catch (Exception e)
             {
-                log.debug("[PostFight] Lobby gate refresh failed: {}", e.getMessage());
             }
-        }, 5L, java.util.concurrent.TimeUnit.SECONDS);
+        }, 5L, SECONDS);
     }
 
     /**
      * Refresh tier/rank display for self and opponent.
      * Runs 5s after fight end — independent of match submission.
      */
-    private void scheduleTierRefreshes(String opponentName, String displayBucket) {
+    private void refreshTiers(String opponentName, String displayBucket) {
         scheduler.schedule(() -> {
             try {
-                String selfName = getLocalPlayerName();
-                log.debug("[PostFight] Executing tier refresh: self={} opponent={} bucket={}", 
-                    selfName, opponentName, displayBucket);
-                
+                String selfName = getLocalName();
+
                 if (selfName != null) {
-                    fetchTierWithRetry(selfName, displayBucket, 3);
+                    retryTier(selfName, displayBucket, 3);
                 }
-                if (opponentName != null) {
-                    fetchTierWithRetry(opponentName, displayBucket, 3);
-                }
+                retryTier(opponentName, displayBucket, 3);
             } catch (Exception e) {
-                log.debug("[PostFight] Tier refresh exception: {}", e.getMessage());
             }
-        }, 5L, java.util.concurrent.TimeUnit.SECONDS);
+        }, 5L, SECONDS);
     }
 
-    private static final long[] MMR_RETRY_DELAYS = {5L, 5L};
+    /** Find this fight's row in the player's match history (the same opponent,
+     *  within 10 s of the submitted end) and pop its rating change. The row
+     *  goes to {@code onRow} (the streak hook) first; {@code onDisplayed} runs
+     *  after the pop-up. Not found, or a row that cannot be read: retry in 5 s,
+     *  at most twice, then settle {@code onRow} with no row. */
+    void fetchDelta(String selfName, String opponentName, boolean withBucket, int attempt,
+                                       long submitEndTs, Runnable onDisplayed, Consumer<JsonObject> onRow) {
+        Runnable retry = () -> {
+            if (attempt < 2) {
+                scheduler.schedule(() -> fetchDelta(selfName, opponentName, withBucket, attempt + 1,
+                    submitEndTs, onDisplayed, onRow), 5L, SECONDS);
+            } else {
+                settleStreak(onRow, null);
+            }
+        };
 
-    void fetchMmrDeltaFromMatchHistory(String selfName, String opponentName, String displayBucket, boolean showBucketLabel, int attempt, long submittedMatchEndTs, Runnable onDisplayed) {
-        fetchMmrDeltaFromMatchHistory(selfName, opponentName, displayBucket, showBucketLabel, attempt, submittedMatchEndTs, onDisplayed, null);
-    }
+        // Use account SHA for accurate match history across name changes; fall
+        // back to the name. 15 rows for multi-kills, bypassing the cache.
+        String selfAcctSha = pvpApi.getSelfSha();
+        pvpApi.getMatches(selfAcctSha, selfName, null, 15, true).thenAccept(response -> {
+            JsonArray matches = JsonLenient.optArray(response, "matches");
 
-    void fetchMmrDeltaFromMatchHistory(String selfName, String opponentName, String displayBucket, boolean showBucketLabel, int attempt, long submittedMatchEndTs, Runnable onDisplayed,
-                                       java.util.function.Consumer<JsonObject> onRow) {
-        log.debug("[PostFight] Fetching MMR delta from match history: self={} opponent={} showBucket={} attempt={} submittedTs={}", 
-            selfName, opponentName, showBucketLabel, attempt, submittedMatchEndTs);
-        
-        // Use account SHA for accurate match history across name changes
-        // This ensures MMR delta is correct even if the player changed their name
-        String selfAcctSha = pvpDataService.getSelfAcctSha();
-        
-        // Fetch more matches to handle multi-kill scenarios (up to 10 kills in quick succession)
-        // Bypass cache to ensure we get fresh data with the new match
-        // Prefer acct-based lookup if available, fallback to name-based
-        CompletableFuture<JsonObject> matchesFuture;
-        if (selfAcctSha != null && !selfAcctSha.isEmpty()) {
-            log.debug("[PostFight] Using acct-based match lookup: acct={}", selfAcctSha.substring(0, 8) + "...");
-            matchesFuture = pvpDataService.getPlayerMatchesByAcct(selfAcctSha, null, 15, true);
-        } else {
-            log.debug("[PostFight] Falling back to name-based match lookup: name={}", selfName);
-            matchesFuture = pvpDataService.getPlayerMatches(selfName, null, 15, true);
-        }
-        
-        matchesFuture.thenAccept(response -> {
-            if (response != null && response.has("matches") && response.get("matches").isJsonArray()) {
-                var matches = response.getAsJsonArray("matches");
-                
-                log.debug("[PostFight] Got {} matches from history, looking for opponent='{}' near ts={}", 
-                    matches.size(), opponentName, submittedMatchEndTs);
-                
-                // Log first few matches for diagnostics
-                int diagCount = Math.min(matches.size(), 5);
-                for (int i = 0; i < diagCount; i++) {
-                    if (!matches.get(i).isJsonObject()) continue;
-                    JsonObject m = matches.get(i).getAsJsonObject();
-                    String mOpp = m.has("opponent_id") && !m.get("opponent_id").isJsonNull() ? m.get("opponent_id").getAsString() : "?";
-                    long mWhen = m.has("when") && !m.get("when").isJsonNull() ? m.get("when").getAsLong() : 0;
-                    boolean hasRating = m.has("rating_change") && m.get("rating_change").isJsonObject();
-                    log.debug("[PostFight]   match[{}]: opponent='{}' when={} hasRatingChange={}", i, mOpp, mWhen, hasRating);
+            // Log first few matches for diagnostics
+            for (int i = 0; i < Math.min(matches.size(), 5); i++) {
+                if (!matches.get(i).isJsonObject()) continue;
+                JsonObject m = matches.get(i).getAsJsonObject();
+                JsonElement o = val(m, "opponent_id");
+                JsonElement w = val(m, "when");
+                String mOpp = o == null ? "?" : o.getAsString();
+                long mWhen = w == null ? 0 : w.getAsLong();
+            }
+
+            for (JsonElement element : matches) {
+                if (!element.isJsonObject()) continue;
+                JsonObject match = element.getAsJsonObject();
+                JsonElement opp = val(match, "opponent_id");
+                if (opp == null || !opp.getAsString().equalsIgnoreCase(opponentName)) continue;
+                JsonElement when = val(match, "when");
+                long matchWhen = when == null ? 0 : when.getAsLong();
+                long timeDiff = Math.abs(matchWhen - submitEndTs);
+                if (timeDiff > 10) {
+                    continue;
                 }
-                
-                for (var element : matches) {
-                    if (!element.isJsonObject()) continue;
-                    JsonObject match = element.getAsJsonObject();
-                    
-                    String matchOpponent = match.has("opponent_id") && !match.get("opponent_id").isJsonNull() 
-                        ? match.get("opponent_id").getAsString() : null;
-                    
-                    if (matchOpponent != null && matchOpponent.equalsIgnoreCase(opponentName)) {
-                        long matchWhen = match.has("when") && !match.get("when").isJsonNull() 
-                            ? match.get("when").getAsLong() : 0;
-                        long timeDiff = Math.abs(matchWhen - submittedMatchEndTs);
-                        
-                        if (timeDiff > 10) {
-                            log.debug("[PostFight] Match timestamp mismatch: matchWhen={} submittedTs={} diff={}s (>10s), skipping this match", 
-                                matchWhen, submittedMatchEndTs, timeDiff);
-                            continue;
-                        }
-                        
-                        log.debug("[PostFight] Match timestamp validated: matchWhen={} submittedTs={} diff={}s", 
-                            matchWhen, submittedMatchEndTs, timeDiff);
-                        settleStreak(onRow, match);
-                        
-                        if (match.has("rating_change") && match.get("rating_change").isJsonObject()) {
-                            JsonObject ratingChange = match.getAsJsonObject("rating_change");
-                            
-                            if (ratingChange.has("mmr_delta") && !ratingChange.get("mmr_delta").isJsonNull()) {
-                                double mmrDelta = ratingChange.get("mmr_delta").getAsDouble();
-                                
-                                String matchBucket = match.has("bucket") && !match.get("bucket").isJsonNull()
-                                    ? match.get("bucket").getAsString() : "nh";
-                                
-                                String bucketLabel = showBucketLabel ? getBucketDisplayName(matchBucket) : null;
-                                
-                                String result = match.has("result") && !match.get("result").isJsonNull()
-                                    ? match.get("result").getAsString() : "win";
-                                if ("loss".equalsIgnoreCase(result)) {
-                                    mmrDelta = -Math.abs(mmrDelta);
-                                }
-                                
-                                boolean cappedInPortal = PortalRatingCap.isCapped(match);
-                                log.debug("[PostFight] Found match in history: opponent={} bucket={} mmrDelta={} result={} bucketLabel={} cappedInPortal={}", 
-                                    matchOpponent, matchBucket, mmrDelta, result, bucketLabel, cappedInPortal);
-                                
-                                if (rankOverlay != null) {
-                                    if (cappedInPortal) {
-                                        rankOverlay.showRatingCappedInPortal(bucketLabel);
-                                    } else {
-                                        rankOverlay.showMmrDelta(mmrDelta, bucketLabel);
-                                    }
-                                }
-                                // Delta surfaced — let the caller finalize.
-                                // The freeze-log login replay uses this to
-                                // clear its persistent marker ONLY after a
-                                // successful display, so a bad-connection
-                                // login just retries on the next one instead
-                                // of silently dropping the notification.
-                                if (onDisplayed != null) {
-                                    onDisplayed.run();
-                                }
-                                return;
-                            }
-                        }
-                        
-                        log.debug("[PostFight] Found match but no rating_change data");
-                        return;
+                settleStreak(onRow, match);
+
+                JsonObject ratingChange = JsonLenient.optObject(match, "rating_change");
+                JsonElement delta = ratingChange == null ? null : val(ratingChange, "mmr_delta");
+                if (delta == null) {
+                    return;
+                }
+                double mmrDelta = delta.getAsDouble();
+                JsonElement bucket = val(match, "bucket");
+                String matchBucket = bucket == null ? "nh" : bucket.getAsString();
+                String bucketLabel = withBucket ? getBucketDisplayName(matchBucket) : null;
+                JsonElement res = val(match, "result");
+                String result = res == null ? "win" : res.getAsString();
+                if ("loss".equalsIgnoreCase(result)) {
+                    mmrDelta = -Math.abs(mmrDelta);
+                }
+
+                boolean portalCapped = PortalCap.isCapped(match);
+
+                if (rankOverlay != null) {
+                    if (portalCapped) {
+                        rankOverlay.showCapped(bucketLabel);
+                    } else {
+                        rankOverlay.showMmrDelta(mmrDelta, bucketLabel);
                     }
                 }
-                
-                if (attempt < MMR_RETRY_DELAYS.length) {
-                    long delay = MMR_RETRY_DELAYS[attempt];
-                    log.debug("[PostFight] Match not found in history, retrying in {}s (attempt {})", delay, attempt + 1);
-                    scheduler.schedule(() -> fetchMmrDeltaFromMatchHistory(selfName, opponentName, displayBucket, showBucketLabel, attempt + 1, submittedMatchEndTs, onDisplayed, onRow),
-                        delay, java.util.concurrent.TimeUnit.SECONDS);
-                } else {
-                    log.debug("[PostFight] Match not found in history after all retries, skipping MMR notification");
-                    settleStreak(onRow, null);
+                // Delta surfaced — let the caller finalize. The freeze-log login
+                // replay uses this to clear its persistent marker ONLY after a
+                // successful display.
+                if (onDisplayed != null) {
+                    onDisplayed.run();
                 }
-            } else if (attempt < MMR_RETRY_DELAYS.length) {
-                long delay = MMR_RETRY_DELAYS[attempt];
-                log.debug("[PostFight] No matches in response, retrying in {}s (attempt {})", delay, attempt + 1);
-                scheduler.schedule(() -> fetchMmrDeltaFromMatchHistory(selfName, opponentName, displayBucket, showBucketLabel, attempt + 1, submittedMatchEndTs, onDisplayed, onRow),
-                    delay, java.util.concurrent.TimeUnit.SECONDS);
-            } else {
-                log.debug("[PostFight] Failed to get matches after all retries");
-                settleStreak(onRow, null);
+                return;
             }
+            retry.run();
         }).exceptionally(ex -> {
-            if (attempt < MMR_RETRY_DELAYS.length) {
-                long delay = MMR_RETRY_DELAYS[attempt];
-                log.debug("[PostFight] Match history exception: {}, retrying in {}s (attempt {})", ex.getMessage(), delay, attempt + 1);
-                scheduler.schedule(() -> fetchMmrDeltaFromMatchHistory(selfName, opponentName, displayBucket, showBucketLabel, attempt + 1, submittedMatchEndTs, onDisplayed, onRow),
-                    delay, java.util.concurrent.TimeUnit.SECONDS);
-            } else {
-                log.debug("[PostFight] Match history failed after all retries: {}", ex.getMessage());
-                settleStreak(onRow, null);
-            }
+            retry.run();
             return null;
         });
     }
 
-    /**
-     * Get the bucket key from user config for API calls.
-     */
-    private String getConfigBucketKey() {
-        if (config == null) return "overall";
-        var bucket = config.rankBucket();
-        if (bucket == null) return "overall";
-        switch (bucket) {
-            case NH: return "nh";
-            case VENG: return "veng";
-            case MULTI: return "multi";
-            case DMM: return "dmm";
-            case TOURNAMENT: return "tournament";
-            case OVERALL:
-            default: return "overall";
-        }
+    /** The value at {@code key}; {@code null} when absent or JSON null. No other
+     *  leniency: a strict {@code getAsX} on the result still throws as before. */
+    private static JsonElement val(JsonObject o, String key)
+    {
+        JsonElement e = o.get(key);
+        return e == null || e.isJsonNull() ? null : e;
     }
 
     /** The local player's own profile was just refreshed: tell the sink. */
-    private void reportOwnProfileRefresh(String playerName)
+    private void reportOwn(String playerName)
     {
-        java.util.function.Consumer<String> sink = profileRefreshSink;
+        Consumer<String> sink = profileRefreshSink;
         if (sink == null || playerName == null) return;
-        String self = getLocalPlayerName();
+        String self = getLocalName();
         if (self == null || !NameUtils.canonicalKey(self).equals(NameUtils.canonicalKey(playerName))) return;
         try
         {
@@ -1731,37 +1236,27 @@ public class FightMonitor
         }
         catch (RuntimeException e)
         {
-            log.debug("[PostFight] profile refresh sink threw for {}: {}", playerName, e.getMessage());
         }
     }
 
-    private void fetchTierWithRetry(String playerName, String bucket, int retriesLeft) {
-        log.debug("[PostFight] fetchTierWithRetry called: player={} bucket={} retriesLeft={}", playerName, bucket, retriesLeft);
-        pvpDataService.getTierFromProfile(playerName, bucket).thenAccept(tier -> {
-            if (tier != null) {
-                log.debug("[PostFight] SUCCESS: tier={} for player={}", tier, playerName);
-                if (rankOverlay != null) {
-                    rankOverlay.setRankFromApi(playerName, tier);
-                    // Also refresh the looked-up player cache for this bucket if they're in it
-                    // This ensures fight results update the cached rank and reset the 1-hour timer
-                    rankOverlay.refreshLookedUpPlayer(playerName, bucket, tier);
-                }
-                reportOwnProfileRefresh(playerName);
-            } else if (retriesLeft > 0) {
-                log.debug("[PostFight] tier is null for player={}, retrying ({} left)", playerName, retriesLeft - 1);
-                scheduler.schedule(() -> fetchTierWithRetry(playerName, bucket, retriesLeft - 1), 
-                    2L, java.util.concurrent.TimeUnit.SECONDS);
-            } else {
-                log.debug("[PostFight] FAILED: tier is null for player={}, no retries left", playerName);
-            }
-        }).exceptionally(ex -> {
+    private void retryTier(String playerName, String bucket, int retriesLeft) {
+        Runnable retry = () -> {
             if (retriesLeft > 0) {
-                log.debug("[PostFight] Exception for player={}: {}, retrying ({} left)", playerName, ex.getMessage(), retriesLeft - 1);
-                scheduler.schedule(() -> fetchTierWithRetry(playerName, bucket, retriesLeft - 1), 
-                    2L, java.util.concurrent.TimeUnit.SECONDS);
+                scheduler.schedule(() -> retryTier(playerName, bucket, retriesLeft - 1), 2L, SECONDS);
             } else {
-                log.debug("[PostFight] FAILED with exception for player={}: {}, no retries left", playerName, ex.getMessage());
             }
+        };
+        pvpApi.getTierFromProfile(playerName, bucket).thenAccept(tier -> {
+            if (tier == null) {
+                retry.run();
+                return;
+            }
+            if (rankOverlay != null) {
+                rankOverlay.setApiRank(playerName, tier);
+            }
+            reportOwn(playerName);
+        }).exceptionally(ex -> {
+            retry.run();
             return null;
         });
     }
@@ -1769,207 +1264,146 @@ public class FightMonitor
     private void touchFight(String opponentName)
     {
         if (opponentName == null || opponentName.isEmpty()) return;
-        long ts = System.currentTimeMillis() / 1000;
+        long ts = currentTimeMillis() / 1000;
         int sb = client.getVarbitValue(Varbits.SPELLBOOK);
-        boolean localPlayerInMulti = client.getVarbitValue(Varbits.MULTICOMBAT_AREA) == 1;
-        boolean localPlayerInFfaPortal = insideFfaPortal;
-        boolean localPlayerInBountyHunter = insideBountyHunter;
+        // Only tracks if WE enter multi, not if the opponent does.
+        boolean selfInMulti = client.getVarbitValue(Varbits.MULTICOMBAT_AREA) == 1;
+        boolean selfInFfa = insideFfaPortal;
+        boolean selfInBounty = insideBounty;
         int currentTick = client.getTickCount();
         activeFights.compute(opponentName, (k, v) -> {
             if (v == null)
             {
-                FightEntry created = new FightEntry(ts, sb, localPlayerInMulti, currentTick);
-                created.markFfaPortalIfNeeded(localPlayerInFfaPortal);
-                created.markBountyHunterIfNeeded(localPlayerInBountyHunter);
-                return created;
+                v = new FightEntry(ts, sb, selfInMulti, currentTick);
             }
-            // Update activity timestamps
-            v.lastActivityMs = System.currentTimeMillis();
-            v.lastActivityTick = currentTick;
-            // If LOCAL player is now in multi, mark this fight as multi
-            // (only tracks if WE enter multi, not if opponent enters multi)
-            v.markMultiIfNeeded(localPlayerInMulti);
-            v.markFfaPortalIfNeeded(localPlayerInFfaPortal);
-            v.markBountyHunterIfNeeded(localPlayerInBountyHunter);
+            else
+            {
+                // Update activity timestamps
+                v.activityMs = currentTimeMillis();
+                v.activityTick = currentTick;
+            }
+            v.mark(selfInMulti, selfInFfa, selfInBounty);
             return v;
         });
 
-        if (!shardPresence.containsKey(opponentName))
+        if (!shardPresence.contains(opponentName))
         {
-            String bucket = "overall";
-            
-            pvpDataService.getShardRankByName(opponentName, bucket).thenAccept(shardRank -> {
-                if (shardRank != null && shardRank.rank > 0) {
-                    shardPresence.put(opponentName, Boolean.TRUE);
-                } else {
-                    shardPresence.putIfAbsent(opponentName, Boolean.FALSE);
-                }
-            }).exceptionally(ex -> {
-                shardPresence.putIfAbsent(opponentName, Boolean.FALSE);
-                return null;
-            });
+            pvpApi.getShardRank(opponentName, "overall", false).whenComplete((rank, ex) -> shardPresence.add(opponentName));
         }
     }
-    
+
     // --- Helpers ---
 
     /**
      * Resolve who attacked us when we receive inbound damage.
-     * 
+     *
      * CRITICAL: This method should ONLY return existing fight opponents.
      * We do NOT start new fights from inbound damage because:
      * - getInteracting() returns true for non-combat actions (trading, item use, following)
      * - We cannot distinguish player damage from NPC damage by hitsplat alone
      * - If someone attacks us first, THEY will track the fight from their side
-     * 
+     *
      * New fights are ONLY started via outbound damage (when we attack someone).
      * This ensures we only track fights where we actually participated in combat.
-     * 
+     *
      * @param localPlayer The local player who received damage
      * @return The name of an existing fight opponent, or null if none found
      */
-    private String resolveInboundAttacker(Player localPlayer)
+    private String findAttacker(Player localPlayer)
     {
         List<Player> players = client.getPlayers();
         if (players == null) {
-            return existingFightAttacker();
+            return recentOpp();
         }
 
         // Only return players we already have an active fight with
-        // This ensures inbound damage is only tracked for fights WE initiated via outbound damage
         for (Player other : players) {
             if (other == null || other == localPlayer) continue;
-            
+
             String otherName = other.getName();
             if (otherName != null && activeFights.containsKey(otherName)) {
-                // Existing fight opponent - track their damage to us
                 return otherName;
             }
         }
-        
-        // No existing fight opponent found
-        // DO NOT identify new attackers from inbound damage - this causes false positives:
-        // - Trading partner identified as attacker when we take NPC damage
-        // - Player using items on us identified as attacker
-        // - Nearby player in multi-combat identified incorrectly
         return null;
     }
-    
-    /**
-     * Get an existing fight attacker from the most recent active fight.
-     * Only returns names of players we already have active fights with.
-     */
-    private String existingFightAttacker()
-    {
-        String recent = mostRecentActiveOpponent();
-        return recent;  // Returns null if no active fights, which is correct
-    }
 
-    private String mostRecentActiveOpponent()
+    private String recentOpp()
     {
         long best = -1L; String bestName = null;
         for (Map.Entry<String, FightEntry> e : activeFights.entrySet())
         {
-            if (e.getValue() == null) continue;
-            long la = e.getValue().lastActivityMs;
+            long la = e.getValue().activityMs;
             if (la > best) { best = la; bestName = e.getKey(); }
         }
         return bestName;
     }
 
+    /** The opponent who dealt the most damage to us (at least 1), or null. */
     private String findKillerByDamage()
     {
         String killer = null;
-        long bestDmg = 0L;  // Must have dealt at least some damage
-        
-        // Find opponent who dealt most damage to us
+        long bestDmg = 0L;
         for (Map.Entry<String, FightEntry> e : activeFights.entrySet())
         {
-            FightEntry fe = e.getValue();
-            if (fe == null) continue;
-            long dmgReceived = fe.damageReceived.get();
-            // log.debug("[KillerSearch] Candidate: {} dealt {} damage to us", e.getKey(), dmgReceived);
-            
+            long dmgReceived = e.getValue().damageReceived.get();
             if (dmgReceived > bestDmg)
             {
                 bestDmg = dmgReceived;
                 killer = e.getKey();
             }
         }
-        
-        // if (killer != null)
-        // {
-        //     log.debug("[KillerSearch] Winner: {} with {} damage", killer, bestDmg);
-        // }
         return killer;
     }
 
-    private String findActualKiller(Player localPlayer)
+    /** The first player in the scene {@code test} accepts; {@code null} when none does or the list is null. */
+    private Player findPlayer(Predicate<Player> test)
     {
         List<Player> players = client.getPlayers();
-        if (players == null) return null;
-        for (Player player : players) {
-            if (player != localPlayer && player.getInteracting() == localPlayer) return player.getName();
+        if (players != null)
+        {
+            for (Player p : players)
+            {
+                if (test.test(p)) return p;
+            }
         }
         return null;
     }
 
-    /** Fast boolean variant of {@link #findActualKiller} — returns
-     *  true the moment any other Player is found whose
+    private String findKiller(Player localPlayer)
+    {
+        Player killer = findPlayer(p -> p != localPlayer && p.getInteracting() == localPlayer);
+        return killer == null ? null : killer.getName();
+    }
+
+    /** True the moment any other Player is found whose
      *  {@code getInteracting()} is the local player. Used by the
-     *  inbound-damage path of {@link #handleHitsplatApplied} to
-     *  decide whether to update {@link #lastInboundPvpDamageMs}.
-     *  Doesn't allocate a String. Walks the same player list as
-     *  findActualKiller so the two stay coherent. */
-    private boolean hasPlayerAttacker(Player localPlayer)
+     *  inbound-damage path of {@link #handleHit} and by
+     *  {@link #endFightFor}. */
+    private boolean hasAttacker(Player localPlayer)
     {
-        if (client == null || localPlayer == null) return false;
-        List<Player> players = client.getPlayers();
-        if (players == null) return false;
-        for (Player player : players)
-        {
-            if (player == null || player == localPlayer) continue;
-            if (player.getInteracting() == localPlayer) return true;
-        }
-        return false;
+        return findPlayer(p -> p != null && p != localPlayer && p.getInteracting() == localPlayer) != null;
     }
 
-    private boolean isPlayerOpponent(String name)
+    private boolean isOpponent(String name)
     {
-        if (name == null || "Unknown".equals(name)) return false;
-        List<Player> players = client.getPlayers();
-        if (players == null) return false;
-        for (Player player : players) {
-            String pName = player.getName();
-            if (pName != null && pName.equals(name)) return true;
-        }
-        return false;
+        return name != null && !"Unknown".equals(name) && findPlayer(p -> name.equals(p.getName())) != null;
     }
-    
-    private String getLocalPlayerName()
-    {
-        if (client == null)
-        {
-            return null;
-        }
 
+    private String getLocalName()
+    {
         try
         {
-            var localPlayer = client.getLocalPlayer();
-            if (localPlayer == null)
-            {
-                return null;
-            }
-            return localPlayer.getName();
+            Player localPlayer = client.getLocalPlayer();
+            return localPlayer == null ? null : localPlayer.getName();
         }
         catch (Exception e)
         {
-            log.debug("Failed to get local player name", e);
             return null;
         }
     }
 
-    static String getSpellbookName(int spellbook)
+    static String getBookName(int spellbook)
     {
         switch (spellbook) {
             case 0: return "Standard";
@@ -1985,129 +1419,80 @@ public class FightMonitor
         return spellbook != null && "Lunar".equals(spellbook.trim());
     }
 
-    private String determineBucket(int world, boolean wasInMulti, String startSpellbook, String endSpellbook,
-                                   boolean wasInBountyHunter)
+    /** The bucket the server will rate this fight in: DMM world, then the
+     *  Bounty Hunter area (Veng), then multi, then Veng when either spellbook
+     *  is Lunar, else NH. */
+    private RankBucket determineBucket(int world, boolean wasInMulti, String startBook, String endSpellbook,
+                                       boolean wasInBounty)
     {
-        // 1. DMM check - uses cached DMM worlds from PvPDataService
-        if (pvpDataService.isDmmWorld(world))
-        {
-            return "dmm";
-        }
-
-        if (wasInBountyHunter)
-        {
-            return "veng";
-        }
-
-        if (wasInMulti)
-        {
-            return "multi";
-        }
-
-        if (isLunar(startSpellbook) || isLunar(endSpellbook))
-        {
-            return "veng";
-        }
-
-        return "nh";
+        // 1. DMM check - uses cached DMM worlds from PvpApi
+        if (pvpApi.isDmmWorld(world)) return RankBucket.DMM;
+        if (wasInBounty) return RankBucket.VENG;
+        if (wasInMulti) return RankBucket.MULTI;
+        return isLunar(startBook) || isLunar(endSpellbook) ? RankBucket.VENG : RankBucket.NH;
     }
 
     /**
-     * Convert bucket string to RankBucket enum for config updates.
-     */
-    private PvPLeaderboardConfig.RankBucket bucketStringToEnum(String bucket)
-    {
-        if (bucket == null) return null;
-        switch (bucket.toLowerCase())
-        {
-            case "nh": return PvPLeaderboardConfig.RankBucket.NH;
-            case "veng": return PvPLeaderboardConfig.RankBucket.VENG;
-            case "multi": return PvPLeaderboardConfig.RankBucket.MULTI;
-            case "dmm": return PvPLeaderboardConfig.RankBucket.DMM;
-            case "tournament": return PvPLeaderboardConfig.RankBucket.TOURNAMENT;
-            default: return null;
-        }
-    }
-
-    /**
-     * Get the display name for a bucket (capitalized for UI).
+     * Get the display name for a bucket (capitalized for UI): the leaderboard's
+     * own label for a known bucket key, else the key in capitals.
      */
     private String getBucketDisplayName(String bucket)
     {
         if (bucket == null) return "NH";
-        switch (bucket.toLowerCase())
+        for (RankBucket b : RankBucket.values())
         {
-            case "dmm": return "DMM";
-            case "multi": return "Multi";
-            case "veng": return "Veng";
-            case "nh": return "NH";
-            case "overall": return "Overall";
-            case "tournament": return "Tournament";
-            default: return bucket.toUpperCase();
+            if (RankBucket.key(b).equals(bucket.toLowerCase())) return b.toString();
         }
+        return bucket.toUpperCase();
     }
-    
+
     // Package-private (not private) so same-package unit tests can seed
     // an in-progress fight for the freeze-log path without replaying the
     // full hitsplat pipeline.
     static class FightEntry {
         final long startTs;
-        final int startSpellbook;
+        final int startBook;
         volatile boolean wasInMulti;  // Mutable: set true if LOCAL player ever enters multi during this fight
-        volatile boolean wasInFfaPortal;
-        volatile boolean wasInBountyHunter;
-        volatile long lastActivityMs;
-        volatile int lastActivityTick;  // Track per-opponent combat activity in game ticks
-        volatile boolean finalized = false;
-        
+        volatile boolean wasInFfa;
+        volatile boolean wasInBounty;
+        volatile long activityMs;
+        volatile int activityTick;  // Track per-opponent combat activity in game ticks
+        volatile boolean finalized;
+
         // Per-fight damage tracking for multi-combat accuracy
-        final AtomicLong damageDealt = new AtomicLong(0);    // Damage we dealt TO this opponent
-        final AtomicLong damageReceived = new AtomicLong(0); // Damage we received FROM this opponent
-        
+        final AtomicLong damageDealt = new AtomicLong();    // Damage we dealt TO this opponent
+        final AtomicLong damageReceived = new AtomicLong(); // Damage we received FROM this opponent
+
         FightEntry(long ts, int sb, boolean multi, int currentTick) {
             startTs = ts;
-            startSpellbook = sb;
+            startBook = sb;
             wasInMulti = multi;
-            lastActivityMs = System.currentTimeMillis();
-            lastActivityTick = currentTick;
-        }
-        
-        /**
-         * Mark this fight as multi if the local player entered multi-combat area.
-         * Only updates to true (never reverts to singles once multi is flagged).
-         */
-        void markMultiIfNeeded(boolean isInMulti) {
-            if (isInMulti && !wasInMulti) {
-                wasInMulti = true;
-            }
-        }
-        
-        void markFfaPortalIfNeeded(boolean isInFfaPortal) {
-            if (isInFfaPortal && !wasInFfaPortal) {
-                wasInFfaPortal = true;
-            }
+            activityMs = currentTimeMillis();
+            activityTick = currentTick;
         }
 
-        void markBountyHunterIfNeeded(boolean isInBountyHunter) {
-            if (isInBountyHunter && !wasInBountyHunter) {
-                wasInBountyHunter = true;
-            }
+        /** Sets each area flag that is true; a flag is never cleared (once
+         *  multi / in the portal / in the Bounty Hunter area, always so). */
+        void mark(boolean multi, boolean ffaPortal, boolean bountyHunter) {
+            if (multi) wasInMulti = true;
+            if (ffaPortal) wasInFfa = true;
+            if (bountyHunter) wasInBounty = true;
         }
-        
-        void addDamageDealt(long amount, int currentTick) {
+
+        void addDealt(long amount, int currentTick) {
             damageDealt.addAndGet(amount);
-            lastActivityMs = System.currentTimeMillis();
-            lastActivityTick = currentTick;
+            activityMs = currentTimeMillis();
+            activityTick = currentTick;
         }
-        
-        void addDamageReceived(long amount, int currentTick) {
+
+        void addReceived(long amount, int currentTick) {
             damageReceived.addAndGet(amount);
-            lastActivityMs = System.currentTimeMillis();
-            lastActivityTick = currentTick;
+            activityMs = currentTimeMillis();
+            activityTick = currentTick;
         }
-        
+
         boolean isStale(int currentTick, int timeout) {
-            return (currentTick - lastActivityTick) > timeout;
+            return (currentTick - activityTick) > timeout;
         }
     }
 }

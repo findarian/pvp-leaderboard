@@ -1,46 +1,24 @@
 package com.pvp.leaderboard.tournament;
 
-import net.runelite.client.game.ItemVariationMapping;
+import java.util.*;
+import java.util.function.*;
+import lombok.*;
 
-import java.util.ArrayList;
-import java.util.Collection;
-import java.util.LinkedHashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.Set;
-import java.util.TreeSet;
-import java.util.function.IntPredicate;
-import java.util.function.IntUnaryOperator;
-
+@RequiredArgsConstructor
 public final class GearMatcher
 {
     private final IntUnaryOperator variations;
     private final IntPredicate isRune;
 
-    public GearMatcher(IntPredicate isRune)
-    {
-        this(ItemVariationMapping::map, isRune);
-    }
-
-    public GearMatcher(IntUnaryOperator variations, IntPredicate isRune)
-    {
-        this.variations = variations == null ? IntUnaryOperator.identity() : variations;
-        this.isRune = isRune == null ? id -> false : isRune;
-    }
-
+    @RequiredArgsConstructor
     private static final class Units
     {
         final String name;
         final boolean stackable;
         long qty;
-
-        Units(String name, boolean stackable)
-        {
-            this.name = name;
-            this.stackable = stackable;
-        }
     }
 
+    @RequiredArgsConstructor
     private static final class Group
     {
         final boolean exact;
@@ -48,13 +26,6 @@ public final class GearMatcher
         final GearItem first;
         long need;
         long have;
-
-        Group(boolean exact, Set<Integer> keys, GearItem first)
-        {
-            this.exact = exact;
-            this.keys = keys;
-            this.first = first;
-        }
     }
 
     public GearDiff match(GearSet set, GearKit kit, String buildInUse)
@@ -83,13 +54,9 @@ public final class GearMatcher
 
         Map<Integer, Long> remaining = new LinkedHashMap<>();
         for (Map.Entry<Integer, Units> e : units.entrySet()) remaining.put(e.getKey(), e.getValue().qty);
-        for (Group g : groups.values())
+        for (boolean exact : new boolean[]{true, false})
         {
-            if (g.exact) take(g, remaining);
-        }
-        for (Group g : groups.values())
-        {
-            if (!g.exact) take(g, remaining);
+            for (Group g : groups.values()) if (g.exact == exact) take(g, remaining);
         }
 
         List<GearDiff.Row> standalone = new ArrayList<>();
@@ -104,14 +71,14 @@ public final class GearMatcher
                 continue;
             }
             Units u = units.get(e.getKey());
-            standalone.add(new GearDiff.Row(e.getKey(), u.name, 0, clamp(left), u.stackable, false));
+            standalone.add(new GearDiff.Row(e.getKey(), u.name, 0, clamp(left), u.stackable, false, null));
         }
 
         List<GearDiff.Row> missing = new ArrayList<>();
         List<GearDiff.Row> extra = new ArrayList<>();
         for (Group g : groups.values())
         {
-            GearDiff.Row row = new GearDiff.Row(g.first.id, g.first.name, clamp(g.need), clamp(g.have), g.first.stackable, false,
+            var row = new GearDiff.Row(g.first.id, g.first.name, clamp(g.need), clamp(g.have), g.first.stackable, false,
                 g.first.altIds);
             if (row.isMissing()) missing.add(row);
             else if (row.isExtra()) extra.add(row);
@@ -119,7 +86,7 @@ public final class GearMatcher
         extra.addAll(standalone);
         for (Map.Entry<Integer, Units> e : noted.entrySet())
         {
-            extra.add(new GearDiff.Row(e.getKey(), e.getValue().name, 0, clamp(e.getValue().qty), e.getValue().stackable, true));
+            extra.add(new GearDiff.Row(e.getKey(), e.getValue().name, 0, clamp(e.getValue().qty), e.getValue().stackable, true, null));
         }
         boolean pouchUnknown = pouchChecked && kit.hasRunePouch() && !kit.pouchKnown;
         return new GearDiff(set.build, kitBuild, buildOk, set.spellbook, kit.spellbook, spellbookOk, missing, extra, pouchUnknown);
@@ -151,13 +118,9 @@ public final class GearMatcher
 
     private Group ownerOf(Collection<Group> groups, int id)
     {
-        for (Group g : groups)
+        for (boolean exact : new boolean[]{true, false})
         {
-            if (g.exact && holds(g, id)) return g;
-        }
-        for (Group g : groups)
-        {
-            if (!g.exact && holds(g, id)) return g;
+            for (Group g : groups) if (g.exact == exact && holds(g, id)) return g;
         }
         return null;
     }
@@ -167,9 +130,9 @@ public final class GearMatcher
         return g.keys.contains(g.exact ? kitId : variations.applyAsInt(kitId));
     }
 
-    private static void collect(List<GearKit.Item> items, Map<Integer, Units> units, Map<Integer, Units> noted)
+    private static void collect(List<GearItem> items, Map<Integer, Units> units, Map<Integer, Units> noted)
     {
-        for (GearKit.Item i : items)
+        for (GearItem i : items)
         {
             if (i == null || i.id <= 0 || i.qty <= 0) continue;
             Map<Integer, Units> into = i.noted ? noted : units;
@@ -179,6 +142,6 @@ public final class GearMatcher
 
     private static int clamp(long v)
     {
-        return v > Integer.MAX_VALUE ? Integer.MAX_VALUE : (int) v;
+        return (int) Math.min(v, Integer.MAX_VALUE);
     }
 }

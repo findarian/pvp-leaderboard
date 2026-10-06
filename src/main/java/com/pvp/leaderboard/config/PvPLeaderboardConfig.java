@@ -1,10 +1,6 @@
 package com.pvp.leaderboard.config;
 
-import net.runelite.client.config.Config;
-import net.runelite.client.config.ConfigGroup;
-import net.runelite.client.config.ConfigItem;
-import net.runelite.client.config.ConfigSection;
-import net.runelite.client.config.Range;
+import net.runelite.client.config.*;
 
 @ConfigGroup("PvPLeaderboard")
 public interface PvPLeaderboardConfig extends Config
@@ -48,85 +44,45 @@ public interface PvPLeaderboardConfig extends Config
 
 	// ==================== Enums ====================
 
+	/** {@link #toString()} is the label RuneLite's settings drop-down shows
+	 *  (where it differs from the constant name). */
 	enum RankBucket
 	{
-		OVERALL
-		{
-			@Override
-			public String toString()
-			{
-				return "Overall";
-			}
-		},
-		NH
-		{
-			@Override
-			public String toString()
-			{
-				return "NH";
-			}
-		},
-		VENG
-		{
-			@Override
-			public String toString()
-			{
-				return "Veng";
-			}
-		},
-		MULTI
-		{
-			@Override
-			public String toString()
-			{
-				return "Multi";
-			}
-		},
-		DMM
-		{
-			@Override
-			public String toString()
-			{
-				return "DMM";
-			}
-		},
+		OVERALL("Overall"),
+		NH("NH"),
+		VENG("Veng"),
+		MULTI("Multi"),
+		DMM("DMM"),
 		/** Plan 10: the Swiss-tournament rating bucket (2026-09-21). */
-		TOURNAMENT
+		TOURNAMENT("Tournament");
+
+		private final String label;
+
+		RankBucket(String label)
 		{
-			@Override
-			public String toString()
-			{
-				return "Tournament";
-			}
+			this.label = label;
+		}
+
+		@Override
+		public String toString()
+		{
+			return label;
+		}
+
+		/** The bucket's key in the API: its lower-case name; {@code "overall"} for none. */
+		public static String key(RankBucket b)
+		{
+			return b == null ? "overall" : b.name().toLowerCase(java.util.Locale.ROOT);
 		}
 	}
 
+	/** RuneLite's settings drop-down title-cases the names: "Feet", "Head",
+	 *  "Above Head". */
 	enum RankPosition
 	{
-		FEET
-		{
-			@Override
-			public String toString()
-			{
-				return "Feet";
-			}
-		},
-		HEAD
-		{
-			@Override
-			public String toString()
-			{
-				return "Head";
-			}
-		},
+		FEET,
+		HEAD,
 		ABOVE_HEAD
-		{
-			@Override
-			public String toString()
-			{
-				return "Above Head";
-			}
-		}
 	}
 
 	// ==================== Overlay Settings ====================
@@ -135,8 +91,7 @@ public interface PvPLeaderboardConfig extends Config
 		keyName = "showOwnRank",
 		name = "Show your own rank",
 		description = "Display your rank above your character",
-		section = overlaySection,
-		position = 0
+		section = overlaySection
 	)
 	default boolean showOwnRank()
 	{
@@ -210,8 +165,7 @@ public interface PvPLeaderboardConfig extends Config
 		keyName = "rankPosition",
 		name = "Rank Position",
 		description = "Where to display the rank relative to your character",
-		section = visualSection,
-		position = 0
+		section = visualSection
 	)
 	default RankPosition rankPosition()
 	{
@@ -222,8 +176,7 @@ public interface PvPLeaderboardConfig extends Config
 		keyName = "rankTextSize",
 		name = "Rank Text Size",
 		description = "Text size for rank display",
-		section = visualSection,
-		position = 1
+		section = visualSection
 	)
 	@Range(min = 10, max = 48)
 	default int rankTextSize()
@@ -275,8 +228,7 @@ public interface PvPLeaderboardConfig extends Config
 		keyName = "showMmrChangeNotification",
 		name = "Show MMR Change",
 		description = "Display MMR gained/lost after fights (XP drop style)",
-		section = notificationSection,
-		position = 0
+		section = notificationSection
 	)
 	default boolean showMmrChangeNotification()
 	{
@@ -322,32 +274,6 @@ public interface PvPLeaderboardConfig extends Config
 		return 3;
 	}
 
-	@ConfigItem(
-		keyName = "enableLobbyInviteNotification",
-		name = "Lobby invite popup",
-		description = "Show an OSRS-style in-game popup when another player invites you to fight in the matchmaking lobby",
-		section = notificationSection,
-		position = 4,
-		hidden = true
-	)
-	default boolean enableLobbyInviteNotification()
-	{
-		return true;
-	}
-
-	@ConfigItem(
-		keyName = "lobbyInviteNotificationDurationSeconds",
-		name = "Lobby invite popup duration",
-		description = "How long the lobby invite popup stays on screen (seconds). Includes fade in/out.",
-		section = notificationSection,
-		position = 5,
-		hidden = true
-	)
-	@Range(min = 1, max = 30)
-	default int lobbyInviteNotificationDurationSeconds()
-	{
-		return 3;
-	}
 
 	@ConfigItem(
 		keyName = "enableMatchFoundNotification",
@@ -379,8 +305,7 @@ public interface PvPLeaderboardConfig extends Config
 		keyName = "enablePvpLookupMenu",
 		name = "Enable 'PvP lookup' right-click",
 		description = "Adds the 'PvP lookup' option to player right-click menu",
-		section = otherSection,
-		position = 0
+		section = otherSection
 	)
 	default boolean enablePvpLookupMenu()
 	{
@@ -391,8 +316,7 @@ public interface PvPLeaderboardConfig extends Config
 		keyName = "enableQuickMatch",
 		name = "Matchmaking queue",
 		description = "Show the matchmaking queue on the Matchmaking tab: NH, an optional rank range and a wait time shared with Discord",
-		section = otherSection,
-		position = 1
+		section = otherSection
 	)
 	default boolean enableQuickMatch()
 	{
@@ -403,8 +327,7 @@ public interface PvPLeaderboardConfig extends Config
 		keyName = "enableTournaments",
 		name = "Tournaments tab",
 		description = "Show the Tournaments tab (register, live standings, round clock). With it off, the opponent outline and Auto-switch to Tournament still work",
-		section = otherSection,
-		position = 2
+		section = otherSection
 	)
 	default boolean enableTournaments()
 	{
@@ -422,8 +345,7 @@ public interface PvPLeaderboardConfig extends Config
 		keyName = "gearAutoOpenPanel",
 		name = "Open the panel for the kit check",
 		description = "When a tournament's kit check starts (and when the event starts) while your kit does not match, open this plugin's panel on the Tournaments tab - once per check",
-		section = tournamentGearSection,
-		position = 0
+		section = tournamentGearSection
 	)
 	default boolean gearAutoOpenPanel()
 	{
@@ -448,8 +370,7 @@ public interface PvPLeaderboardConfig extends Config
 		keyName = "showRankToOthers",
 		name = "Show your rank to others",
 		description = "When enabled, your username is shared so others can see your rank above your head",
-		section = whitelistSection,
-		position = 0
+		section = whitelistSection
 	)
 	default boolean showRankToOthers()
 	{
@@ -486,8 +407,7 @@ public interface PvPLeaderboardConfig extends Config
 		description = "Show the movable counter '<style> Current Kill Streak: N' everywhere (Alt+drag to move it). "
 			+ "Off: it only appears inside the FFA portal, while the option below is on. "
 			+ "'N+' means your streak is longer than the loaded match history.",
-		section = killStreakSection,
-		position = 0
+		section = killStreakSection
 	)
 	default boolean showKillStreakBox()
 	{

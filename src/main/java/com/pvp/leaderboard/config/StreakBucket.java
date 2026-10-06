@@ -1,4 +1,5 @@
 package com.pvp.leaderboard.config;
+import java.util.*;
 
 /**
  * The five styles the kill-streak box can show (BOARD row 33, 2026-09-21) —
@@ -34,24 +35,15 @@ public enum StreakBucket
 
 	/** The box's style for a leaderboard bucket: Tournament reads "Event";
 	 *  Overall (and {@code null}) has no streak box, so {@code null}. */
-	public static StreakBucket fromRankBucket(PvPLeaderboardConfig.RankBucket bucket)
+	public static StreakBucket forRank(PvPLeaderboardConfig.RankBucket bucket)
 	{
-		if (bucket == null) return null;
-		switch (bucket)
-		{
-			case NH: return NH;
-			case VENG: return VENG;
-			case MULTI: return MULTI;
-			case DMM: return DMM;
-			case TOURNAMENT: return EVENT;
-			default: return null;
-		}
+		return bucket == null ? null : forKey(bucket.name());
 	}
 
-	public static StreakBucket fromBucketKey(String key)
+	public static StreakBucket forKey(String key)
 	{
 		if (key == null) return null;
-		String k = key.trim().toLowerCase(java.util.Locale.ROOT);
+		String k = key.trim().toLowerCase(Locale.ROOT);
 		for (StreakBucket b : values())
 		{
 			if (b.bucketKey.equals(k)) return b;

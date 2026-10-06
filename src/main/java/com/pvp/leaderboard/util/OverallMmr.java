@@ -1,10 +1,6 @@
 package com.pvp.leaderboard.util;
 
-import java.util.Collections;
-import java.util.HashMap;
-import java.util.LinkedHashMap;
-import java.util.Locale;
-import java.util.Map;
+import java.util.*;
 
 /**
  * The backend's Overall rating, mirrored for the tier graph's locally
@@ -24,57 +20,26 @@ import java.util.Map;
  * no seed at all, only match points — so a history with no tournament
  * game keeps exactly the legacy Overall.
  *
- * <p>Two uses: the pure {@link #overall(Map)} over a map of last-known
- * mus, and an accumulator ({@link #record}, {@link #overall()}) that walks
- * a match history in order.
+ * <p>An accumulator ({@link #record}, {@link #overall()}) that walks a
+ * match history in order.
  */
 public final class OverallMmr
 {
-    public static final String TOURNAMENT_BUCKET = "tournament";
+    public static final String TOURNEY_KEY = "tournament";
     public static final double DEFAULT_MU = 1000.0;
     public static final double TOURNAMENT_WEIGHT = 0.10;
 
-    private static final Map<String, Double> STANDARD_WEIGHTS;
-
-    static
-    {
-        Map<String, Double> w = new LinkedHashMap<>();
-        w.put("nh", 0.55);
-        w.put("veng", 0.30);
-        w.put("multi", 0.05);
-        w.put("dmm", 0.10);
-        STANDARD_WEIGHTS = Collections.unmodifiableMap(w);
-    }
+    /** {@code nh 0.55 / veng 0.30 / multi 0.05 / dmm 0.10}, summed in that order. */
+    private static final String[] STANDARD = {"nh", "veng", "multi", "dmm"};
+    private static final double[] WEIGHTS = {0.55, 0.30, 0.05, 0.10};
 
     private final Map<String, Double> lastMu = new HashMap<>();
-
-    /** {@code nh 0.55 / veng 0.30 / multi 0.05 / dmm 0.10}, in that order. */
-    public static Map<String, Double> standardWeights()
-    {
-        return STANDARD_WEIGHTS;
-    }
 
     /** The five buckets a match can be rated in (case-insensitive). */
     public static boolean isRated(String bucket)
     {
         String b = key(bucket);
-        return b != null && (STANDARD_WEIGHTS.containsKey(b) || TOURNAMENT_BUCKET.equals(b));
-    }
-
-    /** The Overall for a map of last-known mus keyed by bucket: a missing
-     *  or {@code null} standard bucket counts as 1000, a missing or
-     *  {@code null} tournament bucket contributes nothing. */
-    public static double overall(Map<String, Double> mus)
-    {
-        double sum = 0.0;
-        for (Map.Entry<String, Double> e : STANDARD_WEIGHTS.entrySet())
-        {
-            Double mu = mus == null ? null : mus.get(e.getKey());
-            sum += (mu == null ? DEFAULT_MU : mu) * e.getValue();
-        }
-        Double tournament = mus == null ? null : mus.get(TOURNAMENT_BUCKET);
-        if (tournament != null) sum += tournament * TOURNAMENT_WEIGHT;
-        return sum;
+        return TOURNEY_KEY.equals(b) || Arrays.asList(STANDARD).contains(b);
     }
 
     /** The last recorded mu for the bucket, {@code null} when none was —
@@ -82,24 +47,31 @@ public final class OverallMmr
      *  nothing. */
     public Double lastMu(String bucket)
     {
-        String b = key(bucket);
-        return b == null ? null : lastMu.get(b);
+        return lastMu.get(key(bucket));
     }
 
-    /** Records a match's post-game mu; {@code false} (and untouched) for a
-     *  bucket the formula does not know or a non-finite value. */
-    public boolean record(String bucket, double mu)
+    /** Records a match's post-game mu; ignored for a bucket the formula
+     *  does not know or a non-finite value. */
+    public void record(String bucket, double mu)
     {
         String b = key(bucket);
-        if (b == null || !isRated(b) || !Double.isFinite(mu)) return false;
-        lastMu.put(b, mu);
-        return true;
+        if (isRated(b) && Double.isFinite(mu)) lastMu.put(b, mu);
     }
 
-    /** {@link #overall(Map)} over everything recorded so far. */
+    /** The Overall of everything recorded so far: a standard bucket with no
+     *  record counts as 1000, a tournament bucket with none contributes
+     *  nothing. */
     public double overall()
     {
-        return overall(lastMu);
+        double sum = 0.0;
+        for (int i = 0; i < 4; i++)
+        {
+            Double mu = lastMu.get(STANDARD[i]);
+            sum += (mu == null ? DEFAULT_MU : mu) * WEIGHTS[i];
+        }
+        Double tournament = lastMu.get(TOURNEY_KEY);
+        if (tournament != null) sum += tournament * TOURNAMENT_WEIGHT;
+        return sum;
     }
 
     private static String key(String bucket)

@@ -1,15 +1,8 @@
 package com.pvp.leaderboard.ui;
 
-import javax.swing.BorderFactory;
-import javax.swing.BoxLayout;
-import javax.swing.JLabel;
-import javax.swing.JPanel;
-import javax.swing.SwingConstants;
-import javax.swing.border.MatteBorder;
-import java.awt.BorderLayout;
-import java.awt.Color;
-import java.awt.Dimension;
-import java.awt.Font;
+import java.awt.*;
+import javax.swing.*;
+import javax.swing.border.*;
 
 /**
  * The queue's rank range: a caption, the lowest and highest rank in their
@@ -18,12 +11,6 @@ import java.awt.Font;
  */
 public class QueueRangeSlider extends JPanel
 {
-    public static final String NAME = "matchmaking-queue-range";
-    public static final String NAME_SLIDER = "matchmaking-queue-range-slider";
-    public static final String NAME_CAPTION = "matchmaking-queue-range-caption";
-    public static final String NAME_MIN = "matchmaking-queue-range-min";
-    public static final String NAME_MAX = "matchmaking-queue-range-max";
-
     static final String CAPTION = "Only match players in this rank range";
 
     private final int last;
@@ -37,44 +24,42 @@ public class QueueRangeSlider extends JPanel
     {
         last = MatchmakingLobbyPanel.rankLabels().length - 1;
         int[] range = normalise(low, high);
-        setName(NAME);
+        setName("matchmaking-queue-range");
         setLayout(new BoxLayout(this, BoxLayout.Y_AXIS));
         setBorder(BorderFactory.createCompoundBorder(
             new MatteBorder(1, 0, 1, 0, new Color(60, 60, 60)),
-            BorderFactory.createEmptyBorder(6, 2, 6, 2)));
-        setMaximumSize(new Dimension(Integer.MAX_VALUE, 110));
+            Ui.pad(6, 2, 6, 2)));
+        Ui.maxH(this, 110);
 
-        JLabel caption = new JLabel();
-        caption.setName(NAME_CAPTION);
-        caption.setFont(caption.getFont().deriveFont(Font.BOLD, 15f));
-        caption.setText(TournamentInfoCard.wrapHtml(caption.getFont(), TournamentInfoCard.TEXT_WIDTH_PX, CAPTION));
-        caption.setForeground(new Color(0xaa, 0xaa, 0xaa));
-        caption.setAlignmentX(LEFT_ALIGNMENT);
-        caption.setBorder(BorderFactory.createEmptyBorder(0, 2, 4, 2));
+        var caption = new JLabel();
+        caption.setName("matchmaking-queue-range-caption");
+        Ui.bold(caption, 15f);
+        Ui.wrap(caption, CAPTION);
+        caption.setForeground(new Color(0xaaaaaa));
+        caption.setBorder(Ui.pad(0, 2, 4, 2));
 
-        minValue = MatchmakingLobbyPanel.makeRankValueLabel(range[0]);
-        minValue.setName(NAME_MIN);
+        minValue = MatchmakingLobbyPanel.newRankLabel(range[0]);
+        minValue.setName("matchmaking-queue-range-min");
         minValue.setHorizontalAlignment(SwingConstants.LEFT);
-        maxValue = MatchmakingLobbyPanel.makeRankValueLabel(range[1]);
-        maxValue.setName(NAME_MAX);
+        maxValue = MatchmakingLobbyPanel.newRankLabel(range[1]);
+        maxValue.setName("matchmaking-queue-range-max");
         maxValue.setHorizontalAlignment(SwingConstants.RIGHT);
 
-        JPanel bounds = new JPanel(new BorderLayout());
+        var bounds = new JPanel(new BorderLayout());
         bounds.setOpaque(false);
-        bounds.setMaximumSize(new Dimension(Integer.MAX_VALUE, 22));
-        bounds.setAlignmentX(LEFT_ALIGNMENT);
-        bounds.setBorder(BorderFactory.createEmptyBorder(0, 2, 0, 2));
+        Ui.left(Ui.maxH(bounds, 22));
+        bounds.setBorder(Ui.pad(0, 2, 0, 2));
         bounds.add(minValue, BorderLayout.WEST);
         bounds.add(maxValue, BorderLayout.EAST);
 
         slider = new RangeSlider(0, last, range[0], range[1]);
-        slider.setName(NAME_SLIDER);
+        slider.setName("matchmaking-queue-range-slider");
         slider.setToolTipText("Drag the handles to set the lowest and highest rank to match with");
-        slider.setAlignmentX(LEFT_ALIGNMENT);
+        Ui.left(slider);
         slider.addChangeListener(e ->
         {
-            MatchmakingLobbyPanel.updateRankValueLabel(minValue, slider.getLow());
-            MatchmakingLobbyPanel.updateRankValueLabel(maxValue, slider.getHigh());
+            MatchmakingLobbyPanel.setRankLabel(minValue, slider.getLow());
+            MatchmakingLobbyPanel.setRankLabel(maxValue, slider.getHigh());
             if (!applying && !slider.getValueIsAdjusting() && onCommit != null) onCommit.run();
         });
 
@@ -86,7 +71,7 @@ public class QueueRangeSlider extends JPanel
     /** Runs after the user releases a handle; never for {@link #setRange}. */
     void setOnCommit(Runnable listener)
     {
-        this.onCommit = listener;
+        onCommit = listener;
     }
 
     public int low()

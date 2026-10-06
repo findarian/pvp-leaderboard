@@ -1,20 +1,17 @@
 package com.pvp.leaderboard.queue;
 
-import com.google.gson.JsonObject;
-import com.pvp.leaderboard.lobby.BuildType;
-import com.pvp.leaderboard.lobby.Style;
-import com.pvp.leaderboard.service.socket.SocketEventBus;
-import com.pvp.leaderboard.service.socket.WebSocketManager;
-import lombok.extern.slf4j.Slf4j;
-
-import javax.inject.Inject;
-import javax.inject.Singleton;
-import javax.swing.SwingUtilities;
+import com.google.gson.*;
+import com.pvp.leaderboard.lobby.*;
+import com.pvp.leaderboard.service.socket.*;
+import com.pvp.leaderboard.util.*;
+import java.util.function.*;
+import javax.inject.*;
+import javax.swing.*;
 
 /**
  * {@link QueueService} over the plugin's WebSocket (Plan 10 Part B / F.1,
  * 2026-09-21). Encodes the five {@code queue/*} cmds (WEBSOCKET_PROTOCOL.md
- * § 6.2b) and turns the four server pushes + {@code error/queue} into
+ * § 6.2b) and turns the server pushes + {@code error/queue} into
  * EDT-delivered {@link QueueEventListener} callbacks.
  *
  * <p>Reconnect: after a socket re-open the server's row may or may not
@@ -25,17 +22,16 @@ import javax.swing.SwingUtilities;
  * <p>No UUIDs: {@code queue/join} carries region / style / build / range
  * / wait only; the server keys the row on the trusted connection.
  */
-@Slf4j
 @Singleton
 public class WebSocketQueueService implements QueueService
 {
-    private final WebSocketManager socket;
-    private final SocketEventBus bus;
+    private final SocketMgr socket;
+    private final SocketBus bus;
     private volatile QueueEventListener listener;
     private volatile boolean started = false;
 
     @Inject
-    public WebSocketQueueService(WebSocketManager socket, SocketEventBus bus)
+    public WebSocketQueueService(SocketMgr socket, SocketBus bus)
     {
         this.socket = socket;
         this.bus = bus;
@@ -53,56 +49,47 @@ public class WebSocketQueueService implements QueueService
         if (started) return;
         started = true;
         bus.register("queue/state", this::handleState);
-        bus.register("queue/matched", this::handleMatched);
         bus.register("queue/timeout", this::handleTimeout);
         bus.register("queue/prefs", this::handlePrefs);
         bus.register("error/queue", this::handleError);
-        // ONE re-sync listener: re-sync the queue row and re-read the
-        // shared prefs row (G-2) in the same hook.
-        socket.addResyncListener(this::onSocketConnected);
-    }
-
-    /** Socket (re-)open: ask for the live queue row and the shared prefs. */
-    private void onSocketConnected()
-    {
-        requestStatus();
-        requestPrefs();
+        // ONE re-sync listener: on a socket (re-)open, ask for the live queue
+        // row and re-read the shared prefs row (G-2) in the same hook.
+        socket.addResyncListener(() ->
+        {
+            requestStatus();
+            requestPrefs();
+        });
     }
 
     @Override
     public void join(String region, Style style, BuildType build, int minRankIdx, int maxRankIdx, int waitPrefS)
     {
         if (style == null || build == null) return;
-        JsonObject d = new JsonObject();
+        var d = new JsonObject();
         d.addProperty("region", region == null ? "" : region);
         d.addProperty("style", style.name().toLowerCase());
         d.addProperty("build", build.name().toLowerCase());
         if (minRankIdx != QueueState.UNKNOWN && maxRankIdx != QueueState.UNKNOWN)
         {
-            JsonObject rr = new JsonObject();
-            rr.addProperty("min_rank_idx", Math.min(minRankIdx, maxRankIdx));
-            rr.addProperty("max_rank_idx", Math.max(minRankIdx, maxRankIdx));
-            d.add("rank_range", rr);
+            d.add("rank_range", range(minRankIdx, maxRankIdx));
         }
-        d.addProperty("wait_pref_s", normaliseWait(waitPrefS));
+        d.addProperty("wait_pref_s", snapWait(waitPrefS));
         socket.send("queue/join", d);
     }
 
-    /** Snaps any value onto the shared choice list (AS-64). */
-    static int normaliseWait(int waitPrefS)
+    /** The {@code rank_range} object: the two bounds, lowest first. */
+    private static JsonObject range(int a, int b)
     {
-        int best = WAIT_PREF_CHOICES[1];
-        long bestDelta = Long.MAX_VALUE;
-        for (int c : WAIT_PREF_CHOICES)
-        {
-            long delta = Math.abs((long) c - waitPrefS);
-            if (delta < bestDelta)
-            {
-                bestDelta = delta;
-                best = c;
-            }
-        }
-        return best;
+        var rr = new JsonObject();
+        rr.addProperty("min_rank_idx", Math.min(a, b));
+        rr.addProperty("max_rank_idx", Math.max(a, b));
+        return rr;
+    }
+
+    /** Snaps any value onto the shared choice list (AS-64). */
+    static int snapWait(int waitPrefS)
+    {
+        return WAIT_CHOICES[QueueService.waitIndex(waitPrefS)];
     }
 
     @Override
@@ -138,28 +125,19 @@ public class WebSocketQueueService implements QueueService
     @Override
     public void sendWaitPref(int waitPrefS)
     {
-        JsonObject prefs = new JsonObject();
-        prefs.addProperty("wait_pref_s", normaliseWait(waitPrefS));
+        var prefs = new JsonObject();
+        prefs.addProperty("wait_pref_s", snapWait(waitPrefS));
         sendPrefs(prefs);
     }
 
     @Override
-    public void sendRankRange(int minRankIdx, int maxRankIdx)
+    public void sendRange(int minRankIdx, int maxRankIdx)
     {
-        JsonObject prefs = new JsonObject();
-        if (minRankIdx == QueueState.UNKNOWN || maxRankIdx == QueueState.UNKNOWN)
-        {
-            // An explicit null clears the shared range; an absent key would
-            // leave whatever Discord last wrote in place.
-            prefs.add("rank_range", com.google.gson.JsonNull.INSTANCE);
-        }
-        else
-        {
-            JsonObject rr = new JsonObject();
-            rr.addProperty("min_rank_idx", Math.min(minRankIdx, maxRankIdx));
-            rr.addProperty("max_rank_idx", Math.max(minRankIdx, maxRankIdx));
-            prefs.add("rank_range", rr);
-        }
+        var prefs = new JsonObject();
+        // An explicit null clears the shared range; an absent key would
+        // leave whatever Discord last wrote in place.
+        prefs.add("rank_range", minRankIdx == QueueState.UNKNOWN || maxRankIdx == QueueState.UNKNOWN
+            ? JsonNull.INSTANCE : range(minRankIdx, maxRankIdx));
         sendPrefs(prefs);
     }
 
@@ -167,7 +145,7 @@ public class WebSocketQueueService implements QueueService
      *  the server merges the named keys and leaves the rest alone. */
     private void sendPrefs(JsonObject prefs)
     {
-        JsonObject d = new JsonObject();
+        var d = new JsonObject();
         d.add("prefs", prefs);
         socket.send("queue/set_prefs", d);
     }
@@ -181,19 +159,8 @@ public class WebSocketQueueService implements QueueService
         // matchmaking_queue.status_snapshot starts carrying an additive
         // `prefs` object, this client already applies it — no second
         // plugin release needed (CLAUDE.md § 10).
-        JsonObject prefs = com.pvp.leaderboard.util.JsonLenient.optObject(d, "prefs");
+        JsonObject prefs = JsonLenient.optObject(d, "prefs");
         if (prefs != null) onEdt(l -> l.onQueuePrefs(prefs));
-    }
-
-    private void handleMatched(JsonObject d)
-    {
-        QueueMatch match = QueueMatch.fromJson(d);
-        if (match == null)
-        {
-            log.debug("queue/matched without fight_session_id dropped");
-            return;
-        }
-        onEdt(l -> l.onQueueMatched(match));
     }
 
     private void handleTimeout(JsonObject d)
@@ -204,18 +171,19 @@ public class WebSocketQueueService implements QueueService
 
     private void handlePrefs(JsonObject d)
     {
-        JsonObject prefs = d != null && d.has("prefs") && d.get("prefs").isJsonObject() ? d.getAsJsonObject("prefs") : new JsonObject();
+        JsonObject sent = JsonLenient.optObject(d, "prefs");
+        JsonObject prefs = sent == null ? new JsonObject() : sent;
         onEdt(l -> l.onQueuePrefs(prefs));
     }
 
     private void handleError(JsonObject d)
     {
-        String code = com.pvp.leaderboard.util.JsonLenient.optString(d, "code", "UNKNOWN");
-        String message = com.pvp.leaderboard.util.JsonLenient.optString(d, "message", "");
+        String code = JsonLenient.optString(d, "code", "UNKNOWN");
+        String message = JsonLenient.optString(d, "message");
         onEdt(l -> l.onQueueError(code, message));
     }
 
-    private void onEdt(java.util.function.Consumer<QueueEventListener> fn)
+    private void onEdt(Consumer<QueueEventListener> fn)
     {
         SwingUtilities.invokeLater(() ->
         {
@@ -227,7 +195,6 @@ public class WebSocketQueueService implements QueueService
             }
             catch (Exception e)
             {
-                log.debug("QueueEventListener threw", e);
             }
         });
     }

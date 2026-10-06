@@ -1,85 +1,45 @@
 package com.pvp.leaderboard.ui;
 
-import com.pvp.leaderboard.tournament.TournamentSummary;
-import com.pvp.leaderboard.util.RankUtils;
-
-import javax.swing.BorderFactory;
-import javax.swing.Box;
-import javax.swing.BoxLayout;
-import javax.swing.JButton;
-import javax.swing.JComponent;
-import javax.swing.JLabel;
-import javax.swing.JPanel;
-import javax.swing.border.MatteBorder;
-import java.awt.BorderLayout;
-import java.awt.Color;
-import java.awt.Dimension;
-import java.awt.FlowLayout;
-import java.awt.Font;
-import java.awt.Insets;
-import java.time.ZoneId;
-import java.util.ArrayList;
+import com.pvp.leaderboard.tournament.*;
+import java.awt.*;
+import java.time.*;
+import java.util.*;
+import java.util.function.*;
+import javax.swing.*;
 import java.util.List;
-import java.util.function.LongSupplier;
+import static com.pvp.leaderboard.ui.TourneyPanel.*;
+import static com.pvp.leaderboard.ui.Ui.*;
+import static java.awt.Font.*;
 
-final class TournamentInfoCard extends JPanel
+final class TournamentInfoCard extends CapPanel
 {
-    /** The panel's side of the card's buttons. */
-    interface Actions
-    {
-        void register(TournamentSummary t);
-
-        void withdraw(TournamentSummary t);
-
-        void rules(TournamentSummary t);
-
-        void report(TournamentSummary t);
-    }
-
-    static final String AUTO_ROUNDS_TEXT = "rounds: auto (set at the start)";
     static final String REPORT_LABEL = "Report an issue";
     static final String REPORT_TOOLTIP = "Report an issue with this tournament — the message goes to its host on Discord";
-    static final String REPORT_LOGIN_TOOLTIP = "Log in with Discord to contact the host";
+    static final String LOGIN_TIP = "Log in with Discord to contact the host";
 
-    /** The lobby row's card background + divider. */
-    static final Color CARD_BG = new Color(0x2b, 0x2b, 0x2b);
-    private static final Color DIVIDER = new Color(0x40, 0x40, 0x40);
     /** The lobby's chip palette: region white, style yellow, build cyan. */
     private static final Color CHIP_FORMAT = Color.WHITE;
-    private static final Color CHIP_CATEGORY = new Color(0xff, 0xc1, 0x07);
-    private static final Color CHIP_BUILD = new Color(0x4f, 0xc3, 0xf7);
-    private static final Color GREEN = new Color(0x3e, 0xcf, 0x8e);
-    private static final Color RED = new Color(0x5a, 0x2a, 0x2a);
-    private static final Color RED_FG = new Color(0xff, 0xb3, 0xb3);
-    private static final Color MUTED = new Color(0x9a, 0x9a, 0x9a);
-    private static final Color INFO = new Color(0xdd, 0xdd, 0xdd);
-    private static final float NAME_PT = 16f;
+    private static final Color CHIP_CATEGORY = new Color(0xffc107);
+    private static final Color CHIP_BUILD = new Color(0x4fc3f7);
     private static final float LINE_PT = 15f;
     private static final float CHIP_PT = 14f;
-    private static final float STATUS_PT = 14f;
     /** Card buttons: the full-width one, and the most / least the Report + Rules row may use. */
     static final float BUTTON_PT = 16f;
-    private static final float PAIR_MIN_PT = 14f;
     /** The width a card's text wraps to (the side panel's card, inside its border). */
-    static final int TEXT_WIDTH_PX = 170;
-    /** Room left for the HTML view's own rounding when a line is measured. */
-    private static final int WRAP_SLACK_PX = 4;
-    private static final String[] RANK_LABELS = buildRankLabels();
+    static final int TEXT_WIDTH = 170;
 
-    private final TournamentSummary t;
+    private final Tourney t;
     private final ZoneId zone;
     private final LongSupplier nowMs;
-    private final JLabel when = new JLabel();
+    private final JLabel when;
     /** {@code null} when the event has no registration window to show. */
     private final JLabel closes;
     private final JButton report;
-    private String whenPhrase;
-    private String closesPhrase;
 
     /** {@code myCount} is the player's own match count in the event's bucket
      *  ({@code null} when unknown); {@code refused} marks an event whose
      *  registration was refused for its minimum. */
-    TournamentInfoCard(TournamentSummary t, String myStatus, boolean discordLoggedIn, ZoneId zone, LongSupplier nowMs, Actions actions,
+    TournamentInfoCard(Tourney t, String myStatus, boolean discordLoggedIn, ZoneId zone, LongSupplier nowMs, TourneyPanel p,
                        Integer myCount, boolean refused)
     {
         this.t = t;
@@ -87,65 +47,43 @@ final class TournamentInfoCard extends JPanel
         this.nowMs = nowMs;
         setLayout(new BoxLayout(this, BoxLayout.Y_AXIS));
         setName("tournament-card-" + t.tournamentId);
-        setBackground(CARD_BG);
-        setOpaque(true);
-        setBorder(BorderFactory.createCompoundBorder(new MatteBorder(0, 0, 1, 0, DIVIDER), BorderFactory.createEmptyBorder(4, 6, 6, 6)));
-        setAlignmentX(LEFT_ALIGNMENT);
+        cardStyle(this);
 
-        add(header(myStatus));
-        add(Box.createVerticalStrut(3));
+        header(myStatus);
+        add(vgap(3));
         add(chips());
-        add(Box.createVerticalStrut(3));
+        add(vgap(3));
         addLine("tournament-players-", playersLine(t), INFO);
         String prize = prizeLine(t);
         if (!prize.isEmpty()) addLine("tournament-prize-", prize, INFO);
-        String ranks = rankLimitsLine(t);
+        String ranks = limitsLine(t);
         if (!ranks.isEmpty()) addLine("tournament-ranks-", ranks, MUTED);
         String need = minGamesLine(t);
         if (!need.isEmpty()) addLine("tournament-min-games-", need, MUTED);
         if (t.creatorName != null && !t.creatorName.trim().isEmpty()) addLine("tournament-host-", "Host: " + t.creatorName.trim(), MUTED);
         if (t.gearSet != null) addLine("tournament-kit-", kitLine(t), INFO);
-        when.setName("tournament-when-" + t.tournamentId);
-        when.setFont(when.getFont().deriveFont(Font.PLAIN, LINE_PT));
-        when.setAlignmentX(LEFT_ALIGNMENT);
+        when = label("tournament-when-" + t.tournamentId, "", PLAIN, LINE_PT, null);
         add(when);
-        if (TournamentsPanel.closes(t, zone, nowMs.getAsLong()).isEmpty())
+        if (closes(t, zone, nowMs.getAsLong()).isEmpty())
         {
             closes = null;
         }
         else
         {
-            closes = new JLabel();
-            closes.setName("tournament-closes-" + t.tournamentId);
-            closes.setFont(closes.getFont().deriveFont(Font.PLAIN, LINE_PT));
-            closes.setForeground(MUTED);
-            closes.setAlignmentX(LEFT_ALIGNMENT);
+            closes = label("tournament-closes-" + t.tournamentId, "", PLAIN, LINE_PT, MUTED);
             add(closes);
         }
         tick();
-        add(Box.createVerticalStrut(6));
-        report = TournamentsPanel.tabButton(REPORT_LABEL);
-        report.setName("tournament-report-" + t.tournamentId);
-        report.addActionListener(e -> actions.report(t));
-        JButton rules = TournamentsPanel.tabButton("Rules");
-        rules.setName("tournament-rules-" + t.tournamentId);
-        rules.addActionListener(e -> actions.rules(t));
-        add(pairRow(report, rules));
-        JComponent signUp = signUp(myStatus, actions, myCount, refused);
+        add(vgap(6));
+        report = tabButton(REPORT_LABEL, "tournament-report-" + t.tournamentId, () -> p.onReport(t.tournamentId));
+        add(pairRow(report, tabButton("Rules", "tournament-rules-" + t.tournamentId, () -> p.openRules(t))));
+        JComponent signUp = signUp(myStatus, p, myCount, refused);
         if (signUp != null)
         {
-            add(Box.createVerticalStrut(4));
+            add(vgap(4));
             add(signUp);
         }
         setReportEnabled(discordLoggedIn);
-    }
-
-    /** Pin the card to its preferred height like the lobby cards, so
-     *  BoxLayout never stretches it to fill the viewport. */
-    @Override
-    public Dimension getMaximumSize()
-    {
-        return new Dimension(Integer.MAX_VALUE, getPreferredSize().height);
     }
 
     /** The Report gate: enabled + the host tooltip while logged in with
@@ -153,94 +91,55 @@ final class TournamentInfoCard extends JPanel
     void setReportEnabled(boolean discordLoggedIn)
     {
         report.setEnabled(discordLoggedIn);
-        report.setToolTipText(discordLoggedIn ? REPORT_TOOLTIP : REPORT_LOGIN_TOOLTIP);
+        report.setToolTipText(discordLoggedIn ? REPORT_TOOLTIP : LOGIN_TIP);
     }
 
-    /** Re-renders the two time lines; {@code setText} only when the phrase
-     *  moved, so the panel's 1 Hz beat costs a string compare per label. */
+    /** Re-renders the two time lines (the panel's 1 Hz beat); a label is set only when its text moved. */
     void tick()
     {
         long now = nowMs.getAsLong();
-        String w = TournamentsPanel.when(t, zone, now);
-        if (!w.equals(whenPhrase))
-        {
-            whenPhrase = w;
-            when.setText(wrapHtml(when.getFont(), TEXT_WIDTH_PX, w));
-        }
-        if (closes != null)
-        {
-            String c = TournamentsPanel.closes(t, zone, now);
-            if (!c.equals(closesPhrase))
-            {
-                closesPhrase = c;
-                closes.setText(wrapHtml(closes.getFont(), TEXT_WIDTH_PX, c));
-            }
-        }
+        setWrapped(when, when(t, zone, now));
+        if (closes != null) setWrapped(closes, closes(t, zone, now));
     }
 
     // ---------------------------------------------------------------- rows
     /** The event's name at the card's full width, then the player's status
      *  marker (if any) on its own line. */
-    private JPanel header(String myStatus)
+    private void header(String myStatus)
     {
-        JPanel block = new JPanel();
-        block.setLayout(new BoxLayout(block, BoxLayout.Y_AXIS));
-        block.setOpaque(false);
-        block.setAlignmentX(LEFT_ALIGNMENT);
-        JLabel name = new JLabel();
-        name.setName("tournament-name-" + t.tournamentId);
-        name.setFont(name.getFont().deriveFont(Font.BOLD, NAME_PT));
-        name.setForeground(Color.WHITE);
-        name.setAlignmentX(LEFT_ALIGNMENT);
-        name.setText(wrapHtml(name.getFont(), TEXT_WIDTH_PX, t.name));
-        block.add(name);
+        JLabel name = label("tournament-name-" + t.tournamentId, "", BOLD, BUTTON_PT, Color.WHITE);
+        wrap(name, t.name);
+        add(name);
         if (myStatus != null && !myStatus.isEmpty())
         {
             boolean registered = "registered".equals(myStatus);
-            JLabel my = new JLabel(registered ? "Registered" : "You: " + myStatus);
-            my.setName("tournament-my-" + t.tournamentId);
-            my.setFont(my.getFont().deriveFont(Font.BOLD, STATUS_PT));
-            my.setForeground(registered ? GREEN : MUTED);
-            my.setAlignmentX(LEFT_ALIGNMENT);
-            block.add(my);
+            add(label("tournament-my-" + t.tournamentId, registered ? "Registered" : "You: " + myStatus, BOLD, CHIP_PT, registered ? GREEN : MUTED));
             String meeting = meetingLine(t);
             if (registered && !meeting.isEmpty())
             {
-                JLabel meet = new JLabel();
-                meet.setName("tournament-meeting-" + t.tournamentId);
-                meet.setFont(meet.getFont().deriveFont(Font.PLAIN, STATUS_PT));
-                meet.setForeground(MUTED);
-                meet.setAlignmentX(LEFT_ALIGNMENT);
-                meet.setText(wrapHtml(meet.getFont(), TEXT_WIDTH_PX, meeting));
-                block.add(meet);
+                JLabel meet = label("tournament-meeting-" + t.tournamentId, "", PLAIN, CHIP_PT, MUTED);
+                wrap(meet, meeting);
+                add(meet);
             }
         }
-        block.setMaximumSize(new Dimension(Integer.MAX_VALUE, block.getPreferredSize().height));
-        return block;
     }
 
     /** [Swiss] [NH] [Main] — the lobby's [Region] [style] / [build] rows collapsed to one. */
     private JPanel chips()
     {
-        JPanel chips = new JPanel(new FlowLayout(FlowLayout.LEFT, 3, 0));
+        var chips = new JPanel(new FlowLayout(FlowLayout.LEFT, 3, 0));
         chips.setOpaque(false);
         chips.setName("tournament-chips-" + t.tournamentId);
-        chips.setAlignmentX(LEFT_ALIGNMENT);
         chips.add(chip(formatLabel(t), CHIP_FORMAT));
         chips.add(chip(t.categoryLabel(), CHIP_CATEGORY));
         chips.add(chip(t.buildLabel(), CHIP_BUILD));
-        chips.setMaximumSize(new Dimension(Integer.MAX_VALUE, chips.getPreferredSize().height));
-        return chips;
+        return pin(left(chips));
     }
 
     private void addLine(String namePrefix, String text, Color fg)
     {
-        JLabel l = new JLabel();
-        l.setName(namePrefix + t.tournamentId);
-        l.setFont(l.getFont().deriveFont(Font.PLAIN, LINE_PT));
-        l.setText(wrapHtml(l.getFont(), TEXT_WIDTH_PX, text));
-        l.setForeground(fg);
-        l.setAlignmentX(LEFT_ALIGNMENT);
+        JLabel l = label(namePrefix + t.tournamentId, "", PLAIN, LINE_PT, fg);
+        wrap(l, text);
         add(l);
     }
 
@@ -248,133 +147,113 @@ final class TournamentInfoCard extends JPanel
      *  allow, as the card's full-width button; in Register's place the
      *  minimum's sentence when the player is below it; {@code null} for
      *  neither. */
-    private JComponent signUp(String myStatus, Actions actions, Integer myCount, boolean refused)
+    private JComponent signUp(String myStatus, TourneyPanel p, Integer myCount, boolean refused)
     {
         boolean registered = "registered".equals(myStatus);
-        if (registered && (t.isOpenForRegistration() || t.isRunning()))
+        if (registered && (t.isRegOpen() || t.isRunning()))
         {
-            JButton withdraw = TournamentsPanel.tabButton("Withdraw");
-            withdraw.setName("tournament-withdraw-" + t.tournamentId);
+            JButton withdraw = tabButton("Withdraw", "tournament-withdraw-" + t.tournamentId, () -> p.service.withdraw(t.tournamentId));
             withdraw.setBackground(RED);
             withdraw.setForeground(RED_FG);
-            withdraw.addActionListener(e -> actions.withdraw(t));
             return withdraw;
         }
-        if (!registered && (t.isOpenForRegistration() || (t.isRunning() && t.midEventJoins)))
+        if (!registered && (t.isRegOpen() || (t.isRunning() && t.lateJoins)))
         {
             if (belowMinimum(t, myCount, refused))
             {
-                JLabel blocked = new JLabel();
-                blocked.setName("tournament-min-games-blocked-" + t.tournamentId);
-                blocked.setFont(blocked.getFont().deriveFont(Font.PLAIN, LINE_PT));
-                blocked.setText(wrapHtml(blocked.getFont(), TEXT_WIDTH_PX, minGamesRefusal(t)));
-                blocked.setForeground(INFO);
-                blocked.setAlignmentX(LEFT_ALIGNMENT);
+                JLabel blocked = label("tournament-min-games-blocked-" + t.tournamentId, "", PLAIN, LINE_PT, INFO);
+                wrap(blocked, gamesRefusal(t));
                 return blocked;
             }
-            JButton register = TournamentsPanel.tabButton("Register");
-            register.setName("tournament-register-" + t.tournamentId);
+            JButton register = tabButton("Register", "tournament-register-" + t.tournamentId, () -> p.register(t));
             register.setBackground(GREEN);
             register.setForeground(Color.BLACK);
-            register.addActionListener(e -> actions.register(t));
             return register;
         }
         return null;
     }
 
     /** The pair's side margins: the narrow button takes 4 px a side from the wide one. */
-    static final Insets PAIR_WIDE_MARGIN = new Insets(6, 4, 6, 4);
-    static final Insets PAIR_NARROW_MARGIN = new Insets(6, 12, 6, 12);
-    /** Room the narrow button keeps beside its label, measured at {@link #BUTTON_PT}. */
-    static final int PAIR_SPARE_PX = 8;
+    static final Insets WIDE_MARGIN = new Insets(6, 4, 6, 4);
+    static final Insets SLIM_MARGIN = new Insets(6, 12, 6, 12);
 
     /** Two buttons on one row: {@code narrow} is as wide as its label at
-     *  {@link #BUTTON_PT} with its insets plus {@link #PAIR_SPARE_PX}, at
+     *  {@link #BUTTON_PT} with its insets plus 8 px of spare room, at
      *  every size; {@code wide} fills the rest, both at the largest size from
      *  {@link #BUTTON_PT} down that keeps {@code wide}'s label on one line;
      *  {@code narrow} gets the wider side margins. */
     static JPanel pairRow(JButton wide, JButton narrow)
     {
-        wide.setMargin(PAIR_WIDE_MARGIN);
-        narrow.setMargin(PAIR_NARROW_MARGIN);
+        wide.setMargin(WIDE_MARGIN);
+        narrow.setMargin(SLIM_MARGIN);
         narrow.setPreferredSize(null);
         narrow.setFont(narrow.getFont().deriveFont(BUTTON_PT));
-        int narrowWidth = narrow.getPreferredSize().width + PAIR_SPARE_PX;
-        for (float pt = BUTTON_PT; pt >= PAIR_MIN_PT; pt--)
+        int narrowWidth = narrow.getPreferredSize().width + 8;
+        for (float pt = BUTTON_PT; pt >= CHIP_PT; pt--)
         {
             wide.setFont(wide.getFont().deriveFont(pt));
             narrow.setFont(narrow.getFont().deriveFont(pt));
-            if (wide.getPreferredSize().width + narrowWidth + 4 <= TEXT_WIDTH_PX) break;
+            if (wide.getPreferredSize().width + narrowWidth + 4 <= TEXT_WIDTH) break;
         }
         narrow.setPreferredSize(new Dimension(narrowWidth, narrow.getPreferredSize().height));
         narrow.setMinimumSize(new Dimension(narrowWidth, narrow.getMinimumSize().height));
-        JPanel row = new JPanel(new BorderLayout(4, 0));
+        var row = new JPanel(new BorderLayout(4, 0));
         row.setOpaque(false);
-        row.setAlignmentX(LEFT_ALIGNMENT);
         row.add(wide, BorderLayout.CENTER);
         row.add(narrow, BorderLayout.EAST);
-        row.setMaximumSize(new Dimension(Integer.MAX_VALUE, row.getPreferredSize().height));
-        return row;
+        return pin(left(row));
     }
 
     /** The lobby's chip: a tight bordered label, bold, coloured border + text. */
     private static JLabel chip(String text, Color color)
     {
-        JLabel chip = new JLabel(text);
-        chip.setFont(chip.getFont().deriveFont(Font.BOLD, CHIP_PT));
-        chip.setForeground(color);
-        chip.setBorder(BorderFactory.createCompoundBorder(BorderFactory.createLineBorder(color, 1), BorderFactory.createEmptyBorder(1, 5, 1, 5)));
+        JLabel chip = label(null, text, BOLD, CHIP_PT, color);
+        chip.setBorder(BorderFactory.createCompoundBorder(BorderFactory.createLineBorder(color, 1), pad(1, 5, 1, 5)));
         chip.setOpaque(false);
         return chip;
     }
 
     // ---------------------------------------------------------------- pure text builders
     /** {@code "Swiss"} — the format capitalised, Swiss when unset. */
-    static String formatLabel(TournamentSummary t)
+    static String formatLabel(Tourney t)
     {
-        return t.format == null || t.format.isEmpty() ? "Swiss" : Character.toUpperCase(t.format.charAt(0)) + t.format.substring(1);
+        return t.format.isEmpty() ? "Swiss" : Character.toUpperCase(t.format.charAt(0)) + t.format.substring(1);
     }
 
-    static String playersLine(TournamentSummary t)
+    static String playersLine(Tourney t)
     {
         List<String> parts = new ArrayList<>();
-        if (t.roundsAuto && t.isOpenForRegistration()) parts.add(AUTO_ROUNDS_TEXT);
+        if (t.roundsAuto && t.isRegOpen()) parts.add("rounds: auto (set at the start)");
         else if (t.rounds > 0) parts.add(t.rounds + (t.rounds == 1 ? " round" : " rounds"));
-        parts.add(t.maxPlayers > 0 ? t.registeredCount + " / " + t.maxPlayers + " players" : t.registeredCount + " registered");
+        parts.add(t.maxPlayers > 0 ? t.regCount + " / " + t.maxPlayers + " players" : t.regCount + " registered");
         if (t.pluginRequired) parts.add("plugin required");
         return capitalise(String.join(" · ", parts));
     }
 
-    static String prizeLine(TournamentSummary t)
+    static String prizeLine(Tourney t)
     {
         List<String> parts = new ArrayList<>();
-        if (t.buyInGp > 0) parts.add("buy-in " + TournamentsPanel.gp(t.buyInGp));
-        parts.addAll(prizeParts(t));
+        if (t.buyInGp > 0) parts.add("buy-in " + gp(t.buyInGp));
+        String mode = t.prizeMode.trim().toLowerCase(Locale.ROOT);
+        if (!"none".equals(mode))
+        {
+            int topX = Math.max(1, t.prizeTopX);
+            parts.add("top_x_random_y".equals(mode)
+                ? "prize: top " + topX + " + " + Math.max(0, t.prizeRandomY) + " random full participants"
+                : "prize: top " + topX);
+            if (t.prizePoolGp > 0) parts.add("prize pool " + gp(t.prizePoolGp));
+        }
         return capitalise(String.join(" · ", parts));
-    }
-
-    static List<String> prizeParts(TournamentSummary t)
-    {
-        String mode = t.prizeMode == null ? "" : t.prizeMode.trim().toLowerCase(java.util.Locale.ROOT);
-        if (mode.isEmpty()) mode = "top_x";
-        List<String> parts = new ArrayList<>();
-        if ("none".equals(mode)) return parts;
-        int topX = Math.max(1, t.prizeTopX);
-        parts.add("top_x_random_y".equals(mode)
-            ? "prize: top " + topX + " + " + Math.max(0, t.prizeRandomY) + " random full participants"
-            : "prize: top " + topX);
-        if (t.prizePoolGp > 0) parts.add("prize pool " + TournamentsPanel.gp(t.prizePoolGp));
-        return parts;
     }
 
     /** {@code "Rank NH Rune 3 – Dragon 1"} / {@code "Min rank NH Rune 3"} / {@code "Max rank DMM Dragon 1"},
      *  one part per bucket ({@code _rank_limit_parts}); {@code ""} when the event has no limits. */
-    static String rankLimitsLine(TournamentSummary t)
+    static String limitsLine(Tourney t)
     {
         List<String> parts = new ArrayList<>();
-        for (TournamentSummary.RankLimit l : t.rankLimits)
+        for (Tourney.RankLimit l : t.rankLimits)
         {
-            String label = TournamentSummary.categoryLabel(l.bucket);
+            String label = Tourney.categoryLabel(l.bucket);
             if (l.minIdx >= 0 && l.maxIdx >= 0) parts.add("rank " + label + " " + rankLabel(l.minIdx) + " – " + rankLabel(l.maxIdx));
             else if (l.minIdx >= 0) parts.add("min rank " + label + " " + rankLabel(l.minIdx));
             else if (l.maxIdx >= 0) parts.add("max rank " + label + " " + rankLabel(l.maxIdx));
@@ -383,48 +262,48 @@ final class TournamentInfoCard extends JPanel
     }
 
     /** {@code "50 NH matches required"}; {@code ""} when the event has no minimum. */
-    static String minGamesLine(TournamentSummary t)
+    static String minGamesLine(Tourney t)
     {
         if (t.minGames <= 0) return "";
         return t.minGames + " " + bucketWord(t) + "matches required";
     }
 
     /** {@code "You need 50 NH matches to join."} */
-    static String minGamesRefusal(TournamentSummary t)
+    static String gamesRefusal(Tourney t)
     {
         return "You need " + t.minGames + " " + bucketWord(t) + "matches to join.";
     }
 
     /** {@code true} when the event has a minimum and the player is below it:
      *  a known count under it, or a registration already refused for it.
-     *  An unknown or negative count is not below. */
-    static boolean belowMinimum(TournamentSummary t, Integer myCount, boolean refused)
+     *  An unknown count is not below. */
+    static boolean belowMinimum(Tourney t, Integer myCount, boolean refused)
     {
         if (t.minGames <= 0) return false;
         if (refused) return true;
-        return myCount != null && myCount >= 0 && myCount < t.minGames;
+        return myCount != null && myCount < t.minGames;
     }
 
     /** The event bucket's label and a space ({@code "NH "}), or nothing when the event names no bucket. */
-    private static String bucketWord(TournamentSummary t)
+    private static String bucketWord(Tourney t)
     {
-        return t.category == null || t.category.trim().isEmpty() ? "" : TournamentSummary.categoryLabel(t.category.trim()) + " ";
+        return t.category.trim().isEmpty() ? "" : Tourney.categoryLabel(t.category.trim()) + " ";
     }
 
     /** {@code "Meet on W578 · PvP Arena entrance"} ({@code "Meet on W578"} without a place); {@code ""} without a world. */
-    static String meetingLine(TournamentSummary t)
+    static String meetingLine(Tourney t)
     {
         if (t.meetingWorld == null) return "";
         return "Meet on " + t.meetingWorld + (t.meetingPlace == null ? "" : " · " + t.meetingPlace);
     }
 
-    static String kitLine(TournamentSummary t)
+    static String kitLine(Tourney t)
     {
         List<String> parts = new ArrayList<>();
         parts.add("Kit: " + t.gearSet.name);
         parts.add(t.gearSet.buildLabel);
-        if (t.gearSet.spellbookLabel != null) parts.add(t.gearSet.spellbookLabel);
-        String where = t.location == null ? "" : t.location.trim().toLowerCase(java.util.Locale.ROOT);
+        if (t.gearSet.bookLabel != null) parts.add(t.gearSet.bookLabel);
+        String where = t.location == null ? "" : t.location.trim().toLowerCase(Locale.ROOT);
         if (where.isEmpty() || where.contains("arena")) parts.add("PvP Arena duels");
         return String.join(" · ", parts);
     }
@@ -433,20 +312,7 @@ final class TournamentInfoCard extends JPanel
      *  (the backend's {@code rank_label}). */
     static String rankLabel(int idx)
     {
-        return idx < 0 || idx >= RANK_LABELS.length ? "?" : RANK_LABELS[idx];
-    }
-
-    /** The lobby's {@code buildRankLabels} over {@link RankUtils#THRESHOLDS} (private there). */
-    private static String[] buildRankLabels()
-    {
-        String[] out = new String[RankUtils.THRESHOLDS.length];
-        for (int i = 0; i < RankUtils.THRESHOLDS.length; i++)
-        {
-            String name = RankUtils.THRESHOLDS[i][0];
-            String div = RankUtils.THRESHOLDS[i][1];
-            out[i] = "0".equals(div) ? name : name + " " + div;
-        }
-        return out;
+        return idx < 0 || idx >= PlayerCard.RANK_LABELS.length ? "?" : PlayerCard.RANK_LABELS[idx];
     }
 
     /** Plain text as {@code <html>} lines joined by {@code <br>}, each no
@@ -455,7 +321,7 @@ final class TournamentInfoCard extends JPanel
     static String wrapHtml(Font font, int widthPx, String... paragraphs)
     {
         List<String> escaped = new ArrayList<>();
-        for (String p : paragraphs) escaped.add(TournamentsPanel.escape(p == null ? "" : p));
+        for (String p : paragraphs) escaped.add(escape(p == null ? "" : p));
         return "<html>" + wrapLines(font, widthPx, escaped) + "</html>";
     }
 
@@ -463,24 +329,24 @@ final class TournamentInfoCard extends JPanel
      *  {@code <html>} wrapper, for a label that adds its own markup after them. */
     static String wrapInner(Font font, int widthPx, String escaped)
     {
-        return wrapLines(font, widthPx, java.util.Collections.singletonList(escaped == null ? "" : escaped));
+        return wrapLines(font, widthPx, Collections.singletonList(escaped == null ? "" : escaped));
     }
 
     /** {@link #wrapHtml} for text that is already escaped (entities, no tags). */
     static String wrapEscaped(Font font, int widthPx, String escaped)
     {
-        return "<html>" + wrapLines(font, widthPx, java.util.Collections.singletonList(escaped == null ? "" : escaped)) + "</html>";
+        return "<html>" + wrapInner(font, widthPx, escaped) + "</html>";
     }
 
     private static String wrapLines(Font font, int widthPx, List<String> paragraphs)
     {
-        RowTextFit fit = new RowTextFit();
-        int budget = widthPx - WRAP_SLACK_PX;
-        StringBuilder out = new StringBuilder();
+        var fit = new RowTextFit();
+        int budget = widthPx - 4;
+        var out = new StringBuilder();
         for (String paragraph : paragraphs)
         {
             if (out.length() > 0) out.append("<br>");
-            StringBuilder line = new StringBuilder();
+            var line = new StringBuilder();
             for (String word : paragraph.split(" "))
             {
                 if (word.isEmpty()) continue;

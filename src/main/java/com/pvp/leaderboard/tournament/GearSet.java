@@ -1,15 +1,12 @@
 package com.pvp.leaderboard.tournament;
 
-import com.google.gson.JsonElement;
-import com.google.gson.JsonObject;
-import com.pvp.leaderboard.util.JsonLenient;
+import com.google.gson.*;
+import com.pvp.leaderboard.util.*;
+import java.util.*;
+import lombok.*;
+import static com.pvp.leaderboard.util.JsonLenient.*;
 
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.Collections;
-import java.util.List;
-import java.util.Locale;
-
+@AllArgsConstructor
 public final class GearSet
 {
     public static final String VARIANTS_ANY = "any";
@@ -25,67 +22,49 @@ public final class GearSet
     public final String build;
     public final String buildLabel;
     public final String spellbook;
-    public final String spellbookLabel;
+    public final String bookLabel;
     public final String match;
     public final String variants;
     public final String digest;
     public final String imageUrl;
     public final List<GearItem> items;
 
-    public GearSet(String setId, String name, int version, boolean placeholder, String build, String buildLabel, String spellbook,
-                   String spellbookLabel, String match, String variants, String digest, String imageUrl, List<GearItem> items)
-    {
-        this.setId = setId;
-        this.name = name;
-        this.version = version;
-        this.placeholder = placeholder;
-        this.build = build;
-        this.buildLabel = buildLabel;
-        this.spellbook = spellbook;
-        this.spellbookLabel = spellbookLabel;
-        this.match = match;
-        this.variants = variants;
-        this.digest = digest;
-        this.imageUrl = imageUrl;
-        this.items = items == null ? Collections.<GearItem>emptyList() : Collections.unmodifiableList(new ArrayList<>(items));
-    }
-
     public static GearSet fromJson(JsonElement e)
     {
         if (e == null || !e.isJsonObject()) return null;
         JsonObject o = e.getAsJsonObject();
-        String setId = JsonLenient.optString(o, "set_id", "").trim();
-        String digest = JsonLenient.optString(o, "digest", "").trim();
-        String build = JsonLenient.optString(o, "build", "");
+        String setId = optString(o, "set_id").trim();
+        String digest = optString(o, "digest").trim();
+        String build = optString(o, "build");
         if (setId.isEmpty() || digest.isEmpty() || !BUILDS.contains(build)) return null;
         List<GearItem> items = new ArrayList<>();
-        for (JsonElement item : JsonLenient.optArray(o, "items"))
+        for (JsonElement item : optArray(o, "items"))
         {
             GearItem parsed = GearItem.fromJson(item);
             if (parsed != null) items.add(parsed);
         }
         if (items.isEmpty()) return null;
-        String spellbook = JsonLenient.optString(o, "spellbook", null);
+        String spellbook = optString(o, "spellbook", null);
         if (!SPELLBOOKS.contains(spellbook)) spellbook = null;
-        String buildLabel = JsonLenient.optString(o, "build_label", "").trim();
-        String spellbookLabel = JsonLenient.optString(o, "spellbook_label", "").trim();
-        String variants = JsonLenient.optString(o, "variants", VARIANTS_ANY);
-        Integer version = JsonLenient.optInteger(o, "version");
-        String name = JsonLenient.optString(o, "name", "").trim();
+        String buildLabel = optString(o, "build_label").trim();
+        String bookLabel = optString(o, "spellbook_label").trim();
+        String variants = optString(o, "variants", VARIANTS_ANY);
+        Integer version = optInteger(o, "version");
+        String name = optString(o, "name").trim();
         return new GearSet(
             setId,
             name.isEmpty() ? setId : name,
             version == null || version < 1 ? 1 : version,
-            JsonLenient.optBool(o, "placeholder", false),
+            optBool(o, "placeholder", false),
             build,
             buildLabel.isEmpty() ? buildLabel(build) : buildLabel,
             spellbook,
-            spellbook == null ? null : spellbookLabel.isEmpty() ? spellbookLabel(spellbook) : spellbookLabel,
+            spellbook == null ? null : bookLabel.isEmpty() ? bookLabel(spellbook) : bookLabel,
             "exact",
             VARIANTS_EXACT.equals(variants) ? VARIANTS_EXACT : VARIANTS_ANY,
             digest,
-            JsonLenient.optString(o, "image_url", null),
-            items);
+            optString(o, "image_url", null),
+            Collections.unmodifiableList(items));
     }
 
     public String variantsFor(GearItem item)
@@ -110,7 +89,7 @@ public final class GearSet
         return null;
     }
 
-    public static String spellbookLabel(String key)
+    public static String bookLabel(String key)
     {
         if (key == null) return null;
         switch (key)
@@ -123,7 +102,7 @@ public final class GearSet
         }
     }
 
-    public static String spellbookFromText(String text)
+    public static String bookOfText(String text)
     {
         String t = plain(text);
         if (t.contains("ancient")) return "ancient";
@@ -133,12 +112,12 @@ public final class GearSet
         return null;
     }
 
-    public static String spellbookFromVarbit(int value)
+    public static String bookOfVarbit(int value)
     {
         return value >= 0 && value < SPELLBOOKS.size() ? SPELLBOOKS.get(value) : null;
     }
 
-    static String plain(String text)
+    public static String plain(String text)
     {
         if (text == null) return "";
         return text.replaceAll("<[^>]*>", "").replace(' ', ' ').trim().toLowerCase(Locale.ROOT);

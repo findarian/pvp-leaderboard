@@ -1,14 +1,11 @@
 package com.pvp.leaderboard.tournament;
 
-import com.google.gson.JsonArray;
-
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.List;
+import com.google.gson.*;
+import java.util.*;
 
 public final class GearDiff
 {
-    public static final int WIRE_DIFF_MAX = 12;
+    public static final int DIFF_MAX = 12;
 
     public static final class Row
     {
@@ -20,11 +17,6 @@ public final class GearDiff
         public final boolean noted;
         public final List<Integer> altIds;
 
-        public Row(int itemId, String name, int need, int have, boolean stackable, boolean noted)
-        {
-            this(itemId, name, need, have, stackable, noted, Collections.<Integer>emptyList());
-        }
-
         public Row(int itemId, String name, int need, int have, boolean stackable, boolean noted, List<Integer> altIds)
         {
             this.itemId = itemId;
@@ -33,8 +25,7 @@ public final class GearDiff
             this.have = have;
             this.stackable = stackable;
             this.noted = noted;
-            this.altIds = altIds == null || altIds.isEmpty() ? Collections.<Integer>emptyList()
-                : Collections.unmodifiableList(new ArrayList<>(altIds));
+            this.altIds = altIds == null ? Collections.<Integer>emptyList() : altIds;
         }
 
         public boolean isMissing()
@@ -84,31 +75,21 @@ public final class GearDiff
         this.setSpellbook = setSpellbook;
         this.kitSpellbook = kitSpellbook;
         this.spellbookOk = spellbookOk;
-        this.missing = missing == null ? Collections.<Row>emptyList() : Collections.unmodifiableList(new ArrayList<>(missing));
-        this.extra = extra == null ? Collections.<Row>emptyList() : Collections.unmodifiableList(new ArrayList<>(extra));
+        this.missing = missing;
+        this.extra = extra;
         this.pouchUnknown = pouchUnknown;
-        this.ok = buildOk && spellbookOk && this.missing.isEmpty() && this.extra.isEmpty();
-    }
-
-    public int missingCount()
-    {
-        return missing.size();
-    }
-
-    public int extraCount()
-    {
-        return extra.size();
+        ok = buildOk && spellbookOk && missing.isEmpty() && extra.isEmpty();
     }
 
     public JsonArray wireDiff()
     {
-        JsonArray out = new JsonArray();
-        for (List<Row> rows : java.util.Arrays.asList(missing, extra))
+        var out = new JsonArray();
+        for (List<Row> rows : Arrays.asList(missing, extra))
         {
             for (Row r : rows)
             {
-                if (out.size() >= WIRE_DIFF_MAX) return out;
-                JsonArray t = new JsonArray();
+                if (out.size() >= DIFF_MAX) return out;
+                var t = new JsonArray();
                 t.add(r.itemId);
                 t.add(r.need);
                 t.add(r.have);
@@ -126,11 +107,5 @@ public final class GearDiff
         if (!buildOk) parts.add("wrong build");
         if (!spellbookOk) parts.add("wrong spellbook");
         return String.join(", ", parts);
-    }
-
-    @Override
-    public String toString()
-    {
-        return "GearDiff{" + (ok ? "ok" : summary()) + "}";
     }
 }

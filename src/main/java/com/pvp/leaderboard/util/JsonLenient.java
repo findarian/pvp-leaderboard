@@ -1,8 +1,7 @@
 package com.pvp.leaderboard.util;
 
-import com.google.gson.JsonArray;
-import com.google.gson.JsonElement;
-import com.google.gson.JsonObject;
+import com.google.gson.*;
+import java.util.function.*;
 
 /**
  * Null- and type-tolerant readers for server-pushed JSON (Plan 10,
@@ -14,14 +13,30 @@ import com.google.gson.JsonObject;
  */
 public final class JsonLenient
 {
-    private JsonLenient() {}
+    private static JsonElement get(JsonObject o, String key)
+    {
+        return o == null ? null : o.get(key);
+    }
+
+    /** {@code read} of the primitive at {@code key}; {@code def} when there is
+     *  no object, no such key, JSON null, an object or array, or {@code read}
+     *  throws (a string that is not a number). */
+    private static <T> T opt(JsonObject o, String key, T def, Function<JsonPrimitive, T> read)
+    {
+        JsonElement e = get(o, key);
+        if (e == null || !e.isJsonPrimitive()) return def;
+        try { return read.apply(e.getAsJsonPrimitive()); } catch (RuntimeException ex) { return def; }
+    }
 
     public static String optString(JsonObject o, String key, String def)
     {
-        if (o == null) return def;
-        JsonElement e = o.get(key);
-        if (e == null || e.isJsonNull() || !e.isJsonPrimitive()) return def;
-        try { return e.getAsString(); } catch (RuntimeException ex) { return def; }
+        return opt(o, key, def, JsonPrimitive::getAsString);
+    }
+
+    /** {@link #optString(JsonObject, String, String)} with {@code ""} for none. */
+    public static String optString(JsonObject o, String key)
+    {
+        return optString(o, key, "");
     }
 
     public static int optInt(JsonObject o, String key, int def)
@@ -32,26 +47,24 @@ public final class JsonLenient
 
     public static Integer optInteger(JsonObject o, String key)
     {
-        if (o == null) return null;
-        JsonElement e = o.get(key);
-        if (e == null || e.isJsonNull() || !e.isJsonPrimitive()) return null;
-        try { return (int) e.getAsDouble(); } catch (RuntimeException ex) { return null; }
+        return opt(o, key, null, p -> (int) p.getAsDouble());
     }
 
     public static long optLong(JsonObject o, String key, long def)
     {
-        if (o == null) return def;
-        JsonElement e = o.get(key);
-        if (e == null || e.isJsonNull() || !e.isJsonPrimitive()) return def;
-        try { return (long) e.getAsDouble(); } catch (RuntimeException ex) { return def; }
+        return opt(o, key, def, p -> (long) p.getAsDouble());
     }
 
     public static double optDouble(JsonObject o, String key, double def)
     {
-        if (o == null) return def;
-        JsonElement e = o.get(key);
-        if (e == null || e.isJsonNull() || !e.isJsonPrimitive()) return def;
-        try { return e.getAsDouble(); } catch (RuntimeException ex) { return def; }
+        return opt(o, key, def, JsonPrimitive::getAsDouble);
+    }
+
+    /** A whole JSON number of at least 1; -1 for anything else (a numeric string, a fraction, 0, a boolean, absent). */
+    public static long optWhole(JsonObject o, String key)
+    {
+        double v = opt(o, key, 0.0, p -> p.isNumber() ? p.getAsDouble() : 0.0);
+        return v >= 1 && v % 1 == 0 ? (long) v : -1;
     }
 
     /** A real boolean, or the strings {@code "true"} / {@code "false"}; anything
@@ -59,39 +72,31 @@ public final class JsonLenient
      *  {@code getAsBoolean()} would silently read {@code "yes"} as false. */
     public static boolean optBool(JsonObject o, String key, boolean def)
     {
-        if (o == null) return def;
-        JsonElement e = o.get(key);
-        if (e == null || e.isJsonNull() || !e.isJsonPrimitive()) return def;
-        try
+        return opt(o, key, def, p ->
         {
-            if (e.getAsJsonPrimitive().isBoolean()) return e.getAsBoolean();
-            if (e.getAsJsonPrimitive().isString())
-            {
-                String s = e.getAsString().trim();
-                if ("true".equalsIgnoreCase(s)) return true;
-                if ("false".equalsIgnoreCase(s)) return false;
-            }
-            return def;
-        }
-        catch (RuntimeException ex)
-        {
-            return def;
-        }
+            if (p.isBoolean()) return p.getAsBoolean();
+            String s = p.getAsString().trim();
+            return "true".equalsIgnoreCase(s) || !"false".equalsIgnoreCase(s) && def;
+        });
     }
 
     /** The nested object, or {@code null} when absent / not an object. */
     public static JsonObject optObject(JsonObject o, String key)
     {
-        if (o == null) return null;
-        JsonElement e = o.get(key);
+        JsonElement e = get(o, key);
         return e != null && e.isJsonObject() ? e.getAsJsonObject() : null;
     }
 
     /** The nested array, or an empty array when absent / not an array. */
     public static JsonArray optArray(JsonObject o, String key)
     {
-        if (o == null) return new JsonArray();
-        JsonElement e = o.get(key);
+        JsonElement e = get(o, key);
         return e != null && e.isJsonArray() ? e.getAsJsonArray() : new JsonArray();
+    }
+
+    /** The element's text when it is a JSON string, else {@code null} (a number or an object is not text). */
+    public static String str(JsonElement e)
+    {
+        return e != null && e.isJsonPrimitive() && e.getAsJsonPrimitive().isString() ? e.getAsString() : null;
     }
 }

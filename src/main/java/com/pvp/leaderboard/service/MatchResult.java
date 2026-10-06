@@ -1,12 +1,9 @@
 package com.pvp.leaderboard.service;
 
-import lombok.Builder;
-import lombok.Getter;
-import lombok.ToString;
+import lombok.*;
 
 @Getter
 @Builder
-@ToString
 public class MatchResult
 {
     private final String playerId;

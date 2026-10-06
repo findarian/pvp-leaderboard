@@ -1,8 +1,7 @@
 package com.pvp.leaderboard.queue;
 
-import com.google.gson.JsonElement;
-import com.google.gson.JsonObject;
-import com.pvp.leaderboard.util.JsonLenient;
+import com.google.gson.*;
+import com.pvp.leaderboard.util.*;
 
 /**
  * The shared matchmaking preferences carried by a {@code queue/prefs}
@@ -30,7 +29,7 @@ import com.pvp.leaderboard.util.JsonLenient;
 public final class QueuePrefs
 {
     /** The shared wait preference in seconds, snapped onto
-     *  {@link QueueService#WAIT_PREF_CHOICES}, or {@link QueueState#UNKNOWN}
+     *  {@link QueueService#WAIT_CHOICES}, or {@link QueueState#UNKNOWN}
      *  when the push stated none. */
     public final int waitPrefS;
 
@@ -62,41 +61,33 @@ public final class QueuePrefs
      *  {@code null} / empty states nothing. */
     public static QueuePrefs fromJson(JsonObject prefs)
     {
-        if (prefs == null) return new QueuePrefs(QueueState.UNKNOWN, null, QueueState.UNKNOWN, QueueState.UNKNOWN);
-
         Integer wait = JsonLenient.optInteger(prefs, "wait_pref_s");
-        int waitPrefS = wait == null ? QueueState.UNKNOWN : WebSocketQueueService.normaliseWait(wait);
-
         Boolean rangeEnabled = null;
         int min = QueueState.UNKNOWN;
         int max = QueueState.UNKNOWN;
-        JsonElement rrRaw = prefs.get("rank_range");
+        JsonElement rrRaw = prefs == null ? null : prefs.get("rank_range");
         if (rrRaw != null && rrRaw.isJsonNull())
         {
             // The server explicitly cleared the shared range.
-            rangeEnabled = Boolean.FALSE;
+            rangeEnabled = false;
         }
         else if (rrRaw != null && rrRaw.isJsonObject())
         {
             JsonObject rr = rrRaw.getAsJsonObject();
             int lo = JsonLenient.optInt(rr, "min_rank_idx", QueueState.UNKNOWN);
             int hi = JsonLenient.optInt(rr, "max_rank_idx", QueueState.UNKNOWN);
-            if (lo == QueueState.UNKNOWN || hi == QueueState.UNKNOWN)
+            // A half-written range cannot drive a two-ended slider; treat
+            // it as "no range" rather than guessing the missing bound.
+            rangeEnabled = lo != QueueState.UNKNOWN && hi != QueueState.UNKNOWN;
+            if (rangeEnabled)
             {
-                // A half-written range cannot drive a two-ended slider; treat
-                // it as "no range" rather than guessing the missing bound.
-                rangeEnabled = Boolean.FALSE;
-            }
-            else
-            {
-                rangeEnabled = Boolean.TRUE;
                 min = Math.min(lo, hi);
                 max = Math.max(lo, hi);
             }
         }
         // Any other type (array, string, number) states nothing — a future
         // server shape must never clear a user's local pick.
-        return new QueuePrefs(waitPrefS, rangeEnabled, min, max);
+        return new QueuePrefs(wait == null ? QueueState.UNKNOWN : WebSocketQueueService.snapWait(wait), rangeEnabled, min, max);
     }
 
     @Override

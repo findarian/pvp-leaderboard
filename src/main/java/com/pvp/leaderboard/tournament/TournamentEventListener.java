@@ -1,13 +1,12 @@
 package com.pvp.leaderboard.tournament;
 
-import com.google.gson.JsonObject;
-
-import java.util.List;
+import com.google.gson.*;
+import java.util.*;
 
 /**
  * Server-push callbacks for the Swiss tournaments (Plan 10 Part C / F.3),
- * registered with a {@link TournamentService}. Every callback is delivered
- * on the Swing EDT (the {@code WebSocketTournamentService} marshals), so
+ * registered with the {@link TourneySvc}. Every callback is delivered
+ * on the Swing EDT (the {@code TourneySvc} marshals), so
  * panels may touch Swing directly and the session tracker / overlay
  * supplier read plain volatile fields. All methods are {@code default}
  * no-ops. Mirrors WEBSOCKET_PROTOCOL.md § 6.3 (server → client).
@@ -15,33 +14,27 @@ import java.util.List;
 public interface TournamentEventListener
 {
     /** {@code tournament/list_response}. */
-    default void onTournamentList(List<TournamentSummary> tournaments, long nowEpochS) {}
+    default void onTournamentList(List<Tourney> tournaments) {}
 
     /** {@code tournament/registered} — the event + the caller's registration status. */
-    default void onRegistered(TournamentSummary tournament, String registrationStatus) {}
+    default void onRegistered(Tourney tournament, String regStatus) {}
 
     /** {@code tournament/withdrawn}. */
-    default void onWithdrawn(String tournamentId, String status) {}
+    default void onWithdrawn(String tournamentId) {}
 
     /** {@code tournament/state} — the caller's registrations + the running
      *  tournament they are part of ({@code null} when none). */
-    default void onTournamentState(List<TournamentSummary> registrations, TournamentActive active) {}
+    default void onTournamentState(List<Tourney> registrations, LiveTourney active) {}
 
     /** {@code tournament/standings} — after subscribe and on every change. */
-    default void onStandings(TournamentStandings standings) {}
+    default void onStandings(TourneyBoard standings) {}
 
     /** {@code tournament/match_assigned} — a round opened with an opponent. */
-    default void onMatchAssigned(TournamentSeries series) {}
-
-    /** {@code tournament/opponent_highlight} — outline this player until {@code untilEpochS}. */
-    default void onOpponentHighlight(String tournamentId, String opponentName, String opponentAcctSha, long untilEpochS) {}
+    default void onMatchAssigned(MatchSeries series) {}
 
     /** {@code tournament/opponent_highlight} with every name the opponent is logged in with
      *  ({@code opponent_names}; the one name when the push carries no list). */
-    default void onOpponentHighlight(String tournamentId, String opponentName, String opponentAcctSha, long untilEpochS, List<String> opponentNames)
-    {
-        onOpponentHighlight(tournamentId, opponentName, opponentAcctSha, untilEpochS);
-    }
+    default void onOpponentHighlight(String tournamentId, String opponentName, List<String> opponentNames) {}
 
     /** {@code tournament/opponent_highlight_clear}. */
     default void onOpponentHighlightClear(String tournamentId, String seriesId) {}
@@ -49,7 +42,7 @@ public interface TournamentEventListener
     /** {@code tournament/bye}. */
     default void onBye(String tournamentId, int round) {}
 
-    default void onRoundEndCheck(String tournamentId, int round, String seriesId, String opponentName, long respondByEpochS, String message) {}
+    default void onRoundEndCheck(String tournamentId, int round, String opponentName, long respondByS, String message) {}
 
     /** {@code tournament/removed} — dnf / dq / kicked / withdrawn / dropped_unpaid. */
     default void onRemoved(String tournamentId, String status, String reason, int round) {}
@@ -57,11 +50,11 @@ public interface TournamentEventListener
     /** {@code tournament/cancelled}. */
     default void onCancelled(String tournamentId, String reason) {}
 
-    /** {@code tournament/finished} — winners {@code {top[], random[], seed}} + the top 10. */
+    /** {@code tournament/finished} — winners {@code {top[], random[], seed}} + the final standings rows. */
     default void onFinished(String tournamentId, JsonObject winners, List<StandingsRow> standings) {}
 
     /** {@code tournament/problem_ack}. */
-    default void onProblemAck(String tournamentId) {}
+    default void onProblemAck() {}
 
     /** {@code error/tournament} — stable code + message; {@code cmd} echoes the rejected cmd. */
     default void onTournamentError(String code, String message, String cmd) {}
@@ -69,9 +62,9 @@ public interface TournamentEventListener
     /** Not a push: the socket (re)opened (set 7). The transport tells its
      *  listeners from the manager's connect hook, on the EDT, so a panel
      *  that asked for the list while the socket was down asks again. */
-    default void onSocketConnected() {}
+    default void onConnected() {}
 
     default void onGearCheck(String tournamentId, int round, long untilEpochS) {}
 
-    default void onGearAck(String tournamentId, boolean ok, long receivedAt) {}
+    default void onGearAck(String tournamentId, boolean ok) {}
 }

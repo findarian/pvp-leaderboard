@@ -1,26 +1,21 @@
 package com.pvp.leaderboard.overlay;
 
-import com.pvp.leaderboard.cache.MembershipCache;
-import com.pvp.leaderboard.config.PvPLeaderboardConfig;
-import com.pvp.leaderboard.game.PlayerRankEvent;
-import com.pvp.leaderboard.service.PortalRatingCap;
-import com.pvp.leaderboard.service.PvPDataService;
-import com.pvp.leaderboard.util.NameUtils;
-import com.pvp.leaderboard.util.RankUtils;
-import com.pvp.leaderboard.util.SlowPathMonitor;
-import lombok.extern.slf4j.Slf4j;
-import net.runelite.api.Client;
-import net.runelite.api.Player;
-import net.runelite.api.Point;
-import net.runelite.client.eventbus.Subscribe;
-import net.runelite.client.ui.overlay.Overlay;
-import net.runelite.client.ui.overlay.OverlayLayer;
-import net.runelite.client.ui.overlay.OverlayPosition;
-
-import javax.inject.Inject;
+import com.pvp.leaderboard.cache.*;
+import com.pvp.leaderboard.config.*;
+import com.pvp.leaderboard.config.PvPLeaderboardConfig.*;
+import com.pvp.leaderboard.service.*;
+import com.pvp.leaderboard.util.*;
 import java.awt.*;
-import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
+import java.util.*;
+import java.util.concurrent.*;
+import javax.inject.*;
+import lombok.*;
+import lombok.extern.slf4j.*;
+import net.runelite.api.*;
+import net.runelite.client.ui.overlay.*;
+import java.util.List;
+import net.runelite.api.Point;
+import static java.lang.System.*;
 
 @Slf4j
 @SuppressWarnings("deprecation")
@@ -28,107 +23,105 @@ public class RankOverlay extends Overlay
 {
     private final Client client;
     private final PvPLeaderboardConfig config;
-    private final PvPDataService pvpDataService;
+    private final PvpApi pvpApi;
     /** Opt-in membership set from the snapshot/delta feed (names only). The
      *  overlay gates rendering on this; rank itself comes from the name-keyed
-     *  shards (see {@link #fetchSceneShardRankIfNeeded}). Replaces the
+     *  shards (see {@link #fetchSceneRankIfNeeded}). Replaces the
      *  whitelist.json membership blob (see PLAN_PRESENCE_FRESHNESS.md). */
-    private final MembershipCache membershipCache;
+    private final MemberCache memberCache;
 
     // Resolved rank labels keyed by canonical name — populated by the
     // API-set path (post-fight) and by scene/self shard lookups; read
     // every frame by the overlay render loop.
-    private final ConcurrentHashMap<String, String> displayedRanks = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, String> shownRanks = new ConcurrentHashMap<>();
 
-    /** When each {@link #displayedRanks} entry was last written or
-     *  re-checked, in millis since epoch. Drives {@link #PEER_RANK_REFRESH_MS}. */
-    private final ConcurrentHashMap<String, Long> displayedRankAtMs = new ConcurrentHashMap<>();
+    /** When each {@link #shownRanks} entry was last written or
+     *  re-checked, in millis since epoch. Drives {@link #PEER_RANK_MS}.
+     *  A missing timestamp means the label came from a path that didn't stamp
+     *  it, so its age is unknown; it is treated as due so the map self-heals. */
+    private final ConcurrentHashMap<String, Long> rankShownMs = new ConcurrentHashMap<>();
 
     /** How long a peer's rank label may go without a re-resolution
-     *  attempt. Without this, a label resolved once was pinned for the
-     *  whole session: the scene loop only looks a player up when it has
-     *  NO label, so an existing entry short-circuited every later read
-     *  and {@code PvPDataService.SHARD_CACHE_EXPIRY_MS} (6h) was never
-     *  reached for overhead ranks. Deliberately far below that TTL so a
-     *  refresh lands on the next shard generation shortly after it
-     *  expires; refreshes inside the TTL are served from the in-memory
-     *  shard cache, so the added CDN cost is one read per player per 6h.
-     *  Pinned by RankOverlayPeerRankRefreshTest. */
-    static final long PEER_RANK_REFRESH_MS = 15L * 60L * 1000L;
-    
+     *  attempt (exactly one interval old counts as due). Without this, a
+     *  label resolved once was pinned for the whole session: the scene loop
+     *  only looks a player up when it has NO label, so an existing entry
+     *  short-circuited every later read and
+     *  {@code PvpApi}'s 6h shard TTL was never reached for overhead
+     *  ranks. Deliberately far below that TTL so a refresh lands on the next
+     *  shard generation shortly after it expires; refreshes inside the TTL
+     *  are served from the in-memory shard cache, so the added CDN cost is
+     *  one read per player per 6h. Pinned by RankOverlayPeerRankRefreshTest. */
+    static final long PEER_RANK_MS = 15L * 60L * 1000L;
+
     // API-set ranks that should persist until shard cache refreshes with matching data
     private final ConcurrentHashMap<String, String> apiSetRanks = new ConcurrentHashMap<>();
-    
+
     // Combat tracking for "hide rank out of combat" feature
     // Tracks when self was last in combat (milliseconds)
-    private volatile long selfLastCombatMs = 0L;
+    private volatile long selfCombatMs = 0L;
 
     // Config change tracking
     private String lastBucketKey = null;
 
     // Self-rank scheduling
-    private volatile long selfRefreshRequestedAtMs = 0L;
-    private volatile boolean selfRankAttempted = false;
-    private volatile long nextSelfRankAllowedAtMs = 0L;
+    private volatile long selfRefresh = 0L;
+    private volatile boolean selfTried = false;
+    private volatile long selfRankDue = 0L;
 
     /** Scene shard lookup state for opted-in players visible in the
      *  world who don't yet have a rank label above their head. Retry
      *  throttle so render() (~60 fps) issues at most one shard
-     *  resolution attempt per player per interval. Uses the passive
-     *  ({@code bypassCache=false}) overload of
-     *  {@link PvPDataService#getShardRankByName(String, String, boolean)}
+     *  resolution attempt per player per interval, and none while one is
+     *  in flight (pinned by RankOverlaySceneShardTest). Uses the passive
+     *  ({@code bypassCache=false}) lookup of
+     *  {@link PvpApi#getShardRank(String, String, boolean)}
      *  so repeat attempts are served from the 6h positive cache (once
      *  resolved) or the missing-player negative cache (when unranked),
      *  keeping CDN cost bounded even in a crowded scene. Bounded by
      *  membership + in-scene visibility + this per-player backoff —
      *  never a whole-world shard poll. */
-    private static final long SCENE_SHARD_RETRY_MS = 30_000L;
-    private final ConcurrentHashMap<String, Long> sceneShardLastAttemptMs = new ConcurrentHashMap<>();
-    private final ConcurrentHashMap<String, Boolean> sceneShardInFlight = new ConcurrentHashMap<>();
+    private static final long SHARD_GAP_MS = 30_000L;
+    private final ConcurrentHashMap<String, Long> shardTriedMs = new ConcurrentHashMap<>();
+    private final Set<String> shardBusy = ConcurrentHashMap.newKeySet();
 
     /** Negative backoff for the profile-API fallback used when a scene
-     *  player misses the CDN shard (mirrors the lobby's shard→/user
-     *  fallback). The shard GET is cheap + CDN/negative-cached, but the
-     *  {@code /user} profile fetch is a Lambda+DynamoDB call, so a player
-     *  who resolves in NEITHER shard nor profile must not re-hit /user on
-     *  every {@link #SCENE_SHARD_RETRY_MS} tick. Positive resolutions are
-     *  cached permanently in {@link #displayedRanks}, so this only rate
-     *  limits genuinely-unresolvable players. */
-    private static final long SCENE_PROFILE_MISS_BACKOFF_MS = 10L * 60L * 1000L;
-    private final ConcurrentHashMap<String, Long> sceneProfileMissUntilMs = new ConcurrentHashMap<>();
+     *  player misses the CDN shard. The shard GET is cheap +
+     *  CDN/negative-cached, but the {@code /user} profile fetch is a
+     *  Lambda+DynamoDB call, so a player who resolves in NEITHER shard nor
+     *  profile must not re-hit /user on every {@link #SHARD_GAP_MS}
+     *  tick. Positive resolutions are cached permanently in
+     *  {@link #shownRanks}, so this only rate limits
+     *  genuinely-unresolvable players. */
+    private static final long MISS_WAIT_MS = 10L * 60L * 1000L;
+    private final ConcurrentHashMap<String, Long> missUntilMs = new ConcurrentHashMap<>();
 
     // MMR change notification queue (for multi-kill scenarios)
-    private final java.util.concurrent.ConcurrentLinkedQueue<MmrNotification> mmrNotificationQueue = new java.util.concurrent.ConcurrentLinkedQueue<>();
-    private volatile MmrNotification currentMmrNotification = null;
-    private volatile long mmrNotificationStartMs = 0L;
-    private volatile int lastNotificationTick = -1; // Track tick for 1-per-tick display
-    
+    private final ConcurrentLinkedQueue<MmrNotice> noticeQueue = new ConcurrentLinkedQueue<>();
+    private volatile MmrNotice shownNotice = null;
+    private volatile long noticeAtMs = 0L;
+    private volatile int noticeTick = -1; // Track tick for 1-per-tick display
+
     // Legacy fields kept for backwards compatibility
     private volatile Double previousMmr = null;
-    
+
     /**
      * Represents a single MMR change notification.
      */
-    private static class MmrNotification {
+    @AllArgsConstructor
+    private static class MmrNotice {
         final double delta;
         final String bucketLabel;
-        final boolean cappedInPortal;
-        
-        MmrNotification(double delta, String bucketLabel, boolean cappedInPortal) {
-            this.delta = delta;
-            this.bucketLabel = bucketLabel;
-            this.cappedInPortal = cappedInPortal;
-        }
+        final boolean portalCapped;
     }
-    
+
     @Inject
-    public RankOverlay(Client client, PvPLeaderboardConfig config, PvPDataService pvpDataService, 
-                       MembershipCache membershipCache)
+    public RankOverlay(Client client, PvPLeaderboardConfig config, PvpApi pvpApi,
+                       MemberCache memberCache)
     {
         this.client = client;
         this.config = config;
-        this.pvpDataService = pvpDataService;
-        this.membershipCache = membershipCache;
+        this.pvpApi = pvpApi;
+        this.memberCache = memberCache;
         // Always use DYNAMIC for snap-to-player rendering
         // Use UNDER_WIDGETS layer (same as player indicators) so it appears above prayers
         // Use PRIORITY_LOW so it renders behind player indicator names
@@ -137,19 +130,12 @@ public class RankOverlay extends Overlay
         setPriority(Overlay.PRIORITY_LOW);
     }
 
-    // Fixed height constants for consistent rank positioning regardless of equipment
-    // Using fixed values prevents "jumping" when players wear different helmets/hats
-    private static final int HEAD_HEIGHT = 220;      // At head level (just above player name)
-    private static final int ABOVE_HEAD_HEIGHT = 268; // Above head (higher than head position)
-
     /** Drop-shadow behind every rank label. Hoisted out of the draw
      *  loop: this ran once per label per frame. */
     private static final Color OUTLINE_COLOR = new Color(0, 0, 0, 180);
 
     /** 3rd Age glow: concentric white layers, widest and faintest
-     *  first, drawn under the solid label. Paired by index with
-     *  {@link #GLOW_COLORS}. */
-    private static final int[] GLOW_OFFSETS = {3, 2, 1};
+     *  first (offsets 3, 2, 1 by index), drawn under the solid label. */
     private static final Color[] GLOW_COLORS = {
         new Color(255, 255, 255, 25),
         new Color(255, 255, 255, 50),
@@ -161,67 +147,22 @@ public class RankOverlay extends Overlay
     private Font rankFont;
 
     /**
-     * Get the height offset for rendering rank based on position setting.
-     * Uses fixed height constants instead of player.getLogicalHeight() to ensure
-     * consistent positioning regardless of what equipment the player is wearing.
-     * 
-     * @return The height offset to use with getCanvasTextLocation
+     * Schedule a self-rank refresh on the next frame.
      */
-    private int getHeightOffsetForPosition()
+    public void scheduleSelf()
     {
-        PvPLeaderboardConfig.RankPosition pos = config.rankPosition();
-        // Defensive: a corrupted/missing persisted setting can return
-        // null here. {@code switch (null)} would NPE every render frame
-        // (~60 fps) and feed RuneLite's OverlayRenderer a stack-stripped
-        // exception via HotSpot's OmitStackTraceInFastThrow. Fall back
-        // to the same default the switch's default arm uses so behaviour
-        // is identical to a normal {@code ABOVE_HEAD} setting.
-        if (pos == null)
-        {
-            return ABOVE_HEAD_HEIGHT;
-        }
-        switch (pos)
-        {
-            case FEET:
-                return 0; // At feet level
-            case HEAD:
-                return HEAD_HEIGHT; // At head level (just above player name)
-            case ABOVE_HEAD:
-            default:
-                return ABOVE_HEAD_HEIGHT; // Above head (higher than head position)
-        }
-    }
-
-    @Subscribe
-    public void onPlayerRankEvent(PlayerRankEvent event)
-    {
-        if (event == null || event.getPlayerName() == null || event.getTier() == null)
-        {
-            return;
-        }
-        log.debug("[Overlay] onPlayerRankEvent: player={} tier={} bucket={}",
-            event.getPlayerName(), event.getTier(), event.getBucket());
-        setRankFromApi(event.getPlayerName(), event.getTier());
-    }
-
-    /**
-     * Schedule a self-rank refresh after the given delay.
-     */
-    public void scheduleSelfRankRefresh(long delayMs)
-    {
-        long now = System.currentTimeMillis();
-        nextSelfRankAllowedAtMs = now + Math.max(0L, delayMs);
-        selfRankAttempted = false;
-        selfRefreshRequestedAtMs = nextSelfRankAllowedAtMs;
+        selfRankDue = currentTimeMillis();
+        selfTried = false;
+        selfRefresh = selfRankDue;
     }
 
     /**
      * Reset lookup state on world hop.
      */
-    public void resetLookupStateOnWorldHop()
+    public void onWorldHop()
     {
-        selfRankAttempted = false;
-        nextSelfRankAllowedAtMs = 0L;
+        selfTried = false;
+        selfRankDue = 0L;
         // Note: Don't clear whitelist cache on world hop - it's fetched from API and valid for 1 hour
     }
 
@@ -230,269 +171,114 @@ public class RankOverlay extends Overlay
      */
     public String getCachedRankFor(String playerName)
     {
-        return displayedRanks.get(NameUtils.canonicalKey(playerName));
+        return shownRanks.get(NameUtils.canonicalKey(playerName));
     }
 
     /**
      * Set rank from API response.
      * This rank will persist until the shard cache refreshes with matching data.
      */
-    public void setRankFromApi(String playerName, String rank)
+    public void setApiRank(String playerName, String rank)
     {
         if (playerName == null || playerName.trim().isEmpty() || rank == null || rank.trim().isEmpty())
         {
             return;
         }
         String key = NameUtils.canonicalKey(playerName);
-        putDisplayedRank(key, rank);
+        putShownRank(key, rank);
         // Track this as an API-set rank - persists until shard cache confirms with same rank
         apiSetRanks.put(key, rank);
-        pvpDataService.clearShardNegativeCache(playerName);
-        log.debug("[Overlay] setRankFromApi: key={} rank={} (will persist until shard confirms)", key, rank);
+        pvpApi.clearMisses(playerName);
     }
 
     /**
      * Write a resolved rank label and stamp it for the refresh cadence.
-     * Every path that populates {@link #displayedRanks} must go through
-     * here, otherwise the entry looks ageless to
-     * {@link #isDisplayedRankStale}.
+     * Every path that populates {@link #shownRanks} must go through
+     * here, otherwise the entry looks ageless to the refresh check.
      */
-    private void putDisplayedRank(String nameKey, String rank)
+    private void putShownRank(String nameKey, String rank)
     {
-        displayedRanks.put(nameKey, rank);
-        displayedRankAtMs.put(nameKey, System.currentTimeMillis());
-    }
-
-    /** Package-private for unit tests — decides whether a displayed rank
-     *  label is old enough to warrant a background re-resolution. A null
-     *  timestamp means the label came from a path that didn't stamp it,
-     *  so its age is unknown; treat it as due so the map self-heals. */
-    static boolean isDisplayedRankStale(Long setAtMs, long nowMs, long refreshIntervalMs)
-    {
-        if (setAtMs == null) return true;
-        return nowMs - setAtMs >= refreshIntervalMs;
-    }
-
-    /**
-     * Store the previous MMR value before a fight for delta calculation.
-     */
-    public void storePreviousMmr(double mmr)
-    {
-        this.previousMmr = mmr;
-        log.debug("[Overlay] Stored previous MMR: {}", mmr);
+        shownRanks.put(nameKey, rank);
+        rankShownMs.put(nameKey, currentTimeMillis());
     }
 
     /**
      * Show MMR delta notification with the actual delta from match history.
      * This is the preferred method as it uses the accurate server-calculated delta.
      * Notifications are queued for multi-kill scenarios.
-     * 
+     *
      * @param mmrDelta The actual MMR change (positive for gain, negative for loss)
      * @param bucketLabel Optional bucket label to display (e.g., "Multi") when different from config bucket
      */
     public void showMmrDelta(double mmrDelta, String bucketLabel)
     {
-        queueMmrNotification(new MmrNotification(mmrDelta, bucketLabel, false));
+        queueNotice(new MmrNotice(mmrDelta, bucketLabel, false));
     }
 
-    public void showRatingCappedInPortal(String bucketLabel)
+    public void showCapped(String bucketLabel)
     {
-        queueMmrNotification(new MmrNotification(0.0, bucketLabel, true));
+        queueNotice(new MmrNotice(0.0, bucketLabel, true));
     }
 
-    private void queueMmrNotification(MmrNotification notification)
+    private void queueNotice(MmrNotice notification)
     {
         if (!config.showMmrChangeNotification())
         {
             return;
         }
-        
+
         // Add to queue for sequential display
-        mmrNotificationQueue.offer(notification);
-        log.debug("[Overlay] Queued MMR notification: delta={} bucket={} cappedInPortal={} queueSize={}", 
-            notification.delta, notification.bucketLabel, notification.cappedInPortal, mmrNotificationQueue.size());
-        
+        noticeQueue.offer(notification);
+
         // If no notification is currently showing, start this one immediately
-        if (currentMmrNotification == null && mmrNotificationStartMs == 0L)
+        if (shownNotice == null && noticeAtMs == 0L)
         {
-            startNextNotification();
+            startNotice();
         }
     }
-    
+
     /**
      * Start displaying the next notification from the queue.
      */
-    private void startNextNotification()
+    private void startNotice()
     {
-        MmrNotification next = mmrNotificationQueue.poll();
+        MmrNotice next = noticeQueue.poll();
         if (next != null)
         {
-            currentMmrNotification = next;
-            mmrNotificationStartMs = System.currentTimeMillis();
-            log.debug("[Overlay] Started MMR notification: delta={} bucket={} remaining={}", 
-                next.delta, next.bucketLabel, mmrNotificationQueue.size());
+            shownNotice = next;
+            noticeAtMs = currentTimeMillis();
         }
         else
         {
-            currentMmrNotification = null;
-            mmrNotificationStartMs = 0L;
+            shownNotice = null;
+            noticeAtMs = 0L;
         }
     }
 
     /**
-     * Called after fight when new MMR is fetched.
-     * Calculates delta and triggers notification.
-     * @deprecated Use showMmrDelta instead which uses accurate server-calculated delta
-     */
-    @Deprecated
-    public void onMmrUpdated(double newMmr, double oldMmr, String bucketLabel)
-    {
-        showMmrDelta(newMmr - oldMmr, bucketLabel);
-    }
-
-    /**
-     * Called after fight when new MMR is fetched (legacy method without bucket label).
-     * @deprecated Use showMmrDelta instead
-     */
-    @Deprecated
-    public void onMmrUpdated(double newMmr, double oldMmr)
-    {
-        onMmrUpdated(newMmr, oldMmr, null);
-    }
-
-    /**
-     * Get the stored previous MMR (for FightMonitor to check).
-     */
-    public Double getPreviousMmr()
-    {
-        return previousMmr;
-    }
-
-    /**
-     * Add a player to the looked-up players cache with all their bucket ranks.
-     * Called when "PvP lookup" is clicked on a player.
-     * 
-     * @param playerName The player's name
-     * @param bucketRanks Map of bucket name to rank (e.g., "nh" -> "Dragon 2", "veng" -> "Gold 1")
-     */
-    public void addLookedUpPlayer(String playerName, Map<String, String> bucketRanks)
-    {
-        // No-op: looked-up player cache not implemented
-        resetVisibilityTimer();
-    }
-
-    /**
-     * Reset the visibility timer.
-     * Called when combat occurs or when a player is looked up.
-     * This keeps all ranks (self and looked-up players) visible for the configured duration.
-     */
-    public void resetVisibilityTimer()
-    {
-        selfLastCombatMs = System.currentTimeMillis();
-        log.debug("[Overlay] Visibility timer reset");
-    }
-
-    /**
-     * Refresh a looked-up player's rank for a specific bucket after a fight.
-     * 
-     * @param playerName The player's name
-     * @param bucket The bucket to update (e.g., "nh", "veng")
-     * @param newRank The new rank for that bucket
-     */
-    public void refreshLookedUpPlayer(String playerName, String bucket, String newRank)
-    {
-        // No-op: looked-up player cache not implemented
-    }
-
-    /**
-     * Check if a player is in the looked-up cache (and not expired).
-     */
-    public boolean isPlayerLookedUp(String playerName)
-    {
-        return false; // Not implemented
-    }
-
-    /**
-     * Get the cached rank for a looked-up player for the specified bucket.
-     */
-    public String getLookedUpRank(String playerName, String bucket)
-    {
-        return null; // Not implemented
-    }
-
-    /**
-     * Update the visibility timer when in combat.
-     * Called by FightMonitor when in combat.
-     * This is universal - affects display of all ranks (self and looked-up players).
+     * Reset the visibility timer when in combat. Called by FightMonitor on
+     * every hit. Universal: it keeps all ranks (self and other players)
+     * visible for the configured duration.
      */
     public void updateSelfCombatTime()
     {
-        resetVisibilityTimer();
-    }
-
-    /**
-     * Update the visibility timer when in combat with a specific player.
-     * Called by FightMonitor when in combat with a specific player.
-     * Note: Visibility timer is universal, so this just resets the timer.
-     */
-    public void updatePlayerCombatTime(String playerName)
-    {
-        resetVisibilityTimer();
-    }
-
-    /**
-     * Check if ranks should be shown based on combat timeout.
-     * This is universal - applies to both self rank and looked-up player ranks.
-     * Returns true if ranks should be shown, false if they should be hidden.
-     */
-    private boolean shouldShowRanks()
-    {
-        if (!config.hideRankOutOfCombat())
-        {
-            return true; // Feature disabled, always show
-        }
-        long timeoutMs = config.hideRankAfterMinutes() * 60L * 1000L;
-        long now = System.currentTimeMillis();
-        return (now - selfLastCombatMs) <= timeoutMs;
+        selfCombatMs = currentTimeMillis();
     }
 
     /** Tracks the last time we logged a render-loop throwable, in
      *  millis since epoch. Used to rate-limit the swallow-warn so a
      *  pathological 60-fps NPE storm produces at most one WARN per
      *  minute instead of ~3,600 per minute. */
-    private volatile long lastRenderErrorLogMs = 0L;
+    private volatile long lastErrorLog = 0L;
 
     /** Minimum interval between {@code "render threw — swallowing"}
      *  WARN entries when the inner body is failing every frame. One
      *  minute is enough to keep the user's log readable while still
      *  giving prompt feedback if a new failure appears mid-session. */
-    private static final long RENDER_ERROR_LOG_INTERVAL_MS = 60_000L;
-
-    /** Frame-time watchdog. Silent unless a frame blows the budget —
-     *  see {@link SlowPathMonitor}. 50ms is ~3 frames at 60 FPS: well
-     *  past "a bit heavy" and into what a player would notice as a
-     *  hitch, so a line here is real evidence rather than noise. */
-    private final SlowPathMonitor frameMonitor =
-        new SlowPathMonitor("[RankOverlay] frame", 50L, 60_000L);
+    private static final long ERROR_LOG_MS = 60_000L;
 
     @Override
     public Dimension render(Graphics2D graphics)
-    {
-        long startNanos = System.nanoTime();
-        try
-        {
-            return renderTimed(graphics);
-        }
-        finally
-        {
-            String slow = frameMonitor.record(
-                SlowPathMonitor.millisSince(startNanos, System.nanoTime()),
-                System.currentTimeMillis());
-            if (slow != null) log.warn("{}", slow);
-        }
-    }
-
-    private Dimension renderTimed(Graphics2D graphics)
     {
         // Catch-all guard: the rank overlay paints every frame at
         // ~60 FPS and reaches into client/Player APIs that can
@@ -518,10 +304,10 @@ public class RankOverlay extends Overlay
             // {@code -XX:+OmitStackTraceInFastThrow} after thousands
             // of throws from the same bytecode location — so the user
             // can still locate the call path through {@code render()}.
-            long now = System.currentTimeMillis();
-            if (now - lastRenderErrorLogMs >= RENDER_ERROR_LOG_INTERVAL_MS)
+            long now = currentTimeMillis();
+            if (now - lastErrorLog >= ERROR_LOG_MS)
             {
-                lastRenderErrorLogMs = now;
+                lastErrorLog = now;
                 log.warn(
                     "[RankOverlay] render threw {} (msg={}) — swallowing. " +
                         "Diagnostic stack (HotSpot may have stripped the original):",
@@ -540,20 +326,19 @@ public class RankOverlay extends Overlay
         }
 
         // Handle bucket config changes
-        String currentBucket = bucketKey(config.rankBucket());
+        String currentBucket = RankBucket.key(config.rankBucket());
 
         if (lastBucketKey == null || !lastBucketKey.equals(currentBucket))
         {
-            displayedRanks.clear();
-            displayedRankAtMs.clear();
+            shownRanks.clear();
+            rankShownMs.clear();
             apiSetRanks.clear();
-            sceneShardLastAttemptMs.clear();
-            sceneShardInFlight.clear();
-            sceneProfileMissUntilMs.clear();
+            shardTriedMs.clear();
+            shardBusy.clear();
+            missUntilMs.clear();
             lastBucketKey = currentBucket;
-            selfRankAttempted = false;
-            nextSelfRankAllowedAtMs = 0L;
-            log.debug("[Overlay] Bucket changed to {} - caches cleared", currentBucket);
+            selfTried = false;
+            selfRankDue = 0L;
         }
 
         // Get local player
@@ -566,87 +351,69 @@ public class RankOverlay extends Overlay
         String localName = localPlayer.getName();
 
         // Handle self-rank refresh scheduling
-        if (config.showOwnRank() && localName != null && selfRefreshRequestedAtMs > 0L)
+        if (config.showOwnRank() && localName != null && selfRefresh > 0L)
         {
-            long now = System.currentTimeMillis();
-            if (now >= selfRefreshRequestedAtMs && !selfRankAttempted && now >= nextSelfRankAllowedAtMs)
+            long now = currentTimeMillis();
+            if (now >= selfRefresh && !selfTried && now >= selfRankDue)
             {
-                selfRankAttempted = true;
-                selfRefreshRequestedAtMs = 0L;
-                fetchRankForSelf(localName);
+                selfTried = true;
+                selfRefresh = 0L;
+                fetchSelf(localName);
             }
         }
 
-        // Check if we should show ranks (combat timeout)
-        boolean showRanks = shouldShowRanks();
-        int heightOffset = getHeightOffsetForPosition();
+        // Show ranks unless "hide rank out of combat" is on and the
+        // configured minutes have passed since the last hit. Universal:
+        // applies to both the self rank and other players' ranks.
+        boolean showRanks = !config.hideRankOutOfCombat()
+            || config.hideRankAfterMinutes() * 60_000L >= currentTimeMillis() - selfCombatMs;
 
-        // Render self rank if enabled.
-        // Order of guards matters: localName + cachedRank + showRanks
-        // are checked BEFORE invoking RuneLite's getCanvasTextLocation.
-        // Two reasons:
-        //   1. localName == null happens transiently during world hops /
-        //      login. Passing null into getCanvasTextLocation can NPE
-        //      deep inside RuneLite (FontMetrics.stringWidth(null)),
-        //      which surfaces as a stack-stripped NPE in the wrapper.
-        //   2. When cachedRank == null or showRanks == false the result
-        //      would be discarded anyway, so skipping the call is also
-        //      a per-frame perf win.
+        // Fixed heights rather than player.getLogicalHeight(), so the rank
+        // doesn't "jump" when players wear different helmets/hats: feet 0,
+        // head level 220 (just above the player name), above head 268. A
+        // corrupted/missing persisted setting can return null; that draws
+        // above the head like the default instead of throwing every frame.
+        RankPosition pos = config.rankPosition();
+        int heightOffset = pos == RankPosition.FEET ? 0
+            : pos == RankPosition.HEAD ? 220 : 268;
+
+        // Render self rank if enabled. localName == null happens
+        // transiently during world hops / login; the label is only placed
+        // when there is a rank to show and ranks are shown.
         if (config.showOwnRank() && localName != null && showRanks)
         {
-            String nameKey = NameUtils.canonicalKey(localName);
-            String cachedRank = displayedRanks.get(nameKey);
-
+            String cachedRank = shownRanks.get(NameUtils.canonicalKey(localName));
             if (cachedRank != null)
             {
-                Point nameLocation = localPlayer.getCanvasTextLocation(graphics, localName, heightOffset);
-                if (nameLocation != null)
-                {
-                    FontMetrics fm = graphics.getFontMetrics();
-
-                    Point headLoc = localPlayer.getCanvasTextLocation(graphics, "", heightOffset);
-                    int x, y;
-                    if (headLoc != null)
-                    {
-                        x = headLoc.getX() + config.rankOffsetX();
-                        y = headLoc.getY() - fm.getAscent() - 2 + config.rankOffsetY();
-                    }
-                    else
-                    {
-                        x = nameLocation.getX() + config.rankOffsetX();
-                        y = nameLocation.getY() - fm.getAscent() - 2 + config.rankOffsetY();
-                    }
-
-                    renderRankText(graphics, cachedRank, x, y, Math.max(10, config.rankTextSize()));
-                }
+                label(graphics, localPlayer, cachedRank, heightOffset);
             }
         }
 
         // Render MMR change notification
-        renderMmrChangeNotification(graphics, localPlayer);
-        
+        renderNotice(graphics, localPlayer);
+
         // Render opted-in player ranks (if enabled and the membership feed
         // has loaded). Membership now comes from the snapshot/delta feed
-        // (MembershipCache); rank is resolved per name via shards below.
-        if (config.enableWhitelistRanks() && membershipCache.size() > 0)
+        // (MemberCache); rank is resolved per name via shards below.
+        if (config.enableWhitelistRanks() && memberCache.size() > 0)
         {
-            renderWhitelistPlayers(graphics, localPlayer, currentBucket, heightOffset);
+            renderRanks(graphics, localPlayer, currentBucket, heightOffset);
         }
 
         return new Dimension(0, 0);
     }
-    
+
     /**
      * Render ranks above opted-in players in the scene.
      *
      * <p>Membership (who is an opted-in plugin user) comes from the
-     * snapshot/delta feed ({@link MembershipCache}); the rank label
+     * snapshot/delta feed ({@link MemberCache}); the rank label
      * itself is resolved per name from the {@code rank_idx} shards and
-     * stored in {@link #displayedRanks} — either eagerly by a fight's
-     * API result ({@link PlayerRankEvent}) or lazily by the scene shard
+     * stored in {@link #shownRanks} — either eagerly by a fight's
+     * API result ({@link #setApiRank}) or lazily by the scene shard
      * lookup below. Uses the current bucket setting.
      */
-    private void renderWhitelistPlayers(Graphics2D graphics, Player localPlayer, String bucket,
+    private void renderRanks(Graphics2D graphics, Player localPlayer, String bucket,
                                         int heightOffset)
     {
         String localName = localPlayer.getName();
@@ -656,7 +423,7 @@ public class RankOverlay extends Overlay
         // NPE on the implicit .iterator() call and feed RuneLite's
         // OverlayRenderer a stack-stripped NPE every frame at 60 fps
         // until the scene settles. Treat null as "no players visible".
-        java.util.List<Player> scenePlayers = client.getPlayers();
+        List<Player> scenePlayers = client.getPlayers();
         if (scenePlayers == null)
         {
             return;
@@ -665,17 +432,17 @@ public class RankOverlay extends Overlay
         for (Player player : scenePlayers)
         {
             if (player == null || player == localPlayer) continue;
-            
+
             String playerName = player.getName();
             if (playerName == null || playerName.equals(localName)) continue;
-            
+
             // Only show ranks for opted-in players (membership feed).
-            if (!membershipCache.isMember(playerName)) continue;
-            
+            if (!memberCache.isMember(playerName)) continue;
+
             String nameKey = NameUtils.canonicalKey(playerName);
             // Rank resolved either from a prior fight (API-set) or a
-            // previous scene shard lookup — both land in displayedRanks.
-            String displayRank = displayedRanks.get(nameKey);
+            // previous scene shard lookup — both land in shownRanks.
+            String displayRank = shownRanks.get(nameKey);
 
             // Opted-in + visible but no label yet — kick a cached shard
             // read to resolve it. Passive (cache-first) so a crowded
@@ -689,35 +456,38 @@ public class RankOverlay extends Overlay
                 continue;
             }
 
-            // Label present but past its refresh interval — re-resolve in
-            // the background while still rendering the current value, so
-            // a peer who ranked up mid-session stops showing a label
-            // frozen at whatever it was when we first saw them. Shard
-            // only: we already have something to display, so a miss must
-            // not escalate to the /user Lambda.
-            if (isDisplayedRankStale(displayedRankAtMs.get(nameKey),
-                System.currentTimeMillis(), PEER_RANK_REFRESH_MS))
+            // Label present but past its refresh interval (or of unknown
+            // age) — re-resolve in the background while still rendering
+            // the current value, so a peer who ranked up mid-session stops
+            // showing a label frozen at whatever it was when we first saw
+            // them. Shard only: we already have something to display, so a
+            // miss must not escalate to the /user Lambda.
+            Long setAt = rankShownMs.get(nameKey);
+            if (setAt == null || currentTimeMillis() - setAt >= PEER_RANK_MS)
             {
                 fetchSceneRankIfNeeded(playerName, bucket, nameKey, false);
             }
 
-            
-            // Get player's screen position
-            Point headLoc = player.getCanvasTextLocation(graphics, "", heightOffset);
-            if (headLoc == null) continue;
-            
-            FontMetrics fm = graphics.getFontMetrics();
-            int x = headLoc.getX() + config.rankOffsetX();
-            int y = headLoc.getY() - fm.getAscent() - 2 + config.rankOffsetY();
-            
-            renderRankText(graphics, displayRank, x, y, Math.max(10, config.rankTextSize()));
+            label(graphics, player, displayRank, heightOffset);
+        }
+    }
+
+    /** Draws {@code rank} above {@code player}'s head (offset by the
+     *  configured position). The font metrics are read before
+     *  {@link #renderRank} switches to the rank font, as before. */
+    private void label(Graphics2D g, Player player, String rank, int heightOffset)
+    {
+        Point head = player.getCanvasTextLocation(g, "", heightOffset);
+        if (head != null)
+        {
+            renderRank(g, rank, head.getX() + config.rankOffsetX(),
+                head.getY() - g.getFontMetrics().getAscent() - 2 + config.rankOffsetY(), Math.max(10, config.rankTextSize()));
         }
     }
 
     /**
      * Async two-tier rank resolution for an opted-in, in-scene player who
-     * still has no rank label — mirrors {@code WebSocketLobbyService}'s
-     * roster enrichment:
+     * still has no rank label (or whose label is due a refresh):
      * <ol>
      *   <li><b>Shard</b> (passive, cache-first): served from the 6h
      *       positive shard cache, or the missing-player negative cache,
@@ -725,242 +495,173 @@ public class RankOverlay extends Overlay
      *   <li><b>Profile API fallback</b> on a shard miss: players the shard
      *       writer hasn't picked up for this bucket only resolve via the
      *       {@code /user} endpoint. Rate-limited by
-     *       {@link #SCENE_PROFILE_MISS_BACKOFF_MS} so an unresolvable
+     *       {@link #MISS_WAIT_MS} so an unresolvable
      *       player doesn't hammer the Lambda+DynamoDB path.</li>
      * </ol>
      * Throttled to one in-flight attempt per player and
-     * {@link #SCENE_SHARD_RETRY_MS} between attempts so render() never
+     * {@link #SHARD_GAP_MS} between attempts so render() never
      * calls the service every frame. A resolved rank lands in
-     * {@link #displayedRanks} and renders on the next frame, and is
-     * re-resolved every {@link #PEER_RANK_REFRESH_MS}; a peer's own
+     * {@link #shownRanks} and renders on the next frame, and is
+     * re-resolved every {@link #PEER_RANK_MS}; a peer's own
      * post-fight rank change still updates immediately via the API-set
      * path.
      *
-     * @param allowProfileFallback whether a shard miss may escalate to
+     * @param useProfile whether a shard miss may escalate to
      *        the {@code /user} profile API. True for a player with no
      *        label at all, false for a periodic refresh of a label we can
      *        already render — the fallback is a Lambda+DynamoDB call and
      *        isn't worth paying to confirm a rank we're already showing.
      */
     private void fetchSceneRankIfNeeded(String playerName, String bucket, String nameKey,
-                                        boolean allowProfileFallback)
+                                        boolean useProfile)
     {
-        long now = System.currentTimeMillis();
-        // First attempt for a player has no recorded timestamp — map.get
-        // returns a null Long. Coalesce to 0L (the "never attempted"
-        // sentinel shouldAttemptSceneShardLookup expects); passing the
-        // null straight into the primitive-long param autounboxes to an
-        // NPE that the render() wrapper swallows, which is exactly what
-        // silently blocked EVERY scene rank resolution once whitelist.json
-        // rank data was removed.
-        Long lastAttempt = sceneShardLastAttemptMs.get(nameKey);
-        if (!shouldAttemptSceneShardLookup(
-            lastAttempt == null ? 0L : lastAttempt, now, SCENE_SHARD_RETRY_MS,
-            sceneShardInFlight.containsKey(nameKey)))
+        long now = currentTimeMillis();
+        // A player never attempted has no stamp. A null last-attempt
+        // timestamp must never be unboxed into a primitive here: that NPE,
+        // swallowed by the render() wrapper, once silently blocked EVERY
+        // scene rank resolution.
+        Long lastAttempt = shardTriedMs.get(nameKey);
+        if (lastAttempt != null && now - lastAttempt < SHARD_GAP_MS || !shardBusy.add(nameKey))
         {
             return;
         }
-        if (sceneShardInFlight.putIfAbsent(nameKey, Boolean.TRUE) != null)
-        {
-            return;
-        }
-        sceneShardLastAttemptMs.put(nameKey, now);
+        shardTriedMs.put(nameKey, now);
         // Re-arm the refresh cadence at ATTEMPT time, not on completion:
         // a lookup that fails or resolves nothing must still wait a full
         // interval, otherwise an unresolvable player would retry every
-        // SCENE_SHARD_RETRY_MS forever.
-        displayedRankAtMs.put(nameKey, now);
-        log.debug("[Overlay] Scene rank lookup (cached shard) for opted-in player {} bucket={}",
-            playerName, bucket);
+        // SHARD_GAP_MS forever.
+        rankShownMs.put(nameKey, now);
 
-        pvpDataService.getShardRankByName(playerName, bucket, false)
+        pvpApi.getShardRank(playerName, bucket, false)
             .whenComplete((sr, ex) ->
             {
                 if (ex != null)
                 {
-                    sceneShardInFlight.remove(nameKey);
-                    log.debug("[Overlay] Scene shard lookup failed for {}: {}",
-                        playerName, ex.getMessage());
+                    shardBusy.remove(nameKey);
                     return;
                 }
                 if (sr != null && sr.tier != null && !sr.tier.trim().isEmpty())
                 {
-                    sceneShardInFlight.remove(nameKey);
-                    applySceneShardRank(playerName, nameKey, sr.tier);
+                    shardBusy.remove(nameKey);
+                    applyShard(nameKey, sr.tier);
                     return;
                 }
                 // Nothing to gain from the profile API when we already
                 // have a label to render — keep the /user path cold.
-                if (!allowProfileFallback)
+                if (!useProfile)
                 {
-                    sceneShardInFlight.remove(nameKey);
-                    log.debug("[Overlay] Scene rank refresh for {} bucket={} found no shard entry "
-                        + "— keeping existing label", playerName, bucket);
+                    shardBusy.remove(nameKey);
                     return;
                 }
-                // Shard miss — fall back to the profile API exactly like the
-                // lobby roster enrichment (WebSocketLobbyService). Players the
+                // Shard miss — fall back to the profile API. Players the
                 // shard writer hasn't picked up for this bucket (e.g. "RUN
                 // PIGGY") only resolve via /user. Rate-limited by a negative
                 // backoff so an unresolvable player doesn't re-hit the
                 // Lambda+DynamoDB path on every scene-retry tick.
-                Long missUntil = sceneProfileMissUntilMs.get(nameKey);
-                if (missUntil != null && System.currentTimeMillis() < missUntil)
+                Long missUntil = missUntilMs.get(nameKey);
+                if (missUntil != null && currentTimeMillis() < missUntil)
                 {
-                    sceneShardInFlight.remove(nameKey);
+                    shardBusy.remove(nameKey);
                     return;
                 }
-                log.debug("[Overlay] Scene shard miss for {} bucket={} — trying profile API",
-                    playerName, bucket);
-                pvpDataService.getRankFromProfileForLobby(playerName, bucket)
-                    .whenComplete((psr, pex) ->
+                pvpApi.getLobbyRank(playerName, bucket)
+                    .whenComplete((tier, pex) ->
                     {
-                        sceneShardInFlight.remove(nameKey);
+                        shardBusy.remove(nameKey);
                         if (pex != null)
                         {
-                            sceneProfileMissUntilMs.put(nameKey,
-                                System.currentTimeMillis() + SCENE_PROFILE_MISS_BACKOFF_MS);
-                            log.debug("[Overlay] Scene profile lookup failed for {}: {} — profile backoff {}m",
-                                playerName, pex.getMessage(), SCENE_PROFILE_MISS_BACKOFF_MS / 60_000L);
+                            missUntilMs.put(nameKey,
+                                currentTimeMillis() + MISS_WAIT_MS);
                             return;
                         }
-                        if (psr != null && psr.tier != null && !psr.tier.trim().isEmpty())
+                        if (tier != null && !tier.trim().isEmpty())
                         {
-                            putDisplayedRank(nameKey, psr.tier);
-                            log.debug("[Overlay] Scene profile rank for {} bucket={}: {}",
-                                playerName, bucket, psr.tier);
+                            putShownRank(nameKey, tier);
                             return;
                         }
                         // Unresolved in both shard and profile — back off the
                         // profile retry to protect the /user endpoint.
-                        sceneProfileMissUntilMs.put(nameKey,
-                            System.currentTimeMillis() + SCENE_PROFILE_MISS_BACKOFF_MS);
-                        log.debug("[Overlay] Scene rank unresolved for {} bucket={} "
-                            + "(shard+profile miss) — profile backoff {}m",
-                            playerName, bucket, SCENE_PROFILE_MISS_BACKOFF_MS / 60_000L);
+                        missUntilMs.put(nameKey,
+                            currentTimeMillis() + MISS_WAIT_MS);
                     });
             });
     }
 
     /**
-     * Adopt a shard-resolved rank for a scene player, deferring to a
-     * post-fight API rank that the shard hasn't caught up to yet.
+     * Adopt a shard-resolved rank (for a scene player or, as the API
+     * fallback, for self), deferring to a post-fight API rank that the
+     * shard hasn't caught up to yet.
      *
-     * <p>Mirrors {@link #fetchRankForSelfFromShard}'s reconciliation: an
-     * API rank is newer than any shard generation, so a disagreeing shard
-     * read is stale data and must not clobber it. Once the shard agrees,
-     * the override has served its purpose and is dropped.
+     * <p>An API rank is newer than any shard generation, so a disagreeing
+     * shard read is stale data and must not clobber it. Once the shard
+     * agrees, the override has served its purpose and is dropped.
      */
-    private void applySceneShardRank(String playerName, String nameKey, String shardRank)
+    private void applyShard(String nameKey, String shardRank)
     {
         String apiRank = apiSetRanks.get(nameKey);
         if (apiRank != null && !apiRank.equals(shardRank))
         {
-            log.debug("[Overlay] Preserving API rank for {}: {} (shard has stale: {})",
-                playerName, apiRank, shardRank);
             return;
         }
         if (apiRank != null)
         {
             apiSetRanks.remove(nameKey);
         }
-        putDisplayedRank(nameKey, shardRank);
-        log.debug("[Overlay] Scene shard rank for {}: {}", playerName, shardRank);
+        putShownRank(nameKey, shardRank);
     }
 
-    /** Package-private for unit tests — decides whether a new scene
-     *  shard attempt is allowed given backoff + in-flight state. */
-    static boolean shouldAttemptSceneShardLookup(long lastAttemptMs, long nowMs,
-                                                 long retryIntervalMs, boolean inFlight)
+    private void fetchSelf(String selfName)
     {
-        if (inFlight) return false;
-        if (lastAttemptMs <= 0L) return true;
-        return nowMs - lastAttemptMs >= retryIntervalMs;
-    }
-
-    private void fetchRankForSelf(String selfName)
-    {
-        String bucket = bucketKey(config.rankBucket());
+        String bucket = RankBucket.key(config.rankBucket());
         String key = NameUtils.canonicalKey(selfName);
 
-        pvpDataService.getTierFromProfile(selfName, bucket)
+        pvpApi.getTierFromProfile(selfName, bucket)
             .thenAccept(apiTier -> {
-                long fetchCompletedAt = System.currentTimeMillis();
-                
+                long fetchedAt = currentTimeMillis();
+
                 if (apiTier != null)
                 {
-                    putDisplayedRank(key, apiTier);
+                    putShownRank(key, apiTier);
                     apiSetRanks.put(key, apiTier);
-                    log.debug("[Overlay] Self rank fetched from API: {} = {}", selfName, apiTier);
-                    nextSelfRankAllowedAtMs = fetchCompletedAt + 60_000L;
+                    selfRankDue = fetchedAt + 60_000L;
                 }
                 else
                 {
-                    log.debug("[Overlay] API returned null for self {}, falling back to shard", selfName);
                     fetchRankForSelfFromShard(selfName, bucket, key);
                 }
             })
             .exceptionally(ex -> {
-                log.debug("[Overlay] API error fetching self rank: {}, falling back to shard", ex.getMessage());
                 fetchRankForSelfFromShard(selfName, bucket, key);
                 return null;
             });
     }
-    
+
     /**
      * Fallback method to fetch self rank from shard when API fails.
      */
     private void fetchRankForSelfFromShard(String selfName, String bucket, String key)
     {
-        pvpDataService.getShardRankByName(selfName, bucket)
+        pvpApi.getShardRank(selfName, bucket, false)
             .thenAccept(sr -> {
                 if (sr == null)
                 {
-                    log.debug("[Overlay] No shard rank found for self: {}", selfName);
                     return;
                 }
-
-                String shardRank = sr.tier;
-
-                if (shardRank != null)
+                if (sr.tier != null)
                 {
-                    long fetchCompletedAt = System.currentTimeMillis();
-                    
-                    // Check if there's an API-set rank that should persist
-                    String apiRank = apiSetRanks.get(key);
-                    if (apiRank != null)
-                    {
-                        if (apiRank.equals(shardRank))
-                        {
-                            // Shard cache has refreshed with matching data - clear the API override
-                            apiSetRanks.remove(key);
-                            putDisplayedRank(key, shardRank);
-                            log.debug("[Overlay] Shard cache refreshed for {}: {} (API override cleared)", selfName, shardRank);
-                        }
-                        else
-                        {
-                            // Shard has stale data - preserve the API-set rank
-                            log.debug("[Overlay] Preserving API rank for {}: {} (shard has stale: {})", 
-                                selfName, apiRank, shardRank);
-                        }
-                    }
-                    else
-                    {
-                        // No API override - use shard data
-                        putDisplayedRank(key, shardRank);
-                        log.debug("[Overlay] Self rank fetched from shard (fallback): {} = {}", selfName, shardRank);
-                    }
-                    nextSelfRankAllowedAtMs = fetchCompletedAt + 60_000L;
+                    long fetchedAt = currentTimeMillis();
+                    // An API-set rank persists until the shard has refreshed with matching data
+                    applyShard(key, sr.tier);
+                    selfRankDue = fetchedAt + 60_000L;
                 }
             })
             .exceptionally(ex -> {
-                log.debug("[Overlay] Error fetching self rank from shard: {}", ex.getMessage());
-                nextSelfRankAllowedAtMs = System.currentTimeMillis() + 60_000L;
+                selfRankDue = currentTimeMillis() + 60_000L;
                 return null;
             });
     }
 
-    private void renderRankText(Graphics2D g, String fullRank, int x, int y, int size)
+    private void renderRank(Graphics2D g, String fullRank, int x, int y, int size)
     {
         String text = rankLabelText(fullRank);
         if (text.isEmpty())
@@ -968,62 +669,45 @@ public class RankOverlay extends Overlay
             return;
         }
 
-        int space = text.indexOf(' ');
-        String rankName = (space < 0) ? text : text.substring(0, space);
-
         g.setFont(rankFont(size));
         FontMetrics fm = g.getFontMetrics();
-        int textW = fm.stringWidth(text);
-        int textH = fm.getAscent();
-        int centerX = x - textW / 2;
-        int baseY = y + textH;
+        int centerX = x - fm.stringWidth(text) / 2;
+        int baseY = y + fm.getAscent();
 
-        // Check for 3rd Age - special glow effect
-        boolean isThirdAge = text.startsWith("3rd");
-
-        if (isThirdAge && !config.colorblindMode())
+        // 3rd Age: special glow (white layers widest first), then core
+        // white text; every other rank: black outline + coloured text
+        // (white in colour-blind mode and for a "Rank N" label).
+        boolean glow = text.startsWith("3rd") && !config.colorblindMode();
+        if (glow)
         {
-            for (int i = 0; i < GLOW_OFFSETS.length; i++)
+            for (int i = 0; i < GLOW_COLORS.length; i++)
             {
-                int offset = GLOW_OFFSETS[i];
                 g.setColor(GLOW_COLORS[i]);
-                for (int dy = -offset; dy <= offset; dy++)
-                {
-                    for (int dx = -offset; dx <= offset; dx++)
-                    {
-                        if (dx == 0 && dy == 0) continue;
-                        g.drawString(text, centerX + dx, baseY + dy);
-                    }
-                }
+                ring(g, text, centerX, baseY, 3 - i);
             }
-
-            // Core white text
-            g.setColor(Color.WHITE);
-            g.drawString(text, centerX, baseY);
         }
         else
         {
-            // Standard rendering: black outline + colored text
             g.setColor(OUTLINE_COLOR);
-            for (int dy = -1; dy <= 1; dy++)
+            ring(g, text, centerX, baseY, 1);
+        }
+        g.setColor(glow || config.colorblindMode() || text.startsWith("Rank ") ? Color.WHITE : RankUtils.getRankColor(text));
+        g.drawString(text, centerX, baseY);
+    }
+
+    /** Draws {@code text} at every offset within {@code r} of (x, y) except
+     *  (x, y) itself, rows top to bottom: the outline / glow ring. */
+    private static void ring(Graphics2D g, String text, int x, int y, int r)
+    {
+        for (int dy = -r; dy <= r; dy++)
+        {
+            for (int dx = -r; dx <= r; dx++)
             {
-                for (int dx = -1; dx <= 1; dx++)
+                if (dx != 0 || dy != 0)
                 {
-                    if (dx == 0 && dy == 0) continue;
-                    g.drawString(text, centerX + dx, baseY + dy);
+                    g.drawString(text, x + dx, y + dy);
                 }
             }
-
-            // Determine text color
-            if (config.colorblindMode() || text.startsWith("Rank "))
-            {
-                g.setColor(Color.WHITE);
-            }
-            else
-            {
-                g.setColor(RankUtils.getRankColor(rankName));
-            }
-            g.drawString(text, centerX, baseY);
         }
     }
 
@@ -1067,17 +751,17 @@ public class RankOverlay extends Overlay
         return cached;
     }
 
-    private void renderMmrChangeNotification(Graphics2D g, Player localPlayer)
+    private void renderNotice(Graphics2D g, Player localPlayer)
     {
         int currentTick = client.getTickCount();
-        
-        if (currentMmrNotification == null || mmrNotificationStartMs == 0L)
+
+        if (shownNotice == null || noticeAtMs == 0L)
         {
             // Try to start next notification if queue has items (rate limit: 1 per tick)
-            if (!mmrNotificationQueue.isEmpty() && currentTick != lastNotificationTick)
+            if (!noticeQueue.isEmpty() && currentTick != noticeTick)
             {
-                startNextNotification();
-                lastNotificationTick = currentTick;
+                startNotice();
+                noticeTick = currentTick;
             }
             return;
         }
@@ -1088,21 +772,21 @@ public class RankOverlay extends Overlay
 
         // Check if current notification duration has expired
         long durationMs = config.mmrDuration() * 1000L;
-        long elapsed = System.currentTimeMillis() - mmrNotificationStartMs;
-        
+        long elapsed = currentTimeMillis() - noticeAtMs;
+
         if (elapsed > durationMs)
         {
             // Current notification finished - start next (rate limit: 1 per tick)
-            if (currentTick != lastNotificationTick)
+            if (currentTick != noticeTick)
             {
-                startNextNotification();
-                lastNotificationTick = currentTick;
+                startNotice();
+                noticeTick = currentTick;
             }
             else
             {
                 // Already started one this tick, clear current and wait for next tick
-                currentMmrNotification = null;
-                mmrNotificationStartMs = 0L;
+                shownNotice = null;
+                noticeAtMs = 0L;
             }
             return;
         }
@@ -1114,15 +798,15 @@ public class RankOverlay extends Overlay
             return;
         }
 
-        MmrNotification notification = currentMmrNotification;
+        MmrNotice notification = shownNotice;
 
         // Calculate fade progress
         float progress = (float) elapsed / durationMs;
         int alpha = (int) (255 * (1.0f - progress));
         int floatOffset = (int) (progress * 30); // Float up 30 pixels
 
-        String text = mmrNotificationText(notification.delta, notification.bucketLabel, notification.cappedInPortal);
-        Color baseColor = mmrNotificationColor(notification.delta, notification.cappedInPortal, config.colorblindMode());
+        String text = noticeText(notification.delta, notification.bucketLabel, notification.portalCapped);
+        Color baseColor = noticeColor(notification.delta, notification.portalCapped, config.colorblindMode());
         Color color = new Color(baseColor.getRed(), baseColor.getGreen(), baseColor.getBlue(), alpha);
 
         // Render with black outline
@@ -1133,74 +817,25 @@ public class RankOverlay extends Overlay
         int drawY = headLoc.getY() - floatOffset + config.mmrOffsetY();
 
         // Black outline with alpha
-        Color outlineColor = new Color(0, 0, 0, (int) (180 * (1.0f - progress)));
-        g.setColor(outlineColor);
-        for (int dy = -1; dy <= 1; dy++)
-        {
-            for (int dx = -1; dx <= 1; dx++)
-            {
-                if (dx == 0 && dy == 0) continue;
-                g.drawString(text, centerX + dx, drawY + dy);
-            }
-        }
+        g.setColor(new Color(0, 0, 0, (int) (180 * (1.0f - progress))));
+        ring(g, text, centerX, drawY, 1);
 
         // Main colored text
         g.setColor(color);
         g.drawString(text, centerX, drawY);
     }
 
-    static String mmrNotificationText(double mmrDelta, String bucketLabel, boolean cappedInPortal)
+    /** "+14.0 MMR" (a zero change reads as a gain), or the portal cap's
+     *  label; " (label)" appended when a bucket label is given. */
+    static String noticeText(double mmrDelta, String bucketLabel, boolean portalCapped)
     {
-        boolean labelled = bucketLabel != null && !bucketLabel.isEmpty();
-        if (cappedInPortal)
-        {
-            return labelled ? String.format("%s (%s)", PortalRatingCap.LABEL, bucketLabel) : PortalRatingCap.LABEL;
-        }
-        String sign = mmrDelta >= 0 ? "+" : "";
-        if (labelled)
-        {
-            return String.format("%s%.1f MMR (%s)", sign, mmrDelta, bucketLabel);
-        }
-        return String.format("%s%.1f MMR", sign, mmrDelta);
+        return (portalCapped ? PortalCap.LABEL : String.format("%s%.1f MMR", mmrDelta >= 0 ? "+" : "", mmrDelta))
+            + (bucketLabel != null && !bucketLabel.isEmpty() ? " (" + bucketLabel + ")" : "");
     }
 
-    static Color mmrNotificationColor(double mmrDelta, boolean cappedInPortal, boolean colorblind)
+    /** White in colour-blind mode; else green for a gain or a capped fight, red for a loss. */
+    static Color noticeColor(double mmrDelta, boolean portalCapped, boolean colorblind)
     {
-        if (colorblind)
-        {
-            return Color.WHITE;
-        }
-        else if (cappedInPortal || mmrDelta >= 0)
-        {
-            return new Color(0, 200, 0); // Green for gain
-        }
-        else
-        {
-            return new Color(229, 57, 53); // Red for loss
-        }
-    }
-
-    private static String bucketKey(PvPLeaderboardConfig.RankBucket bucket)
-    {
-        if (bucket == null)
-        {
-            return "overall";
-        }
-        switch (bucket)
-        {
-            case NH:
-                return "nh";
-            case VENG:
-                return "veng";
-            case MULTI:
-                return "multi";
-            case DMM:
-                return "dmm";
-            case TOURNAMENT:
-                return "tournament";
-            case OVERALL:
-            default:
-                return "overall";
-        }
+        return colorblind ? Color.WHITE : portalCapped || mmrDelta >= 0 ? new Color(0, 200, 0) : new Color(0xe53935);
     }
 }
