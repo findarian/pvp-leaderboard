@@ -411,7 +411,7 @@ public interface PvPLeaderboardConfig extends Config
 	)
 	default boolean showKillStreakBox()
 	{
-		return false;
+		return true;
 	}
 
 	@ConfigItem(

@@ -318,6 +318,7 @@ public class PvPLeaderboardPlugin extends Plugin
 		// BOARD row 33: the movable kill-streak box. Config-gated inside the
 		// overlay. Each fight feeds the streak tracker, then the side panel's
 		// streak line; the panel exists from here on and is never nulled.
+		streakBoxOnOnce();
 		overlayManager.add(winStreakOverlay);
 		dashPanel.setWinStreakTracker(winStreakTracker);
 		fightMonitor.setStreakSink((bucketKey, result) ->
@@ -444,6 +445,16 @@ public class PvPLeaderboardPlugin extends Plugin
 		}
 		catch (Exception e)
 		{
+		}
+	}
+
+	/** Turns "Always show kill streak box" on once per profile; a later choice is kept. */
+	private void streakBoxOnOnce()
+	{
+		if (configManager.getConfiguration(FightMonitor.CONFIG_GROUP, "killStreakBoxOnDone") == null)
+		{
+			configManager.setConfiguration(FightMonitor.CONFIG_GROUP, "showKillStreakBox", "true");
+			configManager.setConfiguration(FightMonitor.CONFIG_GROUP, "killStreakBoxOnDone", "true");
 		}
 	}
 
