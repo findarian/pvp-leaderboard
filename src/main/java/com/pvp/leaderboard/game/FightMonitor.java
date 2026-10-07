@@ -17,12 +17,12 @@ import javax.inject.*;
 import net.runelite.api.*;
 import net.runelite.api.coords.*;
 import net.runelite.api.events.*;
+import net.runelite.api.gameval.VarbitID;
 import net.runelite.client.config.*;
 import static java.lang.System.*;
 import static java.util.concurrent.TimeUnit.*;
 
 @Singleton
-@SuppressWarnings("deprecation")
 public class FightMonitor
 {
     private final Client client;
@@ -172,6 +172,28 @@ public class FightMonitor
     public void init(RankOverlay rankOverlay)
     {
         this.rankOverlay = rankOverlay;
+        stopped = false;
+    }
+
+    /** Post-fight refreshes still waiting; cancelled when the plugin stops. */
+    private final Set<Future<?>> pending = ConcurrentHashMap.newKeySet();
+    private volatile boolean stopped;
+
+    /** Cancels the post-fight refreshes still waiting; none is scheduled again until {@link #init}. */
+    public synchronized void cancelPending()
+    {
+        stopped = true;
+        for (Future<?> f : pending) f.cancel(false);
+        pending.clear();
+    }
+
+    /** Runs {@code task} in {@code secs} seconds unless the plugin stops first. */
+    private synchronized void later(Runnable task, long secs)
+    {
+        if (stopped) return;
+        pending.removeIf(Future::isDone);
+        Future<?> f = scheduler.schedule(task, secs, SECONDS);
+        if (f != null) pending.add(f);
     }
 
     /** Plan 10 F.2 (AS-72): while the local player is in a RUNNING tournament
@@ -761,7 +783,8 @@ public class FightMonitor
             }
             int world = client.getWorld();
             if (!PvpConsts.isLmsWorld(world)) return;
-            if (!client.isInInstancedRegion()) return;
+            WorldView wv = client.getTopLevelWorldView();
+            if (wv == null || !wv.isInstance()) return;
             WorldPoint wp = selfPoint();
             if (wp != null && PvpConsts.isInLmsArea(wp.getX(), wp.getY()))
             {
@@ -940,9 +963,8 @@ public class FightMonitor
             mmrReplaying = true;
 
             String selfName = lastSelfName != null ? lastSelfName : getLocalName();
-            scheduler.schedule(
-                () -> fetchDelta(selfName, opponent, false, 0, endTs, this::clearLmsMmr, null),
-                5L, SECONDS);
+            later(
+                () -> fetchDelta(selfName, opponent, false, 0, endTs, this::clearLmsMmr, null), 5L);
         }
         catch (Exception e)
         {
@@ -1003,7 +1025,7 @@ public class FightMonitor
      */
     private void finalizeFight(String opponentName, String result, FightEntry entry)
     {
-        int endSb = client.getVarbitValue(Varbits.SPELLBOOK);
+        int endSb = client.getVarbitValue(VarbitID.SPELLBOOK);
         int world = client.getWorld();
         long endTs = currentTimeMillis() / 1000;
         String selfName = getLocalName();
@@ -1085,8 +1107,7 @@ public class FightMonitor
             settleStreak(streakOutcome, null);
             return;
         }
-        scheduler.schedule(() -> fetchDelta(selfName, opponent, bucketInMmr, 0, endTs, null, streakOutcome),
-            3L, SECONDS);
+        later(() -> fetchDelta(selfName, opponent, bucketInMmr, 0, endTs, null, streakOutcome), 3L);
     }
 
     private static void settleStreak(Consumer<JsonObject> streakOutcome, JsonObject row)
@@ -1099,7 +1120,7 @@ public class FightMonitor
      *  the backend has time to fold the new fight into /user. */
     private void scheduleLobbyGateRefresh()
     {
-        scheduler.schedule(() -> {
+        later(() -> {
             try
             {
                 if (profileGate.isLoggedIn())
@@ -1110,7 +1131,7 @@ public class FightMonitor
             catch (Exception e)
             {
             }
-        }, 5L, SECONDS);
+        }, 5L);
     }
 
     /**
@@ -1118,7 +1139,7 @@ public class FightMonitor
      * Runs 5s after fight end — independent of match submission.
      */
     private void refreshTiers(String opponentName, String displayBucket) {
-        scheduler.schedule(() -> {
+        later(() -> {
             try {
                 String selfName = getLocalName();
 
@@ -1128,7 +1149,7 @@ public class FightMonitor
                 retryTier(opponentName, displayBucket, 3);
             } catch (Exception e) {
             }
-        }, 5L, SECONDS);
+        }, 5L);
     }
 
     /** Find this fight's row in the player's match history (the same opponent,
@@ -1140,8 +1161,8 @@ public class FightMonitor
                                        long submitEndTs, Runnable onDisplayed, Consumer<JsonObject> onRow) {
         Runnable retry = () -> {
             if (attempt < 2) {
-                scheduler.schedule(() -> fetchDelta(selfName, opponentName, withBucket, attempt + 1,
-                    submitEndTs, onDisplayed, onRow), 5L, SECONDS);
+                later(() -> fetchDelta(selfName, opponentName, withBucket, attempt + 1,
+                    submitEndTs, onDisplayed, onRow), 5L);
             } else {
                 settleStreak(onRow, null);
             }
@@ -1242,7 +1263,7 @@ public class FightMonitor
     private void retryTier(String playerName, String bucket, int retriesLeft) {
         Runnable retry = () -> {
             if (retriesLeft > 0) {
-                scheduler.schedule(() -> retryTier(playerName, bucket, retriesLeft - 1), 2L, SECONDS);
+                later(() -> retryTier(playerName, bucket, retriesLeft - 1), 2L);
             } else {
             }
         };
@@ -1265,9 +1286,9 @@ public class FightMonitor
     {
         if (opponentName == null || opponentName.isEmpty()) return;
         long ts = currentTimeMillis() / 1000;
-        int sb = client.getVarbitValue(Varbits.SPELLBOOK);
+        int sb = client.getVarbitValue(VarbitID.SPELLBOOK);
         // Only tracks if WE enter multi, not if the opponent does.
-        boolean selfInMulti = client.getVarbitValue(Varbits.MULTICOMBAT_AREA) == 1;
+        boolean selfInMulti = client.getVarbitValue(VarbitID.MULTIWAY_INDICATOR) == 1;
         boolean selfInFfa = insideFfaPortal;
         boolean selfInBounty = insideBounty;
         int currentTick = client.getTickCount();
@@ -1311,13 +1332,8 @@ public class FightMonitor
      */
     private String findAttacker(Player localPlayer)
     {
-        List<Player> players = client.getPlayers();
-        if (players == null) {
-            return recentOpp();
-        }
-
         // Only return players we already have an active fight with
-        for (Player other : players) {
+        for (Player other : players()) {
             if (other == null || other == localPlayer) continue;
 
             String otherName = other.getName();
@@ -1356,18 +1372,21 @@ public class FightMonitor
         return killer;
     }
 
-    /** The first player in the scene {@code test} accepts; {@code null} when none does or the list is null. */
+    /** The first player in the scene {@code test} accepts; {@code null} when none does. */
     private Player findPlayer(Predicate<Player> test)
     {
-        List<Player> players = client.getPlayers();
-        if (players != null)
+        for (Player p : players())
         {
-            for (Player p : players)
-            {
-                if (test.test(p)) return p;
-            }
+            if (test.test(p)) return p;
         }
         return null;
+    }
+
+    /** The top-level world view's players, in the order the client's deprecated {@code getPlayers()} gave them. */
+    private Iterable<? extends Player> players()
+    {
+        WorldView wv = client.getTopLevelWorldView();
+        return wv == null ? Collections.<Player>emptyList() : wv.players();
     }
 
     private String findKiller(Player localPlayer)

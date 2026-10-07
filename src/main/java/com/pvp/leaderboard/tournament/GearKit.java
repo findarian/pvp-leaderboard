@@ -4,6 +4,7 @@ import com.google.gson.*;
 import com.pvp.leaderboard.util.*;
 import java.util.*;
 import java.util.function.*;
+import net.runelite.api.gameval.ItemID;
 import static com.pvp.leaderboard.util.JsonLenient.*;
 
 public final class GearKit
@@ -12,7 +13,8 @@ public final class GearKit
     public static final String SOURCE_SUPPLIES = "supplies";
     public static final String SOURCE_CONTAINERS = "containers";
     public static final String SOURCE_SAVED = "saved_kit";
-    public static final Set<Integer> POUCH_IDS = Set.of(12791, 24416, 27281, 27509);
+    public static final Set<Integer> POUCH_IDS = Set.of(ItemID.BH_RUNE_POUCH, ItemID.BH_RUNE_POUCH_TROUVER, ItemID.DIVINE_RUNE_POUCH,
+        ItemID.DIVINE_RUNE_POUCH_TROUVER);
 
     public final String source;
     public final String build;

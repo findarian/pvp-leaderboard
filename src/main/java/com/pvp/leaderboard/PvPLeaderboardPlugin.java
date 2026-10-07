@@ -20,6 +20,7 @@ import javax.swing.*;
 import lombok.extern.slf4j.*;
 import net.runelite.api.*;
 import net.runelite.api.events.*;
+import net.runelite.client.callback.*;
 import net.runelite.client.config.*;
 import net.runelite.client.eventbus.*;
 import net.runelite.client.events.*;
@@ -35,7 +36,9 @@ import java.util.List;
 
 @Slf4j
 @PluginDescriptor(
-	name = "PvP Leaderboard"
+	name = "PvP Leaderboard",
+	internalName = "pvp-leaderboard",
+	legacyDataDirectory = "pvp-leaderboard.id"
 )
 public class PvPLeaderboardPlugin extends Plugin
 {
@@ -76,6 +79,12 @@ public class PvPLeaderboardPlugin extends Plugin
 
 	@Inject
 	private EventBus eventBus;
+
+	@Inject
+	private ClientThread clientThread;
+
+	@Inject
+	private ScenePlayers scenePlayers;
 
 	@Inject
 	private PvpApi pvpApi;
@@ -166,12 +175,9 @@ public class PvPLeaderboardPlugin extends Plugin
 	 *  expensive. */
 	private final InitTracker initTracker = new InitTracker();
 
-	/** Set true when RuneLite fires {@link ClientShutdown} (the whole
-	 *  client is closing). Distinguishes a graceful client exit — which
-	 *  {@link #shutDown()} then treats as a plain {@code logout}
-	 *  freeze-log — from the plugin being toggled off mid-fight, which is
-	 *  a {@code plugin_disabled} ban offense. Volatile: ClientShutdown
-	 *  fires on the client thread, shutDown() reads it during teardown. */
+	/** Set true when RuneLite fires {@link ClientShutdown}: {@link #onClientShutdown} has then submitted any
+	 *  freeze-log, so a {@link #shutDown()} after it submits nothing more. Volatile: ClientShutdown and
+	 *  shutDown() can run on different threads. */
 	private volatile boolean shutdownSeen = false;
 
 	public String getClientUniqueId()
@@ -231,7 +237,9 @@ public class PvPLeaderboardPlugin extends Plugin
 		// — but lobbySvc.start() subscribes to push
 		// events and the connect-listener now so they're ready when
 		// the first frame arrives.
-		identitySvc.ensureId();
+		identitySvc.load(this::getPluginDirectory);
+		eventBus.register(scenePlayers);
+		clientThread.invokeLater(() -> scenePlayers.seed(client));
 		lobbySvc.start();
 		// Plan 10 step 7: the queue + tournament transports subscribe to
 		// their pushes (and the reconnect re-sync) the same way. The session
@@ -365,26 +373,26 @@ public class PvPLeaderboardPlugin extends Plugin
 	@Override
 	protected void shutDown() throws Exception
 	{
-		// FIRST, before any teardown: detect a mid-fight plugin disable
-		// in an LMS arena. If RuneLite already signalled ClientShutdown
-		// this is a graceful client exit → treat as a plain logout
-		// freeze-log (2x loss, no ban). Otherwise the user toggled the
-		// plugin off mid-fight → plugin_disabled (2x loss + ban
-		// escalation + warning marker). Submit synchronously with a
-		// bounded wait so plugin teardown doesn't kill the HTTP call.
-		CompletableFuture<Boolean> freezeLog = null;
-		try
+		// FIRST, before any teardown: the plugin turned off mid-fight in an
+		// LMS arena is a plugin_disabled freeze-log. Not waited for: the
+		// submit runs on RuneLite's shared OkHttpClient and finishes on its
+		// own. A client exit was already submitted by onClientShutdown.
+		if (!shutdownSeen)
 		{
-			freezeLog = fightMonitor.handleFreeze(shutdownSeen ? "logout" : "plugin_disabled");
-			if (freezeLog != null) freezeLog.get(3, TimeUnit.SECONDS);
-		}
-		catch (Exception e)
-		{
+			try
+			{
+				fightMonitor.handleFreeze("plugin_disabled");
+			}
+			catch (Exception e)
+			{
+			}
 		}
 
 		stopCheck();
 		menuHandler.shutdown();
 		overlayManager.remove(rankOverlay);
+		eventBus.unregister(scenePlayers);
+		clientThread.invokeLater(scenePlayers::clear);
 		overlayManager.remove(matchPopup);
 		matchPopup.clear();
 		mouseManager.unregisterMouseListener(warnOverlay.mouse);
@@ -410,6 +418,7 @@ public class PvPLeaderboardPlugin extends Plugin
 		winStreakOverlay.clear();
 		fightMonitor.setStreakSink(null);
 		fightMonitor.setProfileRefreshSink(null);
+		fightMonitor.cancelPending();
 		winStreakTracker.clear();
 		// Hard-close the socket and forbid future reconnects — the
 		// plugin is going away. SocketMgr.shutdown() is
@@ -420,15 +429,22 @@ public class PvPLeaderboardPlugin extends Plugin
 		profileGate.onLogout();
 	}
 
-	/** RuneLite fires this when the whole client is closing. We latch it
-	 *  so the subsequent {@link #shutDown()} knows this was a graceful
-	 *  client exit (treated as a {@code logout} freeze-log) rather than a
-	 *  deliberate mid-fight plugin disable (a {@code plugin_disabled} ban
-	 *  offense). */
+	/** RuneLite fires this when the whole client is closing, and never calls
+	 *  {@link #shutDown()} after it. A client exit mid-fight in an LMS arena is
+	 *  a {@code logout} freeze-log; RuneLite waits for its submit before
+	 *  exiting. */
 	@Subscribe
 	public void onClientShutdown(ClientShutdown event)
 	{
 		shutdownSeen = true;
+		try
+		{
+			CompletableFuture<Boolean> freezeLog = fightMonitor.handleFreeze("logout");
+			if (freezeLog != null) event.waitFor(freezeLog);
+		}
+		catch (Exception e)
+		{
+		}
 	}
 
 	/** Show the LMS plugin-disable ban warning if the persisted marker is

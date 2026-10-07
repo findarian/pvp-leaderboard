@@ -123,7 +123,7 @@ public class KitReader
         for (int b = 0; b < GearSet.BUILDS.size(); b++)
         {
             if (!loadoutSynced(client, b)) continue;
-            store.observe(GearSet.BUILDS.get(b), loadoutHash(client, b), client.getVarpValue(POUCH_VARP + b));
+            store.observe(GearSet.BUILDS.get(b), loadoutHash(client, b), client.getVarpValue(POUCH_VARPS[b]));
         }
     }
 
@@ -194,7 +194,7 @@ public class KitReader
             int[] it = firstItem(child, 2);
             if (it != null) runes.add(item(it[0], it[1], null));
         }
-        store.putPouch(build, runes, client.getVarpValue(POUCH_VARP + b));
+        store.putPouch(build, runes, client.getVarpValue(POUCH_VARPS[b]));
     }
 
     private GearKit readPanel(ArenaWidgets.KitPanel p, String source, int buildIndex, long now)

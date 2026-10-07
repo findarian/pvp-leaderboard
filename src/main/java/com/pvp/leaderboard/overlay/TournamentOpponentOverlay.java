@@ -1,5 +1,6 @@
 package com.pvp.leaderboard.overlay;
 
+import com.pvp.leaderboard.game.*;
 import com.pvp.leaderboard.util.*;
 import java.awt.*;
 import java.util.*;
@@ -20,6 +21,7 @@ public class TournamentOpponentOverlay extends Overlay
 
     private final Client client;
     private final ModelOutlineRenderer renderer;
+    private final ScenePlayers scene;
     private volatile Supplier<Set<String>> oppsSupplier = () -> null;
 
     private Set<String> lookupKeys;
@@ -27,10 +29,11 @@ public class TournamentOpponentOverlay extends Overlay
     private int lookupTick;
 
     @Inject
-    public TournamentOpponentOverlay(Client client, ModelOutlineRenderer renderer)
+    public TournamentOpponentOverlay(Client client, ModelOutlineRenderer renderer, ScenePlayers scene)
     {
         this.client = client;
         this.renderer = renderer;
+        this.scene = scene;
         setPosition(OverlayPosition.DYNAMIC);
         setLayer(OverlayLayer.ABOVE_SCENE);
         setPriority(Overlay.PRIORITY_LOW);
@@ -76,11 +79,9 @@ public class TournamentOpponentOverlay extends Overlay
     /** Every scene player whose canonical name is one of {@code wanted}, never the local player. */
     private List<Player> findByKeys(Set<String> wanted)
     {
-        List<Player> players = client.getPlayers();
-        if (players == null) return Collections.emptyList();
         Player local = client.getLocalPlayer();
         List<Player> found = new ArrayList<>(1);
-        for (Player p : players)
+        for (Player p : scene.all())
         {
             if (p == null || p == local) continue;
             String name = p.getName();

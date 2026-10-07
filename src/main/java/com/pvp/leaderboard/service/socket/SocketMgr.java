@@ -138,6 +138,7 @@ public final class SocketMgr
     /** Clock readings of the recent opens, oldest first. */
     private final ArrayDeque<Long> openTimes = new ArrayDeque<>();
     private ScheduledFuture<?> retryJob;
+    private ScheduledFuture<?> resyncJob;
     /** Epoch ms when {@link #retryJob} is scheduled to fire,
      *  or {@code 0} when no retry is queued. Exposed via
      *  {@link #getRetryAtMs()} so the lobby panel
@@ -270,6 +271,11 @@ public final class SocketMgr
     public synchronized void disconnect()
     {
         cancelRetry();
+        if (resyncJob != null)
+        {
+            resyncJob.cancel(false);
+            resyncJob = null;
+        }
         if (activeSocket != null) closeLocked(CLOSE_GOING_AWAY, "client_logout");
         activeUuid = null;
     }
@@ -535,7 +541,10 @@ public final class SocketMgr
     {
         if (resyncHooks.isEmpty()) return;
         long delay = resyncMs(random.getAsDouble());
-        scheduler.schedule(() -> runResync(opened), delay, TimeUnit.MILLISECONDS);
+        synchronized (this)
+        {
+            resyncJob = scheduler.schedule(() -> runResync(opened), delay, TimeUnit.MILLISECONDS);
+        }
     }
 
     private void runResync(WebSocket opened)

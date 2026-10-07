@@ -3,6 +3,7 @@ package com.pvp.leaderboard.overlay;
 import com.pvp.leaderboard.cache.*;
 import com.pvp.leaderboard.config.*;
 import com.pvp.leaderboard.config.PvPLeaderboardConfig.*;
+import com.pvp.leaderboard.game.*;
 import com.pvp.leaderboard.service.*;
 import com.pvp.leaderboard.util.*;
 import java.awt.*;
@@ -13,15 +14,14 @@ import lombok.*;
 import lombok.extern.slf4j.*;
 import net.runelite.api.*;
 import net.runelite.client.ui.overlay.*;
-import java.util.List;
 import net.runelite.api.Point;
 import static java.lang.System.*;
 
 @Slf4j
-@SuppressWarnings("deprecation")
 public class RankOverlay extends Overlay
 {
     private final Client client;
+    private final ScenePlayers scene;
     private final PvPLeaderboardConfig config;
     private final PvpApi pvpApi;
     /** Opt-in membership set from the snapshot/delta feed (names only). The
@@ -116,9 +116,10 @@ public class RankOverlay extends Overlay
 
     @Inject
     public RankOverlay(Client client, PvPLeaderboardConfig config, PvpApi pvpApi,
-                       MemberCache memberCache)
+                       MemberCache memberCache, ScenePlayers scene)
     {
         this.client = client;
+        this.scene = scene;
         this.config = config;
         this.pvpApi = pvpApi;
         this.memberCache = memberCache;
@@ -418,18 +419,7 @@ public class RankOverlay extends Overlay
     {
         String localName = localPlayer.getName();
 
-        // Defensive: client.getPlayers() can return null transiently
-        // during scene loads / world hops. The enhanced-for below would
-        // NPE on the implicit .iterator() call and feed RuneLite's
-        // OverlayRenderer a stack-stripped NPE every frame at 60 fps
-        // until the scene settles. Treat null as "no players visible".
-        List<Player> scenePlayers = client.getPlayers();
-        if (scenePlayers == null)
-        {
-            return;
-        }
-
-        for (Player player : scenePlayers)
+        for (Player player : scene.all())
         {
             if (player == null || player == localPlayer) continue;
 
