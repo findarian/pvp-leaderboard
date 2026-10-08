@@ -13,9 +13,6 @@ Discord:
 https://discord.gg/txu6dSRKUT
 Please submit bugs or ask additional questions in here
 
-Tournaments/Events:
-Coming Late Summer or Early Fall 2026
-
 IP Warning:
 This plugin requires an IP in order to submit who won/lost to the live leaderboard. Any information that traverses the internet requires an IP, just like visiting a website does.
 
