@@ -16,8 +16,8 @@ public class QueueGateSection extends JPanel
     public static final Style QUEUE_STYLE = Style.NH;
     public static final BuildType QUEUE_BUILD = BuildType.MAIN;
 
-    /** The wait preference a fresh install queues with (5 min, AS-64). */
-    static final int DEFAULT_WAIT_S = 300;
+    /** The wait preference a fresh install queues with (15 min). */
+    static final int DEFAULT_WAIT_S = 900;
 
     private final LobbyPrefs prefs;
     private final JComboBox<String> waitCombo;
