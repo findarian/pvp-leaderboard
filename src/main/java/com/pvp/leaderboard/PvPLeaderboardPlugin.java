@@ -415,6 +415,8 @@ public class PvPLeaderboardPlugin extends Plugin
 		// plugin is gone. Best-effort: never let teardown abort the
 		// rest of the shutdown sequence.
 		try { lobbySvc.stop(); } catch (Exception ignored) { /* hard shutdown */ }
+		// The Matchmaking tab's recent-joins repeat.
+		queueSvc.watchRecent(false);
 		overlayManager.remove(winStreakOverlay);
 		winStreakOverlay.clear();
 		fightMonitor.setStreakSink(null);

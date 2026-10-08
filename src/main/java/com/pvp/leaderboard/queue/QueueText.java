@@ -22,6 +22,7 @@ public final class QueueText
     /** A queue join refused with {@code MATCHMAKING_SUSPENDED}, and a tournament
      *  registration refused with {@code TOURNAMENT_BANNED}. */
     public static final String BANNED = "Your account is banned from matchmaking and tournaments. DM Toyco if this is a mistake.";
+    public static final String RECENT = "Recently Queued";
 
     /** {@code error/queue} codes and their sentences; read before the lobby table. */
     private static final Map<String, String> QUEUE_ERRORS = Map.of(

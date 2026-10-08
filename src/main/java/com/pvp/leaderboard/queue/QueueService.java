@@ -48,6 +48,9 @@ public interface QueueService
     /** {@code queue/status}: re-sync (panel opened / reconnect). */
     default void requestStatus() { }
 
+    /** {@code queue/recent} now and every 5 minutes while {@code open}; {@code false} stops it. */
+    default void watchRecent(boolean open) { }
+
     // ---- shared preferences (parity gap G-2) -------------------------
     // The wait time and the rank range live in ONE server-side row shared
     // with the Discord queue, so the plugin writes it on a local pick and

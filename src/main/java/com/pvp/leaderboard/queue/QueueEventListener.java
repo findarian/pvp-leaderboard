@@ -1,6 +1,7 @@
 package com.pvp.leaderboard.queue;
 
 import com.google.gson.*;
+import java.util.*;
 
 /**
  * Server-push callbacks for the matchmaking queue (Plan 10 Part B / F.1),
@@ -27,4 +28,7 @@ public interface QueueEventListener
 
     /** {@code error/queue} — a stable error code + message. */
     default void onQueueError(String code, String message) {}
+
+    /** {@code queue/recent_list}: the recent joins, newest first; empty when there are none. */
+    default void onRecentQueued(List<RecentJoin> joins) {}
 }

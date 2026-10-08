@@ -9,12 +9,14 @@ import com.pvp.leaderboard.ui.PlayerCard.*;
 import com.pvp.leaderboard.util.*;
 import java.awt.*;
 import java.awt.event.*;
+import java.time.*;
 import java.util.*;
 import java.util.function.*;
 import javax.swing.*;
 import javax.swing.border.*;
 import lombok.extern.slf4j.*;
 import javax.swing.Timer;
+import java.util.List;
 import static com.pvp.leaderboard.ui.Ui.*;
 import static javax.swing.BorderFactory.*;
 import static java.awt.BorderLayout.*;
@@ -123,6 +125,10 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
     /** The {@link #CARD_QUEUE} card; ticked at 1 Hz by
      *  {@link #onFightTick()} while it is the visible card. */
     private QueueSearchingPanel queueCard;
+    /** The zone and "now" of the recent-joins lines. */
+    @Setter(AccessLevel.PACKAGE) private Clock recentClock = Clock.systemDefaultZone();
+    /** The Matchmaking tab is open: the side panel shown with this tab selected. */
+    private boolean recentOpen;
 
     /** Container for the fight-setup card (rebuilt every time the user enters
      *  or transitions through the Pick Style → sub-loc → Meet At flow). Held
@@ -678,10 +684,15 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
     public void setQueue(QueueService svc)
     {
         QueueService previous = queueService;
-        if (previous != null && previous != svc) previous.setListener(null);
+        if (previous != null && previous != svc)
+        {
+            previous.setListener(null);
+            previous.watchRecent(false);
+        }
         queueService = svc == null ? new NoOpQueue() : svc;
         queueService.setListener(new QueueEvents());
         queueService.start();
+        queueService.watchRecent(recentOpen);
         boolean available = queueService.isAvailable();
         if (queueSection != null)
         {
@@ -696,6 +707,21 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         refreshRange();
         if (available) queueService.requestPrefs();
         if (!available) exitQueue(null);
+    }
+
+    /** The Matchmaking tab opened or closed: the queue asks for the recent joins while it is open; closing clears them. */
+    public void watchRecent(boolean open)
+    {
+        recentOpen = open;
+        queueService.watchRecent(open);
+        if (!open) showRecent(List.of());
+    }
+
+    /** The recent joins in both views. */
+    private void showRecent(List<RecentJoin> joins)
+    {
+        queueSection.recent.show(joins, recentClock);
+        queueCard.recent.show(joins, recentClock);
     }
 
     /** Local wait pick → the shared prefs row, so the Discord modal prefills with it. */
@@ -830,6 +856,12 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         public void onQueueError(String code, String message)
         {
             showError(QueueText.forError(code, message));
+        }
+
+        @Override
+        public void onRecentQueued(List<RecentJoin> joins)
+        {
+            if (recentOpen) showRecent(joins);
         }
     }
 

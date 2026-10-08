@@ -50,7 +50,7 @@ public final class SocketProtocol
         // Plan 10 (2026-09-21): the matchmaking queue (Part B, WebSocketQueueService)
         // and the Swiss tournaments (Part C, TourneySvc). Mirrors the
         // backend additive ALLOWED_COMMANDS_EXTRA / ALLOWED_COMMANDS_TOURNAMENT env lines.
-        "queue/join", "queue/leave", "queue/expand_range", "queue/set_prefs", "queue/status",
+        "queue/join", "queue/leave", "queue/expand_range", "queue/set_prefs", "queue/status", "queue/recent",
         "tournament/list", "tournament/register", "tournament/withdraw", "tournament/status",
         "tournament/subscribe", "tournament/unsubscribe", "tournament/in_combat",
         "tournament/round_end_reply", "tournament/report_problem", "tournament/gear_status");

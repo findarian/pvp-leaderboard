@@ -7,8 +7,8 @@ import javax.swing.*;
 /**
  * The "Searching…" card of the matchmaking queue: the title and the
  * elapsed / limit clock, then the <b>Expand matchmaking range</b> and
- * <b>Leave queue</b> buttons. Pure rendering of a {@link QueueState}; the
- * owning {@link MatchmakingLobbyPanel} sends the cmds.
+ * <b>Leave queue</b> buttons, then the recent joins. Pure rendering of a
+ * {@link QueueState}; the owning {@link MatchmakingLobbyPanel} sends the cmds.
  */
 public class QueueSearchingPanel extends JPanel
 {
@@ -16,6 +16,8 @@ public class QueueSearchingPanel extends JPanel
     private final JLabel clock = new JLabel(" ");
     private final JButton expand = new JButton("Expand matchmaking range");
     private final JButton leave = new JButton("Leave queue");
+    /** The recent joins, under Leave queue. */
+    final RecentQueued recent = new RecentQueued();
     private QueueState last;
     /** Seconds in the queue: the last push's, plus one per local tick. */
     private int elapsed;
@@ -33,6 +35,7 @@ public class QueueSearchingPanel extends JPanel
         add(row(button(expand, "queue-expand", Ui.ACCENT, Color.WHITE, onExpand)));
         add(Ui.vgap(10));
         add(row(button(leave, "queue-leave", Ui.RED, Ui.RED_FG, onLeave)));
+        add(recent);
     }
 
     /** A bold 14 pt flat button in {@code bg} / {@code fg} that runs {@code action} (when there is one). */

@@ -33,6 +33,7 @@ public final class TimeText
     private static final DateTimeFormatter SAME_YEAR = DateTimeFormatter.ofPattern("EEE d MMM HH:mm", Locale.ENGLISH);
     private static final DateTimeFormatter OTHER_YEAR = DateTimeFormatter.ofPattern("EEE d MMM yyyy HH:mm", Locale.ENGLISH);
     private static final DateTimeFormatter TIME = DateTimeFormatter.ofPattern("HH:mm", Locale.ENGLISH);
+    private static final DateTimeFormatter ZONE = DateTimeFormatter.ofPattern("zzz", Locale.ENGLISH);
 
     private static final long MINUTE = 60L;
     private static final long HOUR = 60L * MINUTE;
@@ -89,6 +90,19 @@ public final class TimeText
     {
         if (epochS == null || epochS <= 0L) return "";
         return local(epochS, zone, nowMs) + " · " + relative(epochS, nowMs);
+    }
+
+    /** {@code "23:05"}: {@code epochS} on a 24-hour clock in {@code zone}. */
+    public static String hhmm(long epochS, ZoneId zone)
+    {
+        return TIME.format(Instant.ofEpochSecond(epochS).atZone(zone));
+    }
+
+    /** The zone's short name at {@code t} ({@code "EDT"}, {@code "EST"}), or its offset
+     *  ({@code "GMT+03:00"}) when it has none. */
+    public static String zone(ZonedDateTime t)
+    {
+        return ZONE.format(t);
     }
 
     private static long round(long seconds, double unitSeconds)

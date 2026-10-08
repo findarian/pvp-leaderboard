@@ -23,6 +23,8 @@ public class QueueGateSection extends JPanel
     private final JComboBox<String> waitCombo;
     private final QueueRangeSlider range;
     private final JButton queueBtn;
+    /** The recent joins, under the queue button. */
+    final RecentQueued recent = new RecentQueued();
     /** Told after a <b>local</b> wait pick / rank-range pick so the owner
      *  can write that ONE key of the shared row (G-2). Sending only the
      *  key the user touched is what stops a wait change from overwriting a
@@ -74,6 +76,7 @@ public class QueueGateSection extends JPanel
         queueBtn.setBorderPainted(false);
         queueBtn.addActionListener(e -> { if (onQueue != null) onQueue.run(); });
         add(queueBtn);
+        add(recent);
 
         // The owner places the rank-range row (above the gate's title).
         boolean rangeOn = this.prefs.getRangeOn();

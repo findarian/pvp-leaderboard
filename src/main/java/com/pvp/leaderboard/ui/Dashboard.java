@@ -66,6 +66,8 @@ public class Dashboard extends PluginPanel
     /** Whether this panel is on screen (the sidebar open with this panel's
      *  tab selected); replaceable in tests. */
     private BooleanSupplier panelOpen = this::isShowing;
+    /** Between RuneLite's {@link #onActivate} and {@link #onDeactivate}. */
+    private boolean shown;
 
     static final String OFF_TOOLTIP = "Tournaments are turned off in the plugin settings";
     /** The Matchmaking card itself: the queue view. Held as a field so the
@@ -461,6 +463,29 @@ public class Dashboard extends PluginPanel
         viewCards.show(viewBox, key);
         viewBox.revalidate();
         syncTourneys();
+        syncRecent();
+    }
+
+    @Override
+    public void onActivate()
+    {
+        super.onActivate();
+        shown = true;
+        syncRecent();
+    }
+
+    @Override
+    public void onDeactivate()
+    {
+        super.onDeactivate();
+        shown = false;
+        syncRecent();
+    }
+
+    /** The Matchmaking tab is open while this panel is shown with that tab selected. */
+    private void syncRecent()
+    {
+        lobbyCard.watchRecent(shown && CARD_LOBBY.equals(activeCard));
     }
 
     /** The Show streaks switch: the rows, the button's words and the saved choice. */

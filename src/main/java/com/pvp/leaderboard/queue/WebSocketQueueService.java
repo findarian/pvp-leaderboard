@@ -4,15 +4,17 @@ import com.google.gson.*;
 import com.pvp.leaderboard.lobby.*;
 import com.pvp.leaderboard.service.socket.*;
 import com.pvp.leaderboard.util.*;
+import java.util.*;
+import java.util.concurrent.*;
 import java.util.function.*;
 import javax.inject.*;
 import javax.swing.*;
 
 /**
  * {@link QueueService} over the plugin's WebSocket (Plan 10 Part B / F.1,
- * 2026-09-21). Encodes the five {@code queue/*} cmds (WEBSOCKET_PROTOCOL.md
- * § 6.2b) and turns the server pushes + {@code error/queue} into
- * EDT-delivered {@link QueueEventListener} callbacks.
+ * 2026-09-21). Encodes the {@code queue/*} cmds and turns the server
+ * pushes + {@code error/queue} into EDT-delivered
+ * {@link QueueEventListener} callbacks.
  *
  * <p>Reconnect: after a socket re-open the server's row may or may not
  * still exist (queue rows expire with the wait preference), so the
@@ -27,14 +29,18 @@ public class WebSocketQueueService implements QueueService
 {
     private final SocketMgr socket;
     private final SocketBus bus;
+    private final ScheduledExecutorService scheduler;
     private volatile QueueEventListener listener;
     private volatile boolean started = false;
+    /** The 5-minute {@code queue/recent} repeat; {@code null} while the Matchmaking tab is closed. */
+    private volatile ScheduledFuture<?> recentJob;
 
     @Inject
-    public WebSocketQueueService(SocketMgr socket, SocketBus bus)
+    public WebSocketQueueService(SocketMgr socket, SocketBus bus, ScheduledExecutorService scheduler)
     {
         this.socket = socket;
         this.bus = bus;
+        this.scheduler = scheduler;
     }
 
     @Override
@@ -52,12 +58,15 @@ public class WebSocketQueueService implements QueueService
         bus.register("queue/timeout", this::handleTimeout);
         bus.register("queue/prefs", this::handlePrefs);
         bus.register("error/queue", this::handleError);
+        bus.register("queue/recent_list", this::handleRecent);
         // ONE re-sync listener: on a socket (re-)open, ask for the live queue
-        // row and re-read the shared prefs row (G-2) in the same hook.
+        // row and re-read the shared prefs row (G-2) in the same hook, and the
+        // recent joins while the Matchmaking tab is open.
         socket.addResyncListener(() ->
         {
             requestStatus();
             requestPrefs();
+            if (recentJob != null) requestRecent();
         });
     }
 
@@ -108,6 +117,26 @@ public class WebSocketQueueService implements QueueService
     public void requestStatus()
     {
         socket.send("queue/status", new JsonObject());
+    }
+
+    @Override
+    public synchronized void watchRecent(boolean open)
+    {
+        if (open == (recentJob != null)) return;
+        if (open)
+        {
+            requestRecent();
+            recentJob = scheduler.scheduleWithFixedDelay(this::requestRecent, 5, 5, TimeUnit.MINUTES);
+            return;
+        }
+        recentJob.cancel(false);
+        recentJob = null;
+    }
+
+    /** {@code queue/recent}: the recent joins, answered with {@code queue/recent_list}. */
+    void requestRecent()
+    {
+        socket.send("queue/recent", new JsonObject());
     }
 
     // ---- shared preferences (G-2) ----
@@ -176,8 +205,23 @@ public class WebSocketQueueService implements QueueService
         onEdt(l -> l.onQueuePrefs(prefs));
     }
 
+    /** The joins with a name and a whole positive time, in the order sent, at most 20. */
+    private void handleRecent(JsonObject d)
+    {
+        var joins = new ArrayList<RecentJoin>();
+        for (JsonElement e : JsonLenient.optArray(d, "entries"))
+        {
+            JsonObject o = e.isJsonObject() ? e.getAsJsonObject() : null;
+            String name = o == null ? null : JsonLenient.str(o.get("name"));
+            long at = JsonLenient.optWhole(o, "at");
+            if (name != null && !name.isBlank() && at > 0 && joins.size() < 20) joins.add(new RecentJoin(name, at));
+        }
+        onEdt(l -> l.onRecentQueued(joins));
+    }
+
     private void handleError(JsonObject d)
     {
+        if ("queue/recent".equals(JsonLenient.optString(d, "cmd"))) return;
         String code = JsonLenient.optString(d, "code", "UNKNOWN");
         String message = JsonLenient.optString(d, "message");
         onEdt(l -> l.onQueueError(code, message));
