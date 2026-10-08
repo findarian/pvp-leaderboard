@@ -1024,10 +1024,10 @@ public class Dashboard extends PluginPanel
         if (opponents != null) perfStats.setOppRanks(opponents);
     }
 
-    /** Every rating row in screen order: Overall reads the profile's root,
-     *  each other bucket its object under {@code buckets}. Plan 10 F.5: the
-     *  tournament bucket is null until the player's first recognised
-     *  tournament game (AS-97) — optObject keeps that JsonNull member from
+    /** Every rating row in screen order: Overall reads the profile's root
+     *  (its streak pair from {@code buckets.overall}), each other bucket its
+     *  object under {@code buckets}. The tournament bucket is null until the
+     *  player's first tournament game; optObject keeps that JSON null from
      *  throwing and the row stays hidden ("—"). */
     private void applyAll(JsonObject stats, String playerName, int gen)
     {
@@ -1063,12 +1063,12 @@ public class Dashboard extends PluginPanel
         if (!r.isEmpty()) rankLabel = r;
         division = optInt(bucketObj, "division", division);
 
-        // Plan 10 / BOARD row 33: the streak line under the bar. The top-level
-        // (overall) object spells it current_streak; bucket objects spell it
-        // streak. The later rank-number / Top % refresh uses the 6-arg form so
-        // it leaves the line alone.
-        int streak = optInt(bucketObj, "overall".equals(bucketKey) ? "current_streak" : "streak", 0);
-        int bestStreak = optInt(bucketObj, "best_streak", 0);
+        // The streak lines under the bar: every row's pair is in its bucket
+        // object, the overall one in buckets.overall. The later rank-number /
+        // Top % refresh uses the 6-arg form so it leaves the lines alone.
+        JsonObject streaks = "overall".equals(bucketKey) ? optObject(optObject(bucketObj, "buckets"), "overall") : bucketObj;
+        int streak = optInt(streaks, "streak", 0);
+        int bestStreak = optInt(streaks, "best_streak", 0);
         rankProgress.updateBucket(bucketKey, rankLabel, division, pct, -1, null, streak, bestStreak);
 
         if (!"—".equals(rankLabel)) refreshRankLine(playerName, bucketKey, rankLabel, division, pct, mmr, gen);
