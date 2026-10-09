@@ -574,6 +574,7 @@ public class Dashboard extends PluginPanel
             tourneyPanel.setHistoryLoader(pvpApi::getTournamentHistory);
             tourneyPanel.setStandingsLoader(pvpApi::getTournamentStandings);
             tourneyPanel.setGameCheck(plugin::isInGame);
+            tourneyPanel.setWorldCheck(plugin::loggedInWorld);
             if (combatCheck != null) tourneyPanel.setInCombatProvider(combatCheck);
             // Set 6: the Report gate is the same Discord login state onLoginState() reloads on.
             tourneyPanel.setDiscordLoginProvider(discordLogin::isLoggedIn);

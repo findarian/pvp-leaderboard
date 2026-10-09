@@ -22,7 +22,7 @@ public class GearCard extends CapPanel
     private static final float ITEM_PT = 14f;
     /** An item icon's width plus its gap to the text. */
     private static final int ICON_ROOM_PX = 40;
-    private static final Color RED = new Color(0xff6b6b);
+    static final Color RED = new Color(0xff6b6b);
 
     public interface Actions
     {

@@ -67,4 +67,7 @@ public interface TournamentEventListener
     default void onGearCheck(String tournamentId, int round, long untilEpochS) {}
 
     default void onGearAck(String tournamentId, boolean ok) {}
+
+    /** {@code tournament/no_show_recorded}: the no-show report counts at {@code effective_at}. */
+    default void onNoShowRecorded(String tournamentId, String seriesId, long effectiveAtS) {}
 }

@@ -130,6 +130,11 @@ public class PvPLeaderboardPlugin extends Plugin
 	private OppTracker oppTracker;
 
 	@Inject
+	private WorldReport worldReport;
+
+	private volatile int world;
+
+	@Inject
 	private TournamentOpponentOverlay oppOverlay;
 
 	/** Plan 10 F.2: flips to the Tournament bucket when a round opens
@@ -205,6 +210,23 @@ public class PvPLeaderboardPlugin extends Plugin
 		}
 	}
 
+	/** The world the player is in, 0 when not in one. */
+	public int loggedInWorld()
+	{
+		return world;
+	}
+
+	/** Client thread: logged in = the client's world; a region load keeps it; anything else (hopping, the login
+	 *  screen, a lost connection) = 0. */
+	private void trackWorld(GameState s)
+	{
+		int was = world;
+		if (s == GameState.LOGGED_IN) world = client.getWorld();
+		else if (s != GameState.LOADING) world = 0;
+		int now = world;
+		if (now != was) SwingUtilities.invokeLater(() -> worldReport.onWorld(now));
+	}
+
 	// Accessor for Dashboard to get local player name for debug logs
 	public String getLocalName()
 	{
@@ -239,7 +261,11 @@ public class PvPLeaderboardPlugin extends Plugin
 		// the first frame arrives.
 		identitySvc.load(this::getPluginDirectory);
 		eventBus.register(scenePlayers);
-		clientThread.invokeLater(() -> scenePlayers.seed(client));
+		clientThread.invokeLater(() ->
+		{
+			scenePlayers.seed(client);
+			trackWorld(client.getGameState());
+		});
 		lobbySvc.start();
 		// Plan 10 step 7: the queue + tournament transports subscribe to
 		// their pushes (and the reconnect re-sync) the same way. The session
@@ -248,6 +274,7 @@ public class PvPLeaderboardPlugin extends Plugin
 		queueSvc.start();
 		tourneySvc.start();
 		tourneySvc.addListener(oppTracker);
+		tourneySvc.addListener(worldReport);
 		tourneySvc.addListener(bucketSwitch);
 		// Wire the anti-smurf gate's identity suppliers BEFORE the
 		// dashboard ctor so the first listener fire (still empty counts)
@@ -568,6 +595,7 @@ public class PvPLeaderboardPlugin extends Plugin
 	{
 		try
 		{
+			trackWorld(stateChange.getGameState());
 			switch (stateChange.getGameState())
 			{
 				case LOGGED_IN:

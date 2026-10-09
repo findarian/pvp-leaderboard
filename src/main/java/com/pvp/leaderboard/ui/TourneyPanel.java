@@ -2,11 +2,13 @@ package com.pvp.leaderboard.ui;
 
 import lombok.*;
 import com.google.gson.*;
+import com.pvp.leaderboard.*;
 import com.pvp.leaderboard.lobby.*;
 import com.pvp.leaderboard.queue.*;
 import com.pvp.leaderboard.tournament.*;
 import com.pvp.leaderboard.util.*;
 import java.awt.*;
+import java.awt.font.*;
 import java.math.*;
 import java.time.*;
 import java.util.*;
@@ -33,6 +35,7 @@ public class TourneyPanel extends JPanel implements TournamentEventListener
     /** The finished events, newest first, and one event's final standings. */
     public static final String CARD_PAST = "tournaments-past";
     public static final String CARD_PAST_STANDINGS = "tournaments-past-standings";
+    private static final String CARD_GO = "tournaments-go";
     static final String BOARD_FAILED = "Could not load the standings.";
     static final float HEADER_PT = 16f;
     static final float BODY_PT = 15f;
@@ -46,6 +49,8 @@ public class TourneyPanel extends JPanel implements TournamentEventListener
     private volatile BooleanSupplier discordLoggedIn = () -> false;
     /** Whether the player is logged into the game; unwired = logged in. */
     private volatile BooleanSupplier gameLoggedIn = () -> true;
+    /** The world the player is in, 0 when not logged in; unwired = unknown (the match view shows). */
+    @Setter private volatile IntSupplier worldCheck = () -> -1;
     /** The player's own match count per event bucket; unwired = unknown. */
     private volatile Function<String, Integer> matchCounts = bucket -> null;
     /** Opens a player's page in Player Lookup; unwired = nothing. */
@@ -69,6 +74,9 @@ public class TourneyPanel extends JPanel implements TournamentEventListener
     private final JLabel banner = new JLabel(" ");
     /** Whether a banner is up; it is hidden while the Rules page shows. */
     private boolean bannerShown;
+    private String bannerText = " ";
+    /** The match view is replaced by the line saying where to go. */
+    private boolean away;
     private final JPanel listBody = column();
     private final JLabel listStatus = new JLabel("Loading…", SwingConstants.LEFT);
     private final JLabel activeHeader = new JLabel(" ");
@@ -90,6 +98,16 @@ public class TourneyPanel extends JPanel implements TournamentEventListener
     private final JButton rulesBtn = tabButton("Rules", "tournaments-active-rules", this::openRulesForActive);
     /** The final standings' way back to the list. */
     private final JButton backBtn = tabButton("Back", "tournaments-active-back", this::clearActive);
+    /** The open match's "My opponent didn't show up", and the line in its place once the report is recorded. */
+    private final JButton noShowBtn = font(tabButton("My opponent didn't show up", "tournaments-no-show", this::noShow), BOLD, 14f);
+    private final JLabel noShowNote = label("tournaments-no-show-note", " ", PLAIN, BODY_PT, AMBER);
+    /** The series whose no-show report was recorded, and when it counts (epoch s). */
+    private String noShowSid;
+    private long noShowAt;
+    /** The event whose page View full standings opens. */
+    private String fullId;
+    /** The final standings' way to the event's page. */
+    private final JButton fullBtn = tabButton("View full standings", "tournaments-active-full", () -> openFull(fullId));
     private JPanel activePair;
     private final Timer ticker;
     /** The open Rules page, if any, and the card to return to from it. */
@@ -114,6 +132,8 @@ public class TourneyPanel extends JPanel implements TournamentEventListener
     /** Local wall-clock ms at which the current round ends (server ETA at receipt), 0 = none. */
     private long roundEndMs;
     private long breakUntilS;
+    /** Epoch seconds at which the kit window closes, 0 = none. */
+    private long gearUntilS;
     private boolean bye;
     /** The match is over and the next round has not opened. */
     private boolean waitNext;
@@ -148,6 +168,7 @@ public class TourneyPanel extends JPanel implements TournamentEventListener
         cardHost.add(buildLogin(), CARD_LOGIN);
         cardHost.add(buildPast(), CARD_PAST);
         cardHost.add(buildPastStandingsCard(), CARD_PAST_STANDINGS);
+        cardHost.add(new JPanel(), CARD_GO);
         add(cardHost, CENTER);
         showCard(CARD_LIST);
         this.service.addListener(this);
@@ -360,6 +381,9 @@ public class TourneyPanel extends JPanel implements TournamentEventListener
         plain(activeWhere, BODY_PT);
         activeStatus.setName("tournaments-active-status");
         plain(activeStatus, BODY_PT).setForeground(MUTED);
+        top.add(noShowBtn);
+        top.add(noShowNote);
+        syncNoShow();
 
         roundEndBox.setName("tournaments-round-end");
         roundEndBox.setOpaque(true);
@@ -384,14 +408,15 @@ public class TourneyPanel extends JPanel implements TournamentEventListener
         syncReport();
         activePair = pairRow(reportBtn, rulesBtn);
         footer.add(activePair);
+        footer.add(backBtn);
         footer.add(vgap(4));
         withdrawBtn.setName("tournaments-active-withdraw");
         withdrawBtn.setBackground(RED);
         withdrawBtn.setForeground(RED_FG);
         withdrawBtn.addActionListener(e -> { if (activeId != null) service.withdraw(activeId); });
         footer.add(withdrawBtn);
-        backBtn.setVisible(false);
-        footer.add(backBtn);
+        footer.add(fullBtn);
+        footer(true);
         card.add(footer, SOUTH);
         return card;
     }
@@ -430,6 +455,8 @@ public class TourneyPanel extends JPanel implements TournamentEventListener
         top.add(pastBoardMsg);
         top.add(vgap(6));
         top.add(tabButton("Back", "tournaments-past-standings-back", () -> showCard(CARD_PAST)));
+        top.add(vgap(4));
+        top.add(tabButton("View full standings", "tournaments-past-standings-full", () -> openFull(fullId)));
         top.add(vgap(6));
         card.add(top, NORTH);
         pastBoard.setName("tournaments-past-standings-body");
@@ -524,9 +551,19 @@ public class TourneyPanel extends JPanel implements TournamentEventListener
     {
         currentCard = name;
         if (!CARD_RULES.equals(name)) dropRules();
-        cards.show(cardHost, gameLoggedIn.getAsBoolean() ? name : CARD_LOGIN);
+        away = CARD_ACTIVE.equals(name) && offMatchWorld();
+        cards.show(cardHost, !gameLoggedIn.getAsBoolean() ? CARD_LOGIN : away ? CARD_GO : name);
         syncBanner();
         placeCard();
+    }
+
+    /** A match is open on a known world, its round has not ended and the player is not in that world. */
+    private boolean offMatchWorld()
+    {
+        int want = series == null ? 0 : series.worldNumber();
+        int here = worldCheck.getAsInt();
+        boolean ended = roundEndBox.isVisible() || roundEndMs > 0 && nowMs.getAsLong() >= roundEndMs;
+        return want > 0 && here >= 0 && here != want && !ended;
     }
 
     public void setGearCard(JComponent card)
@@ -550,17 +587,19 @@ public class TourneyPanel extends JPanel implements TournamentEventListener
 
     private void showBanner(String text)
     {
-        banner.setText(wrapEscaped(banner.getFont(), TEXT_WIDTH, text));
+        bannerText = wrapEscaped(banner.getFont(), TEXT_WIDTH, text);
         bannerShown = true;
         syncBanner();
         revalidate();
         repaint();
     }
 
-    /** The banner shows while one is up, except on the Rules page. */
+    /** The banner shows while one is up, except on the Rules page; off the match's world it says where to go. */
     private void syncBanner()
     {
-        banner.setVisible(bannerShown && !CARD_RULES.equals(currentCard));
+        String go = away && series != null ? "Go to " + series.worldLabel() + " and your opponent will be highlighted" : null;
+        banner.setText(go == null ? bannerText : wrapEscaped(banner.getFont(), TEXT_WIDTH, go));
+        banner.setVisible((go != null || bannerShown) && !CARD_RULES.equals(currentCard));
     }
 
     // ---------------------------------------------------------------- list rendering
@@ -711,6 +750,7 @@ public class TourneyPanel extends JPanel implements TournamentEventListener
     {
         pastBoard.removeAll();
         pastBoard.rows.clear();
+        fullId = t.tournamentId;
         setWrapped(pastTitle, t.name);
         showCard(CARD_PAST_STANDINGS);
         Function<String, CompletableFuture<JsonObject>> loader = standingsLoader;
@@ -723,8 +763,14 @@ public class TourneyPanel extends JPanel implements TournamentEventListener
                 return;
             }
             setWrapped(pastBoardMsg, " ");
-            renderBoard(pastBoard, "past-standings-", s.rows, -1);
+            renderBoard(pastBoard, "past-standings-", s.rows, false);
         });
+    }
+
+    /** The event's page on the website. */
+    private void openFull(String id)
+    {
+        if (id != null) linkOpener.accept(PvpConsts.SITE_URL + "/tournaments.html?id=" + id);
     }
 
     // ---------------------------------------------------------------- active rendering
@@ -756,20 +802,38 @@ public class TourneyPanel extends JPanel implements TournamentEventListener
         footer(true);
         renderEta();
         renderStatus();
+        syncNoShow();
         syncReport();
         refreshRules();
         showCard(CARD_ACTIVE);
     }
 
+    /** The open match's no-show button, or once its report is recorded the line saying when it counts. */
+    private void syncNoShow()
+    {
+        boolean told = series != null && series.seriesId.equals(noShowSid);
+        noShowBtn.setVisible(series != null && !told);
+        noShowNote.setVisible(told);
+        if (told) setWrapped(noShowNote, "Reported." + (noShowAt > 0 ? " It counts at " + TimeText.hhmm(noShowAt, zone) + " if the match has no result." : ""));
+    }
+
+    private void noShow()
+    {
+        if (activeId != null && series != null) service.noShow(activeId, series.seriesId);
+    }
+
+    /** The clock line: "On a break" (its time left only outside the kit window), the round's time left outside the kit
+     *  window, else "Between rounds". */
     private void renderEta()
     {
         long now = nowMs.getAsLong();
-        if (breakUntilS > 0 && breakUntilS * 1000L > now)
+        boolean kit = gearUntilS * 1000L > now;
+        if (breakUntilS * 1000L > now)
         {
-            setWrapped(activeEta, "On a break · next round in " + mmss((breakUntilS * 1000L - now) / 1000L));
+            setWrapped(activeEta, "On a break" + (kit ? "" : " · next round in " + mmss((breakUntilS * 1000L - now) / 1000L)));
             return;
         }
-        if (roundEndMs > 0)
+        if (roundEndMs > 0 && !kit)
         {
             long left = Math.max(0L, (roundEndMs - now) / 1000L);
             setWrapped(activeEta, mmss(left) + " est. remaining in round" + extendedText(extendCount));
@@ -796,12 +860,16 @@ public class TourneyPanel extends JPanel implements TournamentEventListener
         return r.draws > 0 ? score + " · " + r.draws + (r.draws == 1 ? " draw" : " draws") : score;
     }
 
-    /** A row's right-hand cell: its score, then its status when it was removed ("2 · withdrew"). */
+    /** A row's right-hand cell: its score, or DNF for a removed player. */
     static String rightText(StandingsRow r)
     {
-        String score = boardScore(r);
-        String removed = r.removedLabel();
-        return removed.isEmpty() ? score : score + " · " + removed;
+        return r.removed() ? "DNF" : boardScore(r);
+    }
+
+    /** "Wins - 3 Losses - 1", then ", Draws - 1" and ", Byes - 1" when the row has them. */
+    static String record(StandingsRow r)
+    {
+        return "Wins - " + r.wins + " Losses - " + r.losses + (r.draws > 0 ? ", Draws - " + r.draws : "") + (r.byes > 0 ? ", Byes - " + r.byes : "");
     }
 
     private void renderStatus()
@@ -891,19 +959,21 @@ public class TourneyPanel extends JPanel implements TournamentEventListener
     }
 
     /** The live leaderboard: the first 40 rows. */
-    private void renderBoard(List<StandingsRow> rows, int myRank)
+    private void renderBoard(List<StandingsRow> rows)
     {
-        renderBoard(boardPanel, "standings-", rows.subList(0, Math.min(rows.size(), 40)), myRank);
+        renderBoard(boardPanel, "standings-", rows.subList(0, Math.min(rows.size(), 40)), true);
     }
 
-    /** Every row of {@code rows}; a prize winner's row has its prize on a second line under the name. */
-    private void renderBoard(BoardPanel body, String prefix, List<StandingsRow> rows, int myRank)
+    /** Every row of {@code rows}: the name white, green once the player's round is done, red and struck through with
+     *  DNF for a removed player; under it a prize winner's prize and, outside the live leaderboard, the row's record. */
+    private void renderBoard(BoardPanel body, String prefix, List<StandingsRow> rows, boolean live)
     {
         body.removeAll();
         String self = selfNameSupplier.get();
         String selfKey = self == null ? null : NameUtils.canonicalKey(self);
         Component mine = null;
         body.rows.clear();
+        body.appliedPt = -1;
         if (rows.isEmpty())
         {
             body.add(label(null, "No standings yet.", PLAIN, BODY_PT, MUTED));
@@ -911,7 +981,7 @@ public class TourneyPanel extends JPanel implements TournamentEventListener
         for (StandingsRow r : rows)
         {
             boolean me = (selfKey != null && selfKey.equals(NameUtils.canonicalKey(r.displayName)))
-                || (myRank > 0 && r.rank == myRank && selfKey == null);
+                || (live && myRank > 0 && r.rank == myRank && selfKey == null);
             var line = new JPanel(new BorderLayout(BoardPanel.GAP, 0));
             line.setName(prefix + "row-" + r.rank);
             left(line).setBorder(pad(1, 4, 1, 4));
@@ -920,13 +990,12 @@ public class TourneyPanel extends JPanel implements TournamentEventListener
                 line.setBackground(new Color(0x1f3a2a));
                 line.setBorder(BorderFactory.createCompoundBorder(BorderFactory.createLineBorder(GREEN), pad(1, 4, 1, 4)));
             }
-            String label = r.rank + " · " + r.displayName + (me ? " (you)" : "");
-            String removed = r.removedLabel();
-            String right = rightText(r);
-            var left = new JLabel(label);
-            if (!removed.isEmpty()) left.setForeground(MUTED);
-            var pts = new JLabel(right);
-            pts.setForeground(removed.isEmpty() ? Color.WHITE : MUTED);
+            boolean out = r.removed();
+            Color fg = out ? GearCard.RED : Color.WHITE;
+            var left = new JLabel(r.rank + " · " + r.displayName + (me ? " (you)" : ""));
+            left.setForeground(r.roundDone && !out ? GREEN : fg);
+            var pts = new JLabel(rightText(r));
+            pts.setForeground(fg);
             JLabel rank = null;
             if (r.rankLabel != null)
             {
@@ -945,12 +1014,17 @@ public class TourneyPanel extends JPanel implements TournamentEventListener
             }
             line.add(left, CENTER);
             JLabel prize = r.prizeGp < 0 ? null : label(prefix + "prize-" + r.rank, gp(r.prizeGp) + " gp" + (r.prizeRandom ? " random draw" : ""), PLAIN, BODY_PT, AMBER);
-            if (prize != null) line.add(prize, SOUTH);
+            String rec = live ? null : record(r);
+            JLabel recLine = rec == null ? null : label(prefix + "record-" + r.rank, rec, PLAIN, BODY_PT, MUTED);
+            JPanel foot = column();
+            foot.setOpaque(false);
+            for (JLabel l : new JLabel[]{prize, recLine}) if (l != null) foot.add(l);
+            line.add(foot, SOUTH);
             body.add(line);
-            body.rows.add(new BoardPanel.Row(line, left, pts, rank, prize, me));
+            body.rows.add(new BoardPanel.Row(line, left, pts, rank, prize, recLine, rec, me, out));
             if (me) mine = line;
         }
-        body.applyPt(HEADER_PT);
+        body.applyPt(HEADER_PT, 0);
         body.revalidate();
         body.repaint();
         if (mine != null)
@@ -967,6 +1041,7 @@ public class TourneyPanel extends JPanel implements TournamentEventListener
     {
         static final int GAP = 6;
 
+        @AllArgsConstructor
         static final class Row
         {
             final JPanel line;
@@ -976,22 +1051,18 @@ public class TourneyPanel extends JPanel implements TournamentEventListener
             final JLabel rank;
             /** The prize line under the name, {@code null} when the row has none. */
             final JLabel prize;
+            /** The record line under it and its text, {@code null} in the live leaderboard. */
+            final JLabel rec;
+            final String recText;
             final boolean me;
-
-            Row(JPanel line, JLabel left, JLabel right, JLabel rank, JLabel prize, boolean me)
-            {
-                this.line = line;
-                this.left = left;
-                this.right = right;
-                this.rank = rank;
-                this.prize = prize;
-                this.me = me;
-            }
+            /** A removed player: the name is struck through. */
+            final boolean out;
         }
 
         final List<Row> rows = new ArrayList<>();
         private final RowTextFit fit = new RowTextFit();
         private float appliedPt = -1f;
+        private int appliedWidth;
 
         BoardPanel()
         {
@@ -1005,8 +1076,7 @@ public class TourneyPanel extends JPanel implements TournamentEventListener
             if (width > 0 && !rows.isEmpty())
             {
                 int usable = width - getInsets().left - getInsets().right;
-                int pt = fit.largestFitting((int) 12f, (int) HEADER_PT, p -> allFit(p, usable));
-                applyPt(pt);
+                applyPt(fit.largestFitting((int) 12f, (int) HEADER_PT, p -> allFit(p, usable)), usable);
             }
             super.doLayout();
         }
@@ -1023,19 +1093,43 @@ public class TourneyPanel extends JPanel implements TournamentEventListener
             return true;
         }
 
-        void applyPt(float pt)
+        /** The rows at {@code pt}; each record line at the body size or under, wrapped to {@code usable} px (one line
+         *  for 0). */
+        void applyPt(float pt, int usable)
         {
-            if (pt == appliedPt && !rows.isEmpty() && rows.get(0).left.getFont().getSize2D() == pt) return;
+            if (pt == appliedPt && usable == appliedWidth) return;
             appliedPt = pt;
+            appliedWidth = usable;
             for (Row r : rows)
             {
-                r.left.setFont(rowFont((int) pt, r.me));
+                Font name = rowFont((int) pt, r.me);
+                r.left.setFont(r.out ? name.deriveFont(Map.of(TextAttribute.STRIKETHROUGH, TextAttribute.STRIKETHROUGH_ON)) : name);
                 for (JLabel l : new JLabel[]{r.right, r.rank, r.prize}) if (l != null) l.setFont(rowFont((int) pt, false));
-                int height = Math.max(r.left.getPreferredSize().height, r.right.getPreferredSize().height)
-                    + (r.prize == null ? 0 : r.prize.getPreferredSize().height)
-                    + r.line.getInsets().top + r.line.getInsets().bottom;
+                Insets in = r.line.getInsets();
+                int height = Math.max(r.left.getPreferredSize().height, r.right.getPreferredSize().height) + in.top + in.bottom
+                    + (r.prize == null ? 0 : r.prize.getPreferredSize().height);
+                if (r.rec != null)
+                {
+                    Font small = rowFont((int) Math.min(pt, BODY_PT), false);
+                    r.rec.setFont(small);
+                    r.rec.setText(lines(r.recText, small, usable - in.left - in.right));
+                    height += r.rec.getPreferredSize().height;
+                }
                 maxH(r.line, height);
             }
+        }
+
+        /** {@code text}'s comma-separated parts on as few lines as fit {@code width} px at {@code f}. */
+        private String lines(String text, Font f, int width)
+        {
+            List<String> out = new ArrayList<>();
+            for (String part : text.split(", "))
+            {
+                int last = out.size() - 1;
+                if (last >= 0 && (width <= 0 || fit.textWidth("<html>" + out.get(last) + ", " + part + ",", f) <= width)) out.set(last, out.get(last) + ", " + part);
+                else out.add(part);
+            }
+            return "<html>" + String.join(",<br>", out) + "</html>";
         }
 
         private static Font rowFont(int pt, boolean bold)
@@ -1164,9 +1258,15 @@ public class TourneyPanel extends JPanel implements TournamentEventListener
         }
         if (activeId != null && CARD_ACTIVE.equals(currentCard))
         {
+            if (gameLoggedIn.getAsBoolean() && !service.isConnected())
+            {
+                dropped();
+                return;
+            }
             renderEta();
             renderStatus();
             if (roundEndBox.isVisible() && nowMs.getAsLong() > respondByMs - 1000) roundEndBox.setVisible(false);
+            if (offMatchWorld() != away) showCard(CARD_ACTIVE);
         }
         signalCombat();
     }
@@ -1179,6 +1279,15 @@ public class TourneyPanel extends JPanel implements TournamentEventListener
         if (now - combatSentMs < 30_000L) return;
         combatSentMs = now;
         service.inCombat(activeId, series.seriesId);
+    }
+
+    /** The live view gives way to "Connecting…" with no banner, event or list until the status answer rebuilds it. */
+    private void dropped()
+    {
+        bannerShown = false;
+        events = myRegs = Collections.emptyList();
+        clearActive();
+        sync();
     }
 
     /** Test hook: one ticker beat without waiting for the Swing timer. */
@@ -1243,9 +1352,10 @@ public class TourneyPanel extends JPanel implements TournamentEventListener
         if (series != null) waitNext = false;
         bye = state.bye;
         breakUntilS = state.breakUntil;
+        if (state.gearDeadline > 0) gearUntilS = state.gearDeadline;
         roundEndMs = state.etaS >= 0 ? nowMs.getAsLong() + state.etaS * 1000L : 0L;
         renderActive();
-        renderBoard(state.standings, state.myRank);
+        renderBoard(state.standings);
         resubscribe();
         renderList();
     }
@@ -1260,12 +1370,12 @@ public class TourneyPanel extends JPanel implements TournamentEventListener
             rounds = standings.rounds;
         }
         breakUntilS = standings.breakUntil;
-        if (standings.etaS >= 0) roundEndMs = nowMs.getAsLong() + standings.etaS * 1000L;
-        else if (standings.breakUntil > 0) roundEndMs = 0L;
+        if (standings.gearDeadline > 0) gearUntilS = standings.gearDeadline;
+        roundEndMs = standings.etaS >= 0 ? nowMs.getAsLong() + standings.etaS * 1000L : 0L;
         extendCount = Math.max(0, standings.extended);
         setWrapped(activeHeader, activeName + " · Round " + round + "/" + rounds);
         renderEta();
-        renderBoard(standings.rows, myRank);
+        renderBoard(standings.rows);
         if (standings.isFinished() || "cancelled".equals(standings.status))
         {
             // the dedicated finished / cancelled pushes drive the exit; the standings just stop moving
@@ -1289,6 +1399,7 @@ public class TourneyPanel extends JPanel implements TournamentEventListener
         bye = false;
         waitNext = false;
         breakUntilS = 0L;
+        gearUntilS = 0L;
         roundEndMs = s.deadlineAt > 0 ? s.deadlineAt * 1000L : 0L;
         extendCount = 0;
         roundEndBox.setVisible(false);
@@ -1320,6 +1431,24 @@ public class TourneyPanel extends JPanel implements TournamentEventListener
         // a bye is a point, never a rated game
         showBanner("Round " + round + ": you have a bye — it counts as a win (no rating change).");
         renderActive();
+    }
+
+    @Override
+    public void onNoShowRecorded(String tournamentId, String seriesId, long effectiveAtS)
+    {
+        if (!tournamentId.equals(activeId) || series == null || !seriesId.equals(series.seriesId)) return;
+        noShowSid = seriesId;
+        noShowAt = effectiveAtS;
+        syncNoShow();
+    }
+
+    /** Keeps the running event's kit window. */
+    @Override
+    public void onGearCheck(String tournamentId, int round, long untilEpochS)
+    {
+        if (!tournamentId.equals(activeId)) return;
+        gearUntilS = untilEpochS;
+        renderEta();
     }
 
     @Override
@@ -1382,6 +1511,7 @@ public class TourneyPanel extends JPanel implements TournamentEventListener
         showBanner("Tournament finished" + winnersText(winners) + placeText(standings, selfNameSupplier.get()));
         if (mine(tournamentId))
         {
+            fullId = tournamentId.isEmpty() ? activeId : tournamentId;
             showFinal(standings);
         }
         service.list();
@@ -1396,7 +1526,7 @@ public class TourneyPanel extends JPanel implements TournamentEventListener
         activeMatch.setVisible(false);
         activeWhere.setVisible(false);
         activeStatus.setVisible(false);
-        renderBoard(boardPanel, "standings-", standings, -1);
+        renderBoard(boardPanel, "standings-", standings, false);
         showCard(CARD_ACTIVE);
     }
 
@@ -1521,10 +1651,12 @@ public class TourneyPanel extends JPanel implements TournamentEventListener
         bye = false;
         waitNext = false;
         breakUntilS = 0L;
+        gearUntilS = 0L;
         roundEndMs = 0L;
         extendCount = 0;
         roundEndBox.setVisible(false);
         dropCard();
+        syncNoShow();
         footer(live);
     }
 
@@ -1533,5 +1665,6 @@ public class TourneyPanel extends JPanel implements TournamentEventListener
         activePair.setVisible(live);
         withdrawBtn.setVisible(live);
         backBtn.setVisible(!live);
+        fullBtn.setVisible(!live);
     }
 }

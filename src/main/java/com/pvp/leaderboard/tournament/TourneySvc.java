@@ -56,6 +56,7 @@ public class TourneySvc
         bus.register("tournament/problem_ack", d -> fire(TournamentEventListener::onProblemAck));
         bus.register("tournament/gear_check", this::handleGearCheck);
         bus.register("tournament/gear_ack", this::handleGearAck);
+        bus.register("tournament/no_show_recorded", this::handleNoShow);
         bus.register("error/tournament", this::handleError);
         socket.addResyncListener(this::onReconnect);
     }
@@ -140,11 +141,29 @@ public class TourneySvc
         socket.send("tournament/unsubscribe", withId(tournamentId));
     }
 
-    public void inCombat(String tournamentId, String seriesId)
+    private static JsonObject inSeries(String tournamentId, String seriesId)
     {
         JsonObject d = withId(tournamentId);
         d.addProperty("series_id", seriesId);
-        socket.send("tournament/in_combat", d);
+        return d;
+    }
+
+    public void inCombat(String tournamentId, String seriesId)
+    {
+        socket.send("tournament/in_combat", inSeries(tournamentId, seriesId));
+    }
+
+    public void noShow(String tournamentId, String seriesId)
+    {
+        socket.send("tournament/no_show", inSeries(tournamentId, seriesId));
+    }
+
+    /** {@code tournament/world}: the world the player is in while the series is open. */
+    public void world(String tournamentId, String seriesId, int world)
+    {
+        JsonObject d = inSeries(tournamentId, seriesId);
+        d.addProperty("world", world);
+        socket.send("tournament/world", d);
     }
 
     /** {@code tournament/report_problem}: the text trimmed and cut to the 280 characters the server accepts
@@ -209,8 +228,11 @@ public class TourneySvc
     private void handleState(JsonObject d)
     {
         List<Tourney> regs = Tourney.listOf(optArray(d, "registrations"));
-        LiveTourney active = LiveTourney.fromJson(optObject(d, "active"));
+        JsonObject a = optObject(d, "active");
+        LiveTourney active = LiveTourney.fromJson(a);
         fire(l -> l.onTournamentState(regs, active));
+        JsonObject end = optObject(a, "round_end");
+        if (active != null && end != null) roundEnd(active.tournamentId, end);
     }
 
     private void handleStandings(JsonObject d)
@@ -258,8 +280,12 @@ public class TourneySvc
     private void handleRoundEndCheck(JsonObject d)
     {
         String tid = tid(d);
-        String sid = optString(d, "series_id");
-        if (tid.isEmpty() || sid.isEmpty()) return;
+        if (!tid.isEmpty() && !optString(d, "series_id").isEmpty()) roundEnd(tid, d);
+    }
+
+    /** {@code onRoundEndCheck} from a {@code round_end_check} push or a state's {@code active.round_end}. */
+    private void roundEnd(String tid, JsonObject d)
+    {
         int round = optInt(d, "round", 0);
         String opp = optString(d, "opponent_name", "your opponent");
         long respondBy = optLong(d, "respond_by", 0L);
@@ -306,6 +332,14 @@ public class TourneySvc
         if (tid.isEmpty()) return;
         boolean ok = optBool(d, "ok", false);
         fire(l -> l.onGearAck(tid, ok));
+    }
+
+    private void handleNoShow(JsonObject d)
+    {
+        String tid = tid(d);
+        String sid = optString(d, "series_id");
+        long at = optLong(d, "effective_at", 0L);
+        if (!tid.isEmpty() && !sid.isEmpty()) fire(l -> l.onNoShowRecorded(tid, sid, at));
     }
 
     private void handleError(JsonObject d)

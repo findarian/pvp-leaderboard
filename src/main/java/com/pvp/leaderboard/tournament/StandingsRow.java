@@ -9,7 +9,7 @@ public final class StandingsRow
     public final int rank;
     public final String displayName;
     public final double points;
-    public final int draws;
+    public final int wins, losses, draws, byes;
     public final String status;
     /** The tier's label from the payload's {@code tier_labels} ("Adamant 3"), {@code null} when none applies. */
     public final String rankLabel;
@@ -17,6 +17,8 @@ public final class StandingsRow
     public final long prizeGp;
     /** The prize came from the random draw: {@code prize_random} is a JSON {@code true}. */
     public final boolean prizeRandom;
+    /** {@code round_done} is {@code true}: the player has a result in the current round. */
+    public final boolean roundDone;
 
     private StandingsRow(JsonObject o, int fallbackRank, List<String> tierLabels)
     {
@@ -26,11 +28,15 @@ public final class StandingsRow
         rank = optInt(o, "rank", fallbackRank);
         displayName = optString(o, "display_name", acct.length() >= 8 ? acct.substring(0, 8) : acct);
         points = optDouble(o, "points", 0.0);
+        wins = Math.max(0, optInt(o, "wins", 0));
+        losses = Math.max(0, optInt(o, "losses", 0));
         draws = Math.max(0, optInt(o, "draws", 0));
+        byes = Math.max(0, optInt(o, "byes", 0));
         status = optString(o, "status", "active");
         rankLabel = label == null || label.trim().isEmpty() ? null : label.trim();
         prizeGp = optWhole(o, "prize_gp");
         prizeRandom = new JsonPrimitive(true).equals(o.get("prize_random"));
+        roundDone = optBool(o, "round_done", false);
     }
 
     /** The payload's {@code tier_labels} in order, a non-string entry as {@code null}; empty when absent. */
@@ -58,17 +64,9 @@ public final class StandingsRow
         return out;
     }
 
-    public String removedLabel()
+    /** Any status but {@code active}. */
+    public boolean removed()
     {
-        switch (status)
-        {
-            case "dnf": return "DNF";
-            case "dq": return "DQ";
-            case "kicked": return "kicked";
-            case "withdrawn": return "withdrew";
-            case "dropped_unpaid": return "dropped";
-            case "dropped_gear": return "kit";
-            default: return "";
-        }
+        return !"active".equals(status);
     }
 }
