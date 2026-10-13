@@ -54,7 +54,7 @@ public final class SocketProtocol
         "tournament/list", "tournament/register", "tournament/withdraw", "tournament/status",
         "tournament/subscribe", "tournament/unsubscribe", "tournament/in_combat",
         "tournament/round_end_reply", "tournament/report_problem", "tournament/gear_status", "tournament/world",
-        "tournament/no_show");
+        "tournament/no_show", "tournament/here");
 
     /**
      * Encodes a cmd + payload pair into the wire envelope string.

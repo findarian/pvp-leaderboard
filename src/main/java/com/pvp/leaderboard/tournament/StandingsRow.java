@@ -2,6 +2,7 @@ package com.pvp.leaderboard.tournament;
 
 import com.google.gson.*;
 import java.util.*;
+import java.util.regex.*;
 import static com.pvp.leaderboard.util.JsonLenient.*;
 
 public final class StandingsRow
@@ -19,6 +20,9 @@ public final class StandingsRow
     public final boolean prizeRandom;
     /** {@code round_done} is {@code true}: the player has a result in the current round. */
     public final boolean roundDone;
+    /** The player's stream page from {@code stream} ({@code "t:<channel>"} Twitch, {@code "k:<channel>"} Kick); {@code null} for anything else. */
+    public final String streamUrl;
+    private static final Pattern STREAM = Pattern.compile("[tk]:[A-Za-z0-9_]{1,25}");
 
     private StandingsRow(JsonObject o, int fallbackRank, List<String> tierLabels)
     {
@@ -37,6 +41,9 @@ public final class StandingsRow
         prizeGp = optWhole(o, "prize_gp");
         prizeRandom = new JsonPrimitive(true).equals(o.get("prize_random"));
         roundDone = optBool(o, "round_done", false);
+        String stream = str(o.get("stream"));
+        streamUrl = stream == null || !STREAM.matcher(stream).matches() ? null
+            : (stream.charAt(0) == 't' ? "https://www.twitch.tv/" : "https://kick.com/") + stream.substring(2);
     }
 
     /** The payload's {@code tier_labels} in order, a non-string entry as {@code null}; empty when absent. */

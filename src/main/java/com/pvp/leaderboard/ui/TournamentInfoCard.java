@@ -76,7 +76,10 @@ final class TournamentInfoCard extends CapPanel
         tick();
         add(vgap(6));
         report = tabButton(REPORT_LABEL, "tournament-report-" + t.tournamentId, () -> p.onReport(t.tournamentId));
-        add(pairRow(report, tabButton("Rules", "tournament-rules-" + t.tournamentId, () -> p.openRules(t))));
+        add(pairRow(tabButton(t.isRunning() ? "Standings" : "Players", "tournament-standings-" + t.tournamentId, () -> p.openView(t)),
+            tabButton("Rules", "tournament-rules-" + t.tournamentId, () -> p.openRules(t))));
+        add(vgap(4));
+        add(report);
         JComponent signUp = signUp(myStatus, p, myCount, refused);
         if (signUp != null)
         {

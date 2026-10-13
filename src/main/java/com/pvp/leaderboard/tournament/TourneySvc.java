@@ -56,7 +56,11 @@ public class TourneySvc
         bus.register("tournament/problem_ack", d -> fire(TournamentEventListener::onProblemAck));
         bus.register("tournament/gear_check", this::handleGearCheck);
         bus.register("tournament/gear_ack", this::handleGearAck);
-        bus.register("tournament/no_show_recorded", this::handleNoShow);
+        bus.register("tournament/no_show_recorded", series(TournamentEventListener::onNoShowRecorded));
+        bus.register("tournament/no_show_reported", series(TournamentEventListener::onNoShowReported));
+        bus.register("tournament/here_recorded", series((l, tid, sid, at) -> l.onHereRecorded(tid, sid)));
+        bus.register("tournament/opponent_here", series((l, tid, sid, at) -> l.onOpponentHere(tid, sid)));
+        bus.register("tournament/reentered", this::handleReentered);
         bus.register("error/tournament", this::handleError);
         socket.addResyncListener(this::onReconnect);
     }
@@ -156,6 +160,11 @@ public class TourneySvc
     public void noShow(String tournamentId, String seriesId)
     {
         socket.send("tournament/no_show", inSeries(tournamentId, seriesId));
+    }
+
+    public void here(String tournamentId, String seriesId)
+    {
+        socket.send("tournament/here", inSeries(tournamentId, seriesId));
     }
 
     /** {@code tournament/world}: the world the player is in while the series is open. */
@@ -334,12 +343,28 @@ public class TourneySvc
         fire(l -> l.onGearAck(tid, ok));
     }
 
-    private void handleNoShow(JsonObject d)
+    /** A listener callback for a push about one series. */
+    private interface SeriesPush
+    {
+        void on(TournamentEventListener l, String tournamentId, String seriesId, long effectiveAtS);
+    }
+
+    /** The push's ids and {@code effective_at} (0 when missing) to {@code p}; dropped without both ids. */
+    private Consumer<JsonObject> series(SeriesPush p)
+    {
+        return d ->
+        {
+            String tid = tid(d), sid = optString(d, "series_id");
+            long at = optLong(d, "effective_at", 0L);
+            if (!tid.isEmpty() && !sid.isEmpty()) fire(l -> p.on(l, tid, sid, at));
+        };
+    }
+
+    private void handleReentered(JsonObject d)
     {
         String tid = tid(d);
-        String sid = optString(d, "series_id");
-        long at = optLong(d, "effective_at", 0L);
-        if (!tid.isEmpty() && !sid.isEmpty()) fire(l -> l.onNoShowRecorded(tid, sid, at));
+        int round = optInt(d, "round", 0);
+        if (!tid.isEmpty()) fire(l -> l.onReentered(tid, round));
     }
 
     private void handleError(JsonObject d)

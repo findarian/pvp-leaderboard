@@ -70,4 +70,16 @@ public interface TournamentEventListener
 
     /** {@code tournament/no_show_recorded}: the no-show report counts at {@code effective_at}. */
     default void onNoShowRecorded(String tournamentId, String seriesId, long effectiveAtS) {}
+
+    /** {@code tournament/no_show_reported}: the opponent reported the player absent; it counts at {@code effective_at}. */
+    default void onNoShowReported(String tournamentId, String seriesId, long effectiveAtS) {}
+
+    /** {@code tournament/here_recorded}. */
+    default void onHereRecorded(String tournamentId, String seriesId) {}
+
+    /** {@code tournament/opponent_here}: the reported opponent says they are here. */
+    default void onOpponentHere(String tournamentId, String seriesId) {}
+
+    /** {@code tournament/reentered}: the player is back in the event from {@code round}. */
+    default void onReentered(String tournamentId, int round) {}
 }
