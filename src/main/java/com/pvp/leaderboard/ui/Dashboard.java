@@ -704,7 +704,7 @@ public class Dashboard extends PluginPanel
         // buttons below it, which BoxLayout lines up only when every child
         // shares one alignment.
         JPanel row = left(maxH(new JPanel(new GridLayout(1, 2, 4, 0)), COMMUNITY_H));
-        row.add(communityBtn("Discord", "Join our Discord", "https://discord.gg/TmFzcbW3Rp"));
+        row.add(communityBtn("Discord", "Join our Discord", "https://discord.gg/ZuWzyzbtTW"));
         row.add(communityBtn("Website", "Open the website", PvpConsts.SITE_URL));
         box.add(row);
 

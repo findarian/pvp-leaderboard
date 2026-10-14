@@ -61,6 +61,7 @@ public class TourneySvc
         bus.register("tournament/here_recorded", series((l, tid, sid, at) -> l.onHereRecorded(tid, sid)));
         bus.register("tournament/opponent_here", series((l, tid, sid, at) -> l.onOpponentHere(tid, sid)));
         bus.register("tournament/reentered", this::handleReentered);
+        bus.register("tournament/result_changed", this::handleResultChanged);
         bus.register("error/tournament", this::handleError);
         socket.addResyncListener(this::onReconnect);
     }
@@ -283,7 +284,8 @@ public class TourneySvc
     {
         String tid = tid(d);
         int round = optInt(d, "round", 0);
-        fire(l -> l.onBye(tid, round));
+        boolean noShow = "no_show".equals(optString(d, "reason"));
+        fire(l -> l.onBye(tid, round, noShow));
     }
 
     private void handleRoundEndCheck(JsonObject d)
@@ -365,6 +367,13 @@ public class TourneySvc
         String tid = tid(d);
         int round = optInt(d, "round", 0);
         if (!tid.isEmpty()) fire(l -> l.onReentered(tid, round));
+    }
+
+    private void handleResultChanged(JsonObject d)
+    {
+        String tid = tid(d), result = optString(d, "result"), winner = optString(d, "winner_name");
+        int round = optInt(d, "round", 0);
+        if (!tid.isEmpty()) fire(l -> l.onResultChanged(tid, round, result, winner));
     }
 
     private void handleError(JsonObject d)

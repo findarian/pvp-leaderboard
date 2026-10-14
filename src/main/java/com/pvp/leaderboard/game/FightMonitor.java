@@ -86,6 +86,9 @@ public class FightMonitor
      *  and must not read as in-combat until one fires. */
     @Getter private volatile boolean inCombat;
 
+    /** Wall-clock ms of the last hit dealt or taken in a fight (the hits that reset the rank's timer); 0 before the first. */
+    @Getter private volatile long lastHitMs;
+
     // --- LMS freeze-log detection state ---
 
     /** RuneLite config group these plugin settings live under. */
@@ -561,6 +564,7 @@ public class FightMonitor
                 {
                     int currentTick = client.getTickCount();
                     fe.mark(false, insideFfaPortal, insideBounty);
+                    lastHitMs = currentTimeMillis();
 
                     // Update combat timestamps for "hide rank out of combat" feature
                     if (rankOverlay != null)

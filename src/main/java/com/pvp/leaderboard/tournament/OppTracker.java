@@ -167,7 +167,7 @@ public class OppTracker implements TournamentEventListener
     }
 
     @Override
-    public void onBye(String tournamentId, int round)
+    public void onBye(String tournamentId, int round, boolean noShow)
     {
         if (!tournamentId.isEmpty()) activeTournamentId = tournamentId;
         activeSeries = null;

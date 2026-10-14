@@ -427,11 +427,36 @@ public interface PvPLeaderboardConfig extends Config
 	}
 
 	@ConfigItem(
+		keyName = "killStreakBoxHideOutOfCombat",
+		name = "Hide when out of combat",
+		description = "When enabled, the box disappears after not being in combat",
+		section = killStreakSection,
+		position = 2
+	)
+	default boolean killStreakBoxHideOutOfCombat()
+	{
+		return true;
+	}
+
+	@ConfigItem(
+		keyName = "killStreakBoxHideAfterMinutes",
+		name = "Hide after (minutes)",
+		description = "Minutes out of combat before the box disappears (1-360)",
+		section = killStreakSection,
+		position = 3
+	)
+	@Range(min = 1, max = 360)
+	default int killStreakBoxHideAfterMinutes()
+	{
+		return 15;
+	}
+
+	@ConfigItem(
 		keyName = "killStreakBoxAutoSwitch",
 		name = "Auto-switch style",
 		description = "Follow the style of your last fight (NH, Veng, Multi or DMM) and Event while you are in a running tournament. Off: always show the style picked below.",
 		section = killStreakSection,
-		position = 2
+		position = 4
 	)
 	default boolean killStreakBoxAutoSwitch()
 	{
@@ -443,7 +468,7 @@ public interface PvPLeaderboardConfig extends Config
 		name = "Style",
 		description = "The style the box shows while auto-switch is off (Event = tournaments)",
 		section = killStreakSection,
-		position = 3
+		position = 5
 	)
 	default StreakBucket killStreakBoxBucket()
 	{
@@ -455,7 +480,7 @@ public interface PvPLeaderboardConfig extends Config
 		name = "Show longest streak",
 		description = "Add a line with your longest kill streak in that style",
 		section = killStreakSection,
-		position = 4
+		position = 6
 	)
 	default boolean killStreakBoxShowLongest()
 	{
@@ -467,7 +492,7 @@ public interface PvPLeaderboardConfig extends Config
 		name = "Show win / loss",
 		description = "Add a line with your wins and losses in that style",
 		section = killStreakSection,
-		position = 5
+		position = 7
 	)
 	default boolean killStreakBoxShowWinLoss()
 	{
@@ -479,7 +504,7 @@ public interface PvPLeaderboardConfig extends Config
 		name = "Show peak rank in box",
 		description = "Adds a Peak line to the kill streak box.",
 		section = killStreakSection,
-		position = 6
+		position = 8
 	)
 	default boolean killStreakBoxShowPeak()
 	{

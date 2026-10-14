@@ -164,7 +164,8 @@ public class TourneyPanel extends JPanel implements TournamentEventListener
     private long breakUntilS;
     /** Epoch seconds at which the kit window closes, 0 = none. */
     private long gearUntilS;
-    private boolean bye;
+    /** A bye this round; {@code noShowWin}: the bye is a win because the opponent did not show up. */
+    private boolean bye, noShowWin;
     /** The match is over and the next round has not opened. */
     private boolean waitNext;
     private long respondByMs;
@@ -863,7 +864,8 @@ public class TourneyPanel extends JPanel implements TournamentEventListener
         {
             dropCard();
             activeMatch.setVisible(true);
-            setWrapped(activeMatch, bye ? "Bye this round (counts as a win)" : waitNext ? "Wait until next round" : "Waiting for the next round");
+            setWrapped(activeMatch, bye ? (noShowWin ? "Win - your opponent did not show up" : "Bye this round (counts as a win)")
+                : waitNext ? "Wait until next round" : "Waiting for the next round");
             setWrapped(activeWhere, " ");
             activeWhere.setVisible(false);
             activeStatus.setVisible(false);
@@ -1470,6 +1472,7 @@ public class TourneyPanel extends JPanel implements TournamentEventListener
         series = state.series != null && state.series.isOpen() ? state.series : null;
         if (series != null) waitNext = false;
         bye = state.bye;
+        noShowWin = false;
         breakUntilS = state.breakUntil;
         if (state.gearDeadline > 0) gearUntilS = state.gearDeadline;
         roundEndMs = state.etaS >= 0 ? nowMs.getAsLong() + state.etaS * 1000L : 0L;
@@ -1543,15 +1546,17 @@ public class TourneyPanel extends JPanel implements TournamentEventListener
     }
 
     @Override
-    public void onBye(String tournamentId, int round)
+    public void onBye(String tournamentId, int round, boolean noShow)
     {
         if (!tournamentId.equals(activeId)) return;
         series = null;
         bye = true;
+        noShowWin = noShow;
         waitNext = false;
         extendCount = 0;
         // a bye is a point, never a rated game
-        showBanner("Round " + round + ": you have a bye — it counts as a win (no rating change).");
+        showBanner("Round " + round + ": " + (noShow ? "your opponent did not show up. You win" : "you have a bye — it counts as a win")
+            + " (no rating change).");
         renderActive();
     }
 
@@ -1604,6 +1609,15 @@ public class TourneyPanel extends JPanel implements TournamentEventListener
         showBanner("You are back in " + (t == null ? "the tournament" : escape(t.name)) + (round > 0 ? " from round " + round : "") + ".");
         service.list();
         service.status();
+    }
+
+    /** {@code "Your round N result was changed: <A> won."}, {@code "...: draw."} or {@code "...: no result."}. */
+    @Override
+    public void onResultChanged(String tournamentId, int round, String result, String winnerName)
+    {
+        String w = winnerName.trim();
+        showBanner("Your round " + round + " result was changed: "
+            + ("draw".equals(result) ? "draw" : "none".equals(result) ? "no result" : (w.isEmpty() ? "?" : escape(w)) + " won") + ".");
     }
 
     /** Keeps the running event's kit window. */

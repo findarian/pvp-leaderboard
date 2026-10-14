@@ -39,8 +39,9 @@ public interface TournamentEventListener
     /** {@code tournament/opponent_highlight_clear}. */
     default void onOpponentHighlightClear(String tournamentId, String seriesId) {}
 
-    /** {@code tournament/bye}. */
-    default void onBye(String tournamentId, int round) {}
+    /** {@code tournament/bye}; {@code noShow} when its {@code reason} is {@code no_show}: a win because the opponent did
+     *  not show up. */
+    default void onBye(String tournamentId, int round, boolean noShow) {}
 
     default void onRoundEndCheck(String tournamentId, int round, String opponentName, long respondByS, String message) {}
 
@@ -82,4 +83,8 @@ public interface TournamentEventListener
 
     /** {@code tournament/reentered}: the player is back in the event from {@code round}. */
     default void onReentered(String tournamentId, int round) {}
+
+    /** {@code tournament/result_changed}: the player's round {@code round} result is now {@code result} ({@code win},
+     *  {@code draw} or {@code none}); {@code winnerName} names the winner of a win. */
+    default void onResultChanged(String tournamentId, int round, String result, String winnerName) {}
 }

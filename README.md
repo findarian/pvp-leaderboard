@@ -10,7 +10,7 @@ How the ratings work:
 This is a trueskill based system. You gain more rating if you beat someone higher rated, and gain less rating if you beat someone lower rated.
 
 Discord: 
-https://discord.gg/txu6dSRKUT
+https://discord.gg/ZuWzyzbtTW
 Please submit bugs or ask additional questions in here
 
 IP Warning:

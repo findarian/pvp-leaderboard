@@ -12,10 +12,18 @@ public class ScenePlayers
 {
     private final Set<Player> players = new LinkedHashSet<>();
 
+    /** Adds the player only while their world view still holds them at their index. */
     @Subscribe
     public void onPlayerSpawned(PlayerSpawned e)
     {
-        add(e.getPlayer());
+        Player p = e.getPlayer();
+        if (p == null) return;
+        WorldView wv = p.getWorldView();
+        if (wv == null || wv.players().byIndex(p.getId()) != p)
+        {
+            return;
+        }
+        add(p);
     }
 
     @Subscribe

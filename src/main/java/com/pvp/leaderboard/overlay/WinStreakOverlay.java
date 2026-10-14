@@ -94,6 +94,8 @@ public class WinStreakOverlay extends OverlayPanel
 		{
 			panelComponent.getChildren().clear();
 			if (!isShown(config.showKillStreakBox(), config.killStreakBoxInFfaPortal(), fightMonitor.isInsideFfaPortal())) return null;
+			if (config.killStreakBoxHideOutOfCombat()
+				&& nowMs.getAsLong() - fightMonitor.getLastHitMs() > config.killStreakBoxHideAfterMinutes() * 60_000L) return null;
 			String self = localPlayerName();
 			if (self == null) return null;
 			WinLossPeak profile = profileFor(self);
