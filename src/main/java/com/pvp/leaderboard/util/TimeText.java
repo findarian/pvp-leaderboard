@@ -6,12 +6,12 @@ import java.time.temporal.*;
 import java.util.*;
 
 /**
- * Discord-style timestamps for the side panel (operator decision
- * 2026-09-22): an epoch the server already sends is rendered the way a
- * Discord {@code <t:X:f>} / {@code <t:X:R>} pair renders — in the viewer's
- * own zone, with a relative phrase that the caller re-renders on its
- * existing tick — so a "registration closes in N minutes" never has to be
- * pushed and never goes stale.
+ * Discord-style timestamps for the side panel: an epoch the server
+ * already sends is rendered the way a Discord {@code <t:X:f>} /
+ * {@code <t:X:R>} pair renders — in the viewer's own zone, with a
+ * relative phrase that the caller re-renders on its existing tick — so a
+ * "registration closes in N minutes" never has to be pushed and never
+ * goes stale.
  *
  * <p>Pure: the zone and "now" are arguments (the panel passes its injected
  * clock), so the same epoch renders identically in a test and in game.

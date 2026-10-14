@@ -13,8 +13,8 @@ import static java.awt.RenderingHints.*;
 @Singleton
 public final class MatchFoundNotificationOverlay extends Popup
 {
-    /** Total on-screen window (includes fade in + fade out). Hardcoded
-     *  per the product spec — no config slider exposed for this one. */
+    /** Total on-screen window (includes fade in + fade out); not
+     *  configurable. */
     static final long VISIBLE_MS = 5_000L;
     static final float PEAK_ALPHA = 0.8f;
 
@@ -123,10 +123,9 @@ public final class MatchFoundNotificationOverlay extends Popup
         // In-combat suppression — DEFER the popup instead of
         // dropping it. Active state is preserved + shownSince is
         // pinned forward each suppressed frame so the visible-window
-        // timer freezes during combat (2026-05-25 user spec: "still show
-        // the notification after the combat has ended"). The match-found
-        // popup carries the meeting world + place — the user MUST
-        // see it eventually, just not while taking hits.
+        // timer freezes during combat. The match-found popup carries
+        // the meeting world + place — the user MUST see it
+        // eventually, just not while taking hits.
         if (config.suppressNotificationsInCombat() && fightMonitor.isInCombat())
         {
             if (shownSince != 0L) this.shownSince = System.currentTimeMillis();

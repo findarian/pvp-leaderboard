@@ -22,10 +22,8 @@ import static java.lang.System.*;
 public class PvpApi
 {
     private static final String SHARD_URL = PvpConsts.SITE_URL + "/rank_idx";
-    /** Per-bucket MMR→rank histogram published hourly by the infra side
-     *  ({@code OSRS-MMR/lambda_code/distribution_cache_writer.py} →
-     *  {@code rank_hist/<bucket>.json}). Powers the "What are the ranks"
-     *  Top-X%-per-tier view. */
+    /** Per-bucket MMR→rank histogram ({@code rank_hist/<bucket>.json}).
+     *  Powers the "What are the ranks" Top-X%-per-tier view. */
     private static final String HIST_URL = PvpConsts.SITE_URL + "/rank_hist";
 
     /** The cache and backoff clocks. One minute: the {@code /user} and
@@ -68,14 +66,10 @@ public class PvpApi
      *
      *  <p>The positive cache in {@link #fetchCached} can only help
      *  callers that arrive AFTER a response lands. Rank shards are
-     *  published per 3-char name prefix, so a scene (or, before 2.0, a
-     *  lobby roster) resolved in one pass has many players resolving out
-     *  of the same file at the same instant — all of them miss the
-     *  not-yet-populated cache and each issues its own GET. That made CDN
-     *  request volume scale with the number of players rather than with
-     *  the distinct shard count, which is how a large roster reached the
-     *  CloudFront firewall's per-IP rate limit. Collapsing here keeps the
-     *  fan-out proportional to the number of distinct shards.
+     *  published per 3-char name prefix, so a scene resolved in one pass
+     *  has many players resolving out of the same file at the same
+     *  instant; collapsing here keeps the fan-out proportional to the
+     *  number of distinct shards.
      *
      *  <p>Keyed by URL rather than by player: the name+bucket dedup in
      *  {@link #getShardRank} does nothing for two different players
@@ -90,7 +84,7 @@ public class PvpApi
     // Top Players leaderboard caching — kept SEPARATE from the rank_idx shard
     // cache above on purpose. The leaderboard is a different artifact: the
     // pregenerated top-550 list (/leaderboard[_<bucket>].json) the website
-    // reads, refreshed hourly by the infra leaderboard_cache_writer.py — NOT a
+    // reads, refreshed hourly — NOT a
     // name→rank shard. Sharing shardCache would let shard churn (its 512-entry
     // LRU) evict the leaderboard (and vice versa) and conflate two unrelated
     // resources. Only ~5 buckets, so a plain map (no LRU) is plenty.
@@ -119,20 +113,9 @@ public class PvpApi
     /** Epoch ms until which {@code /user} calls are answered locally
      *  instead of hitting the network; {@code 0} when open.
      *
-     *  <p>Endpoint-wide rather than per-player on purpose: a WAF block
-     *  is issued against the client, so retrying under a different
-     *  {@code player_id} is the same violation and would keep the
-     *  block alive.
-     *
-     *  <p>This is the API-side counterpart to the CDN's
-     *  {@code shardFailUntil}. Without it a rate-limited client kept
-     *  calling at its callers' full tick rate — the lobby's roster
-     *  enrichment re-asked on every roster push (~8 s) and the join
-     *  gate every 60 s — which turns a decaying soft limit into a
-     *  sustained one. Only 403 / 429 / 503 ("you are sending too much /
-     *  you are blocked") arm it: arming on a 404 ("that player doesn't
-     *  exist") would let one lookup of an unknown name stall the endpoint
-     *  for every caller. */
+     *  <p>Endpoint-wide rather than per-player. This is the API-side
+     *  counterpart to the CDN's {@code shardFailUntil}. Only 403 / 429 /
+     *  503 arm it; a 404 ("that player doesn't exist") does not. */
     private final AtomicLong apiBlockMs = new AtomicLong(0L);
 
     // Matches caching (first pages only)
@@ -158,8 +141,8 @@ public class PvpApi
         return HttpUrl.get(PvpConsts.API_BASE_URL + path).newBuilder();
     }
 
-    /** A GET of {@code url} carrying the client identifier header (API
-     *  authentication/tracking); {@code force} skips every HTTP cache. */
+    /** A GET of {@code url} carrying the client identifier header;
+     *  {@code force} skips every HTTP cache. */
     private Request req(HttpUrl url, boolean force)
     {
         var b = new Request.Builder().url(url).get();
@@ -266,8 +249,8 @@ public class PvpApi
         return future;
     }
 
-    /** SHA-256 of this client's identifier as 64 lower-case hex characters (the
-     *  backend's {@code acct_sha}), or null when there is no identifier. */
+    /** SHA-256 of this client's identifier as 64 lower-case hex
+     *  characters, or null when there is no identifier. */
     public String getSelfSha()
     {
         try
@@ -398,7 +381,7 @@ public class PvpApi
             .thenApply(sr -> sr != null ? sr.tier : null);
     }
 
-    /** Kill-streak box (BOARD row 33): the cached {@code /user} profile of
+    /** Kill-streak box: the cached {@code /user} profile of
      *  {@code playerName} exactly as the last fetch left it, or {@code null}
      *  when none is cached. A peek only, never a fetch: the box follows the
      *  fetches the login init, the post-fight tier refresh and the lobby gate
@@ -559,8 +542,7 @@ public class PvpApi
 
     /** The rank of {@code bucket} in a {@code /user} profile: the bucket
      *  object's rank when it has one, else the top-level rank; null without a
-     *  profile or a rank. ({@code buckets.overall} and the top level are built
-     *  from the same MMR by the backend.) */
+     *  profile or a rank. */
     private static String tier(JsonObject profile, String bucket)
     {
         if (profile == null)
@@ -575,7 +557,7 @@ public class PvpApi
     /** A {@code /user} rank object's label: "rank" is the tier name ("Dragon",
      *  "3rd Age"), "division" 1-3 — combined as "Dragon 3", the name alone for
      *  division 0; null without a rank. (No "tier" field: that is only in the
-     *  S3 shards.) */
+     *  shards.) */
     private static String rankText(JsonObject o)
     {
         String rank = optString(o, "rank", null);
@@ -599,9 +581,7 @@ public class PvpApi
      * positive shard cache eagerly to control CDN cost.
      *
      * <p>{@code bypassCache=true} is for paths that need the freshest shard
-     * data the backend's DynamoDB-stream-driven incremental writer has produced
-     * (≈30 s propagation, per the 2026-05-24 backend handoff). It flips three
-     * behaviours vs the passive default:
+     * data. It flips three behaviours vs the passive default:
      * <ul>
      *   <li>Skip the in-memory positive shard cache read in
      *       {@link #getShard(String, boolean)} so the next call hits the
@@ -655,11 +635,8 @@ public class PvpApi
         try
         {
             // Negative cache only applies to passive callers. Explicit
-            // refresh paths bypass it intentionally — the 1-h backoff
-            // was the root cause of the "rank stuck on Waiting" QA
-            // report fixed at 2026-05-24, and the new
-            // DynamoDB-stream writer means a "missing" player can flip
-            // to "present" within ~30 s of their first match landing.
+            // refresh paths bypass it intentionally: a "missing" player
+            // can flip to "present" soon after their first match lands.
             Long missingUntil = bypassCache ? null : absentUntil.get(name);
             if (missingUntil != null && currentTimeMillis() < missingUntil)
             {
@@ -898,8 +875,7 @@ public class PvpApi
      * same CDN origin as {@code /rank_idx} shards) via the shared
      * {@link #getShard(String, boolean)} fetch, so it inherits the positive
      * cache and the 60-second failure backoff. The payload shape is
-     * {@code {"bin_width", "total", "bins":[[floor,count,count_above],...]}}
-     * — see {@code backend/core/rank_histogram.py}.
+     * {@code {"bin_width", "total", "bins":[[floor,count,count_above],...]}}.
      *
      * @param bucket one of {@code overall|nh|veng|multi|dmm}; null/blank
      *               defaults to {@code overall}.
@@ -912,14 +888,11 @@ public class PvpApi
     }
 
     /**
-     * Fetch the cached Top Players leaderboard for a bucket — the exact same
-     * static S3 artifact the website reads, so a single CDN object serves
-     * both surfaces and is cached ~1 hour.
+     * Fetch the cached Top Players leaderboard for a bucket — the same
+     * static file the website reads, cached ~1 hour.
      *
-     * <p>This is the exact pregenerated top-550 S3 artifact the website's
-     * {@code fetchLeaderboard()} reads — overall at {@code /leaderboard.json},
-     * per-bucket at {@code /leaderboard_<bucket>.json} (see the website's
-     * {@code BUCKET_S3_KEYS} + the infra {@code leaderboard_cache_writer.py}).
+     * <p>The pregenerated top-550 list: overall at {@code /leaderboard.json},
+     * per-bucket at {@code /leaderboard_<bucket>.json}.
      * It is fetched on its OWN {@link #topCache} (NOT the rank_idx
      * shard cache — a leaderboard is a ranked list, not a name→rank shard),
      * with a 60-minute positive cache that mirrors the file's hourly refresh

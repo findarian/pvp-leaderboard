@@ -8,7 +8,7 @@ import javax.swing.*;
 
 public class QueueGateSection extends JPanel
 {
-    /** The one matchmaking action (operator 2026-09-22: exactly this text). */
+    /** The one matchmaking action. */
     static final String BUTTON_TEXT = "Queue for Matchmaking";
     static final String WAIT_TITLE = "Willing to wait";
 
@@ -26,7 +26,7 @@ public class QueueGateSection extends JPanel
     /** The recent joins, under the queue button. */
     final RecentQueued recent = new RecentQueued();
     /** Told after a <b>local</b> wait pick / rank-range pick so the owner
-     *  can write that ONE key of the shared row (G-2). Sending only the
+     *  can write that ONE key of the shared preferences. Sending only the
      *  key the user touched is what stops a wait change from overwriting a
      *  rank range set on Discord. Never fired while {@link #applyPrefs}
      *  is running. */
@@ -142,7 +142,7 @@ public class QueueGateSection extends JPanel
         listener.run();
     }
 
-    /** Applies a {@code queue/prefs} push (the shared row, possibly last
+    /** Applies a {@code queue/prefs} push (the shared preferences, possibly last
      *  written from Discord) onto the pickers and the persisted copy.
      *
      *  <p>Only the fields the push actually stated are touched — a

@@ -57,10 +57,8 @@ import okhttp3.*;
  * when none is named.
  *
  * <p><b>Keepalive</b>: RFC 6455 native ping every 8 min
- * ({@link OkHttpClient.Builder#pingInterval}). API Gateway's idle
- * timeout is 10 min; 8 min leaves a comfortable buffer. No
- * application-layer {@code system/ping} cmd exists per the protocol
- * doc's locked decision §0.1.
+ * ({@link OkHttpClient.Builder#pingInterval}), inside the server's 10-min
+ * idle timeout. There is no application-layer ping cmd.
  *
  * <p><b>Send model</b>: fire-and-forget. {@link #send(String, JsonObject)}
  * routes through {@link SocketProtocol#encode} (allowlist guard) and
@@ -84,11 +82,8 @@ public final class SocketMgr
     /** RFC 6455 close code for "endpoint going away" (logout). */
     public static final int CLOSE_GOING_AWAY = 1001;
 
-    /** Lowercase UUID-v4 format check — same regex the backend uses
-     *  in {@code backend.core.validation.is_valid_uuid_format}. Pre-flight
-     *  rejection prevents accidentally getting the IP WAF-banned by
-     *  a malformed-UUID $connect attempt (architecture Phase 1
-     *  validation step 2). */
+    /** Lowercase UUID-v4 format check; a malformed UUID is refused
+     *  before any $connect attempt. */
     private static final Pattern UUID_V4 = Pattern.compile(
         "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$");
 
@@ -121,14 +116,10 @@ public final class SocketMgr
      *  stops every scheduled retry. */
     private String activeUuid;
     /** Display-cased name of the in-game character the user is currently
-     *  logged in as (e.g. {@code "Toyco"}). Sent to the server on
-     *  $connect as a {@code &name=<urlencoded>} query parameter so the
-     *  conn row + lobby member row are pinned to the active session
-     *  rather than {@code sorted(player_names)[0]}. {@code null} when
+     *  logged in as (e.g. {@code "Toyco"}). Sent on $connect as a
+     *  {@code &name=<urlencoded>} query parameter. {@code null} when
      *  not yet known (called before {@code client.getLocalPlayer()}
-     *  resolves). Backend treats null/missing as "fall back to alphabet
-     *  default" and validates non-null names against the MMR row's
-     *  {@code player_names} set (anti-spoof). */
+     *  resolves). */
     private String activeName;
     /** Consecutive scheduled reconnects since a socket last stayed open
      *  {@link #STABLE_MS}. */
@@ -198,23 +189,16 @@ public final class SocketMgr
      * second call with the same UUID and name while already connected is a
      * no-op; a call with the same UUID but a different name (e.g. user
      * switched characters on the same client) or a different UUID tears down
-     * and reconnects so the server's OSRS-Connections row matches the active
-     * in-game session. After a {@link #shutdown()} (RuneLite keeps this
+     * and reconnects. After a {@link #shutdown()} (RuneLite keeps this
      * {@code @Singleton} across plugin off / on) it simply opens again.
      *
-     * <p>The {@code displayName} is sent to the server as a
-     * {@code &name=<urlencoded>} query parameter on the WebSocket URL.
-     * The server validates it against the MMR row's {@code player_names}
-     * set (anti-spoof — a modified plugin can't claim a name that isn't
-     * linked to the trusted UUID) and uses it for the conn row's
-     * {@code name} + canonical {@code player_id} attributes. Pass
-     * {@code null} when the name isn't known yet (e.g. plugin re-toggle
-     * before {@code client.getLocalPlayer()} has resolved); the server
-     * falls back to {@code sorted(player_names)[0]}.
+     * <p>The {@code displayName} is sent as a {@code &name=<urlencoded>}
+     * query parameter on the WebSocket URL. Pass {@code null} when the name
+     * isn't known yet (e.g. plugin re-toggle before
+     * {@code client.getLocalPlayer()} has resolved).
      *
      * @param uuid        OSRS client UUID, lowercase v4. Invalid UUIDs
-     *                    are refused without a connect attempt to avoid
-     *                    the WAF auto-ban that would follow.
+     *                    are refused without a connect attempt.
      * @param displayName Active in-game display name (e.g. "Toyco"), or
      *                    {@code null} if not yet known.
      */
@@ -231,13 +215,8 @@ public final class SocketMgr
         {
             // Same (uuid, name) tuple already wired — no-op resume.
             if (uuid.equals(activeUuid) && Objects.equals(normName, activeName)) return;
-            // Switching UUID *or* display name: close existing cleanly
-            // so the server can free its OSRS-Connections row before we
-            // open a new one. The server also force-closes duplicates
-            // server-side (force_close_duplicate keys on player_id, and
-            // a name change with the same UUID could yield a different
-            // player_id — explicit teardown avoids racing the
-            // server-side eviction with a fresh open).
+            // Switching UUID *or* display name: close the existing socket
+            // cleanly before opening a new one.
             closeLocked(CLOSE_NORMAL, uuid.equals(activeUuid) ? "name_change" : "uuid_change");
         }
         activeUuid = uuid;
@@ -250,11 +229,11 @@ public final class SocketMgr
     /**
      * Tears down and re-opens the socket with the SAME {@code (uuid, name)}
      * so $connect-captured query flags (currently {@code show_rank}) are
-     * re-sent. Used when the "Show your rank to others" config toggles — the
-     * opt-out is snapshotted server-side at $connect (like {@code is_mod}), so
-     * a live reconnect is the way to apply it promptly instead of waiting for
-     * the next natural reconnect. No-op when not currently connected (the next
-     * {@link #connect} will pick up the flag anyway).
+     * re-sent. Used when the "Show your rank to others" config toggles: the
+     * flag is sent at $connect, so a live reconnect applies it promptly
+     * instead of waiting for the next natural reconnect. No-op when not
+     * currently connected (the next {@link #connect} will pick up the flag
+     * anyway).
      */
     public synchronized void reconnectNow()
     {
@@ -432,12 +411,10 @@ public final class SocketMgr
         // The name: RFC 3986 reserved chars are stripped by the in-game name
         // validator (RuneScape names are [A-Za-z0-9 _-]) so a single
         // urlencode pass is sufficient — no double-encode risk.
-        // show_rank (p15-membership-feed): when the user turns "Show your
-        // rank to others" OFF we append show_rank=0 so the backend marks this
-        // profile opted-out in OSRS-PluginUsers (drops it from the membership
-        // feed). Default (opted-in) omits the param — the server treats
-        // absence as opted-in. Captured at $connect like is_mod, so a
-        // mid-session toggle applies on reconnect (see reconnectNow).
+        // show_rank: when the user turns "Show your rank to others" OFF we
+        // append show_rank=0; the default (opted-in) omits the param. Sent at
+        // $connect, so a mid-session toggle applies on reconnect (see
+        // reconnectNow).
         String url = PvpConsts.SOCKET_URL + "?uuid=" + activeUuid
             + (activeName == null ? "" : "&name=" + URLEncoder.encode(activeName, StandardCharsets.UTF_8))
             + (config.showRankToOthers() ? "" : "&show_rank=0")

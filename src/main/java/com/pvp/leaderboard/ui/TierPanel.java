@@ -11,8 +11,8 @@ import static com.pvp.leaderboard.ui.Ui.*;
 
 /**
  * "What are the ranks" view: every tier from 3rd Age down to Bronze 3 with
- * a live "Top X%" derived from the infra-side rank histogram
- * ({@code rank_hist/<bucket>.json}, see {@code backend/core/rank_histogram.py}).
+ * a live "Top X%" derived from the rank histogram
+ * ({@code rank_hist/<bucket>.json}).
  *
  * <p>A bucket toggle ([Overall][NH][Veng][Multi][DMM], NH selected by
  * default) mirrors the Performance Breakdown selector in Player Lookup.

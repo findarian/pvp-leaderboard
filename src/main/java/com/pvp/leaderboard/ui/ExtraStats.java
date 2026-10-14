@@ -110,12 +110,8 @@ public class ExtraStats extends CapPanel {
     }
 
     /**
-     * The tier-graph bucket selector's wire keys, in display order. G-11
-     * appended {@code tournament} so the selector matches the website's
-     * Performance Overview; the "Overall" series is unchanged (the backend
-     * adds Tournament to Overall at 10% ON TOP of the existing 100% —
-     * {@code backend/core/buckets.with_tournament} — so the local
-     * approximation in {@link TierGraphPanel#set} is untouched here).
+     * The tier-graph bucket selector's wire keys, in display order (the
+     * website's Performance Overview order).
      */
     static String[] bucketKeys() {
         return new String[]{"overall", "nh", "veng", "multi", "dmm", "tournament"};
@@ -306,13 +302,11 @@ public class ExtraStats extends CapPanel {
 
     /**
      * The "Overall" history for the tier graph — one Overall mu per match,
-     * in the given (already sorted) order. G-16 (operator decision
-     * 2026-09-22): the formula is the backend's, mirrored in
-     * {@link OverallMmr} — the four standard buckets weighted
-     * {@code 0.55 / 0.30 / 0.05 / 0.10} (1000 until a bucket has a game)
-     * plus {@code 0.10 × tournament} on top, where the tournament term
-     * exists only once a tournament match with a rating has been seen; a
-     * history without one plots exactly the legacy Overall. A point that
+     * in the given (already sorted) order, through {@link OverallMmr}: the
+     * four standard buckets weighted {@code 0.55 / 0.30 / 0.05 / 0.10} (1000
+     * until a bucket has a game) plus {@code 0.10 × tournament} on top, where
+     * the tournament term exists only once a tournament match with a rating
+     * has been seen. A point that
      * carries no usable mu (or jumps more than {@link #MAX_DELTA})
      * leaves its bucket where it was. Package-private for the tests.
      */

@@ -2,10 +2,9 @@ package com.pvp.leaderboard.config;
 import java.util.*;
 
 /**
- * The five styles the kill-streak box can show (BOARD row 33, 2026-09-21) —
- * the ONE place for the box's on-screen label and the {@code /user}
- * {@code buckets.<key>} it reads. Overall has no streak box (the operator's
- * list is NH / Veng / Multi / DMM / Event); {@link #EVENT} is the Swiss
+ * The five styles the kill-streak box can show — the ONE place for the
+ * box's on-screen label and the {@code /user} {@code buckets.<key>} it
+ * reads. Overall has no streak box; {@link #EVENT} is the Swiss
  * tournament bucket under the name players see for it.
  *
  * <p>{@link #toString()} returns the label so RuneLite's config combo shows

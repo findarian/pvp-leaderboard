@@ -59,9 +59,7 @@ public class HistoryPanel extends JPanel
         return rank + (division > 0 ? " " + division : "");
     }
 
-    /** The capped label, else the backend's MMR delta, else "-". The backend's
-     *  one {@code rating_change} builder ({@code backend/core/match_rating_change.py})
-     *  always writes {@code mmr_delta} and omits the object otherwise. */
+    /** The capped label, else {@code rating_change.mmr_delta}, else "-". */
     private static String computeRatingChangePlain(JsonObject match)
     {
         if (PortalCap.isCapped(match))

@@ -6,24 +6,22 @@ import static com.pvp.leaderboard.util.JsonLenient.*;
 
 /**
  * Immutable snapshot of the local user's matchmaking-queue state, parsed
- * from a {@code queue/state} (or {@code queue/timeout}) push — Plan 10
- * Part B / F.1 (2026-09-21). The part of the backend's
- * {@code matchmaking_queue.public_state} the plugin shows:
+ * from a {@code queue/state} (or {@code queue/timeout}) push. The fields
+ * the plugin shows:
  *
  * <pre>
  * state            searching | idle | timeout
- * window           ±rating window (100/200/400/800) or null = anyone in the style
+ * window           ±rating window or null = anyone in the style
  * expanded         true once the search is open to everyone
  * elapsed_s / wait_pref_s
- * reason           idle only: "expired" | "opponent_declined" (Part E, additive)
+ * reason           idle only: "expired" | "opponent_declined"
  * fight_session_id idle with a reason: the fight session the server ended
  * </pre>
  *
- * The server also sends the rank range, the remaining and next-expansion
+ * The push also carries the rank range, the remaining and next-expansion
  * times, the match counters, style, build and region; nothing reads them.
  * Missing keys degrade to neutral values so a partial push never throws
- * on the socket read thread. No UUIDs — the queue is keyed on
- * {@code player_id} server-side and the plugin only ever sees names.
+ * on the socket read thread. The plugin only ever sees names, no UUIDs.
  */
 public final class QueueState
 {

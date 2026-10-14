@@ -62,15 +62,7 @@ public final class ProfileGate implements JoinGate
     /** Consecutive soft-404 refreshes ({@code /user} returned "player
      *  not found"). Drives the geometric backoff in
      *  {@link #softBackOff()}; reset by a successful refresh
-     *  and by {@link #onLogin()}.
-     *
-     *  <p>A soft 404 is a stable condition — an account the backend
-     *  has never seen stays unknown until it plays a match — but the
-     *  refresh path deliberately doesn't treat it as a success, so
-     *  without this counter the gate sat on the 60 s fast-retry for
-     *  the whole session. Each of those retries passes
-     *  {@code forceRefresh=true}, which bypasses the profile cache,
-     *  so it was an uncacheable API call every minute per client. */
+     *  and by {@link #onLogin()}. */
     private final AtomicInteger softMisses = new AtomicInteger();
 
     /** Active auto-refresh handle; null when {@link #onLogout()} or no
@@ -201,19 +193,14 @@ public final class ProfileGate implements JoinGate
             // promote the autoRefresh schedule to hourly here; the
             // fast-retry schedule from onLogin() will fire again in
             // RETRY_MIN_MS so the count auto-populates
-            // as soon as the local player name resolves. (Previously
-            // refresh() unconditionally promoted to hourly at entry,
-            // which meant a single failed initial attempt locked the
-            // user out of auto-refresh for an hour.)
+            // as soon as the local player name resolves.
             refreshing.set(false);
             fireOnEdt();
             return;
         }
 
         // forceRefresh=true bypasses PvpApi's 30s local TTL —
-        // we want the freshest read. Server-side CloudFront cache (60s)
-        // still applies, which is fine; the user can't refresh faster
-        // than that and get materially newer data anyway.
+        // we want the freshest read.
         pvpApi.getProfile(name, true)
             .whenComplete((profile, ex) ->
             {
@@ -234,10 +221,7 @@ public final class ProfileGate implements JoinGate
                         // Soft 404 from the API — player profile doesn't
                         // exist yet (e.g. brand-new account with zero
                         // matches). Surface zeros in the UI but do NOT
-                        // treat this as a successful refresh: promoting
-                        // to the hourly schedule here left new players
-                        // stuck below THRESHOLD until they restarted
-                        // RuneLite or clicked Refresh count manually.
+                        // treat this as a successful refresh.
                         applyAllZero();
                         softBackOff();
                         return;
@@ -247,9 +231,7 @@ public final class ProfileGate implements JoinGate
                     // First-success / manual-refresh promote: switch to
                     // the hourly cadence and reset the clock so the
                     // next auto-tick is 1h from now (not 1h from the
-                    // previous tick). Was at refresh() entry — that
-                    // version unconditionally promoted even on failure
-                    // paths, which broke the initial-fetch retry loop.
+                    // previous tick).
                     promoteToHourlyScheduleLocked();
                 }
                 catch (Exception e)
@@ -266,13 +248,9 @@ public final class ProfileGate implements JoinGate
     /** Widens the retry interval after repeated soft-404s, doubling
      *  each time up to the {@link #RECHECK_MS} cap.
      *
-     *  <p>The first miss is left alone on the fast retry: that's the
-     *  case this schedule exists for (a brand-new account whose first
-     *  match is about to land), and it's worth one prompt re-check.
-     *  It's the indefinite repetition that had to stop — the interval
-     *  now reaches the hourly cap after ~6 misses, so an account the
-     *  backend simply doesn't know costs the same as any other idle
-     *  client instead of an uncacheable request every minute.
+     *  <p>The first miss is left alone on the fast retry (a brand-new
+     *  account whose first match is about to land); the interval
+     *  reaches the hourly cap after ~6 misses.
      *
      *  <p>No-op when logged out: {@link #cancelAutoRefreshLocked()}
      *  has already torn the schedule down and re-arming here would
@@ -334,13 +312,7 @@ public final class ProfileGate implements JoinGate
         // per-bucket shape is {@code {"rank": "Adamant", "division":
         // 2, "mmr": ...}} where {@code rank} is the family name and
         // {@code division} is 1–3 (absent / non-1–3 for the
-        // single-division "3rd Age" tier). Earlier draft of this
-        // method read {@code cumulative_stats.<bucket>.tier} which
-        // doesn't exist on this endpoint (only the S3 shard payload
-        // has a {@code tier} field) — meaning {@link
-        // #rankIdxByStyle} would stay empty and the self-preview
-        // row's name rendered in plain white. Fixed by reading from
-        // {@code buckets.<bucket>} instead.
+        // single-division "3rd Age" tier).
         EnumMap<Style, Integer> nextCounts = new EnumMap<>(Style.class);
         for (Style s : Style.values())
         {
@@ -348,10 +320,8 @@ public final class ProfileGate implements JoinGate
             int total = 0;
             if (b != null)
             {
-                // Defensive ints — backend has been seen to return both
-                // numeric primitives and Decimal-typed values depending
-                // on the path through the Lambda; getAsInt() handles
-                // both via Gson's coercion.
+                // Defensive ints — the value may arrive as an integer or a
+                // decimal number; getAsInt() handles both via Gson's coercion.
                 int wins = JsonLenient.optInt(b, "wins", 0);
                 int losses = JsonLenient.optInt(b, "losses", 0);
                 int ties = JsonLenient.optInt(b, "ties", 0);

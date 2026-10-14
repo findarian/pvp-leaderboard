@@ -48,9 +48,7 @@ public interface LobbyService
      *  {@code Dashboard}, which has no full {@link LobbyMember}).
      *  The wire encoding is identical: {@code lobby/block} with
      *  {@code blocked_player_id=<id>}. Null/empty/blank ids are
-     *  silently dropped — defence-in-depth against a UI bug shipping
-     *  a malformed frame to the server (which auto-bans on
-     *  malformed input). Default impl is a no-op so the
+     *  silently dropped. Default impl is a no-op so the
      *  {@link NoOpLobby} test stub doesn't have to override. */
     default void blockById(String playerId) { /* no-op default */ }
 

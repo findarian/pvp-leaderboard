@@ -16,7 +16,7 @@ public final class NameUtils
 		// match it (ASCII-only without UNICODE_CHARACTER_CLASS) and trim()
 		// does not strip it, so it must be unified to a regular space FIRST —
 		// otherwise every multi-word in-scene name fails membership checks
-		// and shard lookups against backend-canonical names ("run piggy").
+		// and shard lookups against canonical names.
 		return name.replace('\u00A0', ' ').trim().replaceAll("\\s+", " ");
 	}
 

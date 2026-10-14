@@ -119,7 +119,7 @@ public class PvPLeaderboardPlugin extends Plugin
 	@Inject
 	private LobbyPrefs lobbyPrefs;
 
-	// Plan 10 step 7: the matchmaking queue + Swiss tournaments (2026-09-21).
+	// The matchmaking queue + Swiss tournaments.
 	@Inject
 	private WebSocketQueueService queueSvc;
 
@@ -137,8 +137,8 @@ public class PvPLeaderboardPlugin extends Plugin
 	@Inject
 	private TournamentOpponentOverlay oppOverlay;
 
-	/** Plan 10 F.2: flips to the Tournament bucket when a round opens
-	 *  (config-gated); the switch back is the next ordinary fight. */
+	/** Flips to the Tournament bucket when a round opens (config-gated);
+	 *  the switch back is the next ordinary fight. */
 	private final BucketSwitch bucketSwitch =
 		new BucketSwitch(() -> config.autoSwitchTournamentBucket(), this::pinBucket);
 
@@ -267,16 +267,16 @@ public class PvPLeaderboardPlugin extends Plugin
 			trackWorld(client.getGameState());
 		});
 		lobbySvc.start();
-		// Plan 10 step 7: the queue + tournament transports subscribe to
-		// their pushes (and the reconnect re-sync) the same way. The session
-		// tracker feeds the bucket pin + the opponent outline; the auto-switch
-		// listener flips the bucket when a round opens.
+		// The queue + tournament transports subscribe to their pushes (and
+		// the reconnect re-sync) the same way. The session tracker feeds the
+		// bucket pin + the opponent outline; the auto-switch listener flips
+		// the bucket when a round opens.
 		queueSvc.start();
 		tourneySvc.start();
 		tourneySvc.addListener(oppTracker);
 		tourneySvc.addListener(worldReport);
 		tourneySvc.addListener(bucketSwitch);
-		// Wire the anti-smurf gate's identity suppliers BEFORE the
+		// Wire the match-count gate's identity suppliers BEFORE the
 		// dashboard ctor so the first listener fire (still empty counts)
 		// triggers the panel's "Loading your match count…" state. The
 		// suppliers resolve at refresh time, not now, so it's fine that
@@ -284,7 +284,7 @@ public class PvPLeaderboardPlugin extends Plugin
 		profileGate.configure(this::getLocalName);
 		dashPanel = new Dashboard(this, pvpApi, discordLogin,
 			lobbySvc, profileGate, lobbyPrefs);
-		// Plan 10 step 7: queue section + Tournaments sub-tab, per the two
+		// Queue section + Tournaments sub-tab, per the two
 		// config flags; the in-combat probe drives tournament/in_combat.
 		applyPlan10Services();
 		dashPanel.setTournamentInCombatProvider(fightMonitor::isInCombat);
@@ -325,24 +325,18 @@ public class PvPLeaderboardPlugin extends Plugin
 		oppOverlay.setOpponentKeysSupplier(oppTracker::getHighlightedOpponentKeys);
 		overlayManager.add(oppOverlay);
 		fightMonitor.setCombatSink(this::onOwnHit);
-		// Plan 10 F.2 (AS-72): while the player is in a RUNNING tournament the
-		// fight auto-switch lands on the Tournament bucket instead of the
-		// fight's style; once they leave the bracket the next fight switches
-		// back like every bucket.
+		// While the player is in a RUNNING tournament the fight auto-switch
+		// lands on the Tournament bucket instead of the fight's style; once
+		// they leave the bracket the next fight switches back like every bucket.
 		fightMonitor.setTournamentBucketPin(() -> config.autoSwitchTournamentBucket() && oppTracker.isPlaying());
 
-		// One-shot startup diagnostic — pins the in-combat suppression
-		// config toggle state + whether each overlay's provider got
-		// wired. The popup-mid-combat bug class has been recurrent
-		// (2026-05-25 series of QA cycles); without this log we can't
-		// disambiguate "user toggled it off" from "wiring race" from
-		// "FightMonitor.isInCombat returned false at popup time" when
-		// reading a captured client log. Pairs with the per-popup
+		// One-shot startup diagnostic: the in-combat suppression toggle and
+		// whether each overlay's provider is wired. Pairs with the per-popup
 		// DEBUG lines emitted by the overlay {@code showInvite} /
 		// {@code showMatch} entry points and the rate-limited
 		// {@code FightMonitor.isInCombat} decision log.
 
-		// BOARD row 33: the movable kill-streak box. Config-gated inside the
+		// The movable kill-streak box. Config-gated inside the
 		// overlay. Each fight feeds the streak tracker, then the side panel's
 		// streak line; the panel exists from here on and is never nulled.
 		streakBoxOnOnce();
@@ -376,12 +370,7 @@ public class PvPLeaderboardPlugin extends Plugin
 			// delta). Self-gates on enableWhitelistRanks(); independent of
 			// showRankToOthers (that only governs whether OTHERS see us).
 			memberFeed.onLogin();
-			// Resume the socket too — the player is past $connect's
-			// prerequisites (UUID stamped, MMR snapshot taken) so the
-			// server already has its trusted dict for SMURF_GUARD.
-			// Pass the active in-game name so the server's conn row
-			// pins to the current session instead of falling back to
-			// the alphabetical default from the MMR row's player_names.
+			// Resume the socket too, as the active in-game name.
 			connectSocket(self);
 			// Player is logged in already (plugin toggled off/on while
 			// in-game) — kick the gate so the dashboard shows real
@@ -426,7 +415,7 @@ public class PvPLeaderboardPlugin extends Plugin
 		mouseManager.unregisterMouseListener(warnOverlay.mouse);
 		overlayManager.remove(warnOverlay);
 		warnOverlay.clear();
-		// Plan 10 step 7: drop the opponent outline, forget the tournament
+		// Drop the opponent outline, forget the tournament
 		// session (bucket pin + highlight) and stop the sub-tab's ticker.
 		overlayManager.remove(oppOverlay);
 		fightMonitor.setCombatSink(null);
@@ -508,7 +497,7 @@ public class PvPLeaderboardPlugin extends Plugin
 		}
 	}
 
-	/** Plan 10 step 7: hands the queue + tournament transports to the
+	/** Hands the queue + tournament transports to the
 	 *  dashboard according to the two config flags — the inert queue service
 	 *  and no tournament service ({@code null}) when a flag is off (the gate
 	 *  hides the queue block, the Tournaments sub-tab greys). EDT-only: the
@@ -519,10 +508,10 @@ public class PvPLeaderboardPlugin extends Plugin
 		dashPanel.setTournamentService(config.enableTournaments() ? tourneySvc : null);
 	}
 
-	/** Plan 10 F.2: the auto-switch's action — pins the side panel + overlay
+	/** The auto-switch's action — pins the side panel + overlay
 	 *  to the Tournament bucket when a round opens with an opponent. The
 	 *  switch back happens at the next ordinary fight through
-	 *  {@link FightMonitor}, like every bucket (AS-72). Already on Tournament,
+	 *  {@link FightMonitor}, like every bucket. Already on Tournament,
 	 *  RuneLite's setConfiguration stores nothing and fires no ConfigChanged. */
 	private void pinBucket()
 	{
@@ -556,14 +545,13 @@ public class PvPLeaderboardPlugin extends Plugin
 				case "rankBucket":
 					rankOverlay.scheduleSelf();
 					break;
-				// "Show your rank to others" toggled: the opt-out flag is
-				// captured server-side at $connect (like is_mod), so reconnect
-				// the socket to re-send the show_rank flag promptly instead of
-				// waiting for the next natural reconnect.
+				// "Show your rank to others" toggled: the show_rank flag is
+				// sent on connect, so reconnect the socket to re-send it
+				// promptly instead of waiting for the next natural reconnect.
 				case "showRankToOthers":
 					socketMgr.reconnectNow();
 					break;
-				// Plan 10 step 7: the queue / tournaments flags re-wire the
+				// The queue / tournaments flags re-wire the
 				// dashboard (inert services when off). Marshalled to the EDT —
 				// config events arrive off it and the setters touch Swing.
 				case "enableQuickMatch":
@@ -611,23 +599,14 @@ public class PvPLeaderboardPlugin extends Plugin
 					// (called once the name resolves), so without this
 					// poke the "Loading…" phase would be invisible.
 					dashPanel.syncLogins();
-					// Open the socket immediately — UUID is available on
-					// startUp() via identitySvc and the server
-					// resolves the trusted MMR snapshot at $connect time
-					// (no need to wait for the player to be fully loaded
-					// in-game like the heartbeat path does).
-					//
-					// Only connect here if the local-player name is ALREADY
-					// resolved. LOGGED_IN can fire a few ticks before
-					// client.getLocalPlayer() populates; connecting with
-					// null opens the socket without a {@code &name=}
-					// parameter, the server falls back to
-					// sorted(player_names)[0] (typically the wrong alt), and
-					// the 10-tick Init-complete branch below then has to
-					// close and reopen with the real name (the
-					// double-reconnect tax surfaced in the 21:01:51-57 QA
-					// log). Deferring to Init-complete when the name isn't
-					// ready collapses the two-reconnect cycle into one.
+					// Open the socket now if the local-player name is
+					// already resolved (the UUID is available from
+					// startUp() via identitySvc). LOGGED_IN can fire a few
+					// ticks before client.getLocalPlayer() populates; a
+					// socket opened without a {@code &name=} parameter would
+					// have to close and reopen at the 10-tick Init-complete
+					// branch below, so an unresolved name defers the connect
+					// to that branch.
 					//
 					// startUp() already connects if the player was logged in
 					// before the plugin toggled on, so the "plugin reload
@@ -639,7 +618,7 @@ public class PvPLeaderboardPlugin extends Plugin
 					// that the viewport is available again (offense happened
 					// on a prior session that was disabled mid-fight).
 					maybeWarn();
-					// Replay the doubled freeze-log MMR loss as the normal
+					// Replay the freeze-log MMR loss as the normal
 					// -XX.XX MMR overlay: a freeze-log submitted at last
 					// logout couldn't poll for its delta, so we deferred the
 					// notification to this login.
@@ -648,8 +627,8 @@ public class PvPLeaderboardPlugin extends Plugin
 				case LOGIN_SCREEN:
 					// LMS freeze-log detection MUST run before resetFight
 					// wipes the active fights: a logout / connection-lost
-					// mid-fight inside an LMS arena is submitted as a doubled
-					// loss (reason=logout, no ban).
+					// mid-fight inside an LMS arena is submitted as a
+					// freeze-log (reason=logout).
 					fightMonitor.handleFreeze("logout");
 					// Fully clear fight state on logout
 					fightMonitor.resetFight();
@@ -675,7 +654,7 @@ public class PvPLeaderboardPlugin extends Plugin
 					// hop deliberately doesn't cross, so logging back in
 					// re-runs the full init while hopping doesn't.
 					initTracker.onLogout();
-					// Plan 10: forget the tournament session (bucket pin +
+					// Forget the tournament session (bucket pin +
 					// opponent outline); tournament/status re-syncs it on the
 					// next login.
 					oppTracker.clear();
@@ -719,9 +698,7 @@ public class PvPLeaderboardPlugin extends Plugin
 					// no-ops if the (uuid, name) tuple matches the
 					// current connection; otherwise it tears down
 					// and reopens with the correct name in the
-					// query string. This is what pins the server's
-					// conn row to the active in-game character instead
-					// of the alphabetical fallback.
+					// query string.
 					connectSocket(self);
 
 					// Schedule self rank refresh for overlay. Outside
@@ -750,7 +727,7 @@ public class PvPLeaderboardPlugin extends Plugin
 						// self-gates on enableWhitelistRanks()).
 						memberFeed.onLogin();
 
-						// Kick the anti-smurf gate now that the local
+						// Kick the match-count gate now that the local
 						// player name resolves. We delay this 10 ticks
 						// instead of firing on LOGGED_IN directly so
 						// the name supplier (client.getLocalPlayer().

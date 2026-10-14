@@ -361,8 +361,8 @@ class PlayerCard extends CapPanel
      *  Used for player-name rows so long names render their full text and
      *  visually clip under the rank/lookup cluster instead of ellipsizing.
      *  The 4px {@code EmptyBorder(0, 4, 0, 0)} the caller sets on the
-     *  overlay provides the "minimal spacing" gap the user requested
-     *  between the last visible character of the name and the rank text. */
+     *  overlay provides a minimal gap between the last visible character
+     *  of the name and the rank text. */
     static final class RightRow extends CapPanel
     {
         private final JComponent base;

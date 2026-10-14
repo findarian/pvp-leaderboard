@@ -8,15 +8,8 @@ import javax.inject.*;
 import okhttp3.*;
 
 /**
- * Sends presence heartbeats to the backend.
- *
- * <h2>Scope (p15-membership-feed)</h2>
- * This service used to ALSO fetch {@code whitelist.json} to drive the rank
- * overlay. That responsibility moved to {@link MemberFeed}, which
- * consumes the names-only snapshot/delta feed ({@code plugin-users/snapshot.json}
- * + {@code delta.json}) — see PLAN_PRESENCE_FRESHNESS.md. The plugin no longer
- * downloads {@code whitelist.json}; the backend keeps generating it only as a
- * server-side fallback. This class is now heartbeat-only.
+ * Sends presence heartbeats to the backend. The rank overlay's membership
+ * comes from {@link MemberFeed}.
  *
  * <h2>Heartbeat behaviour</h2>
  * <ul>

@@ -4,7 +4,7 @@ import com.google.gson.*;
 import java.util.*;
 
 /**
- * Server-push callbacks for the matchmaking queue (Plan 10 Part B / F.1),
+ * Server-push callbacks for the matchmaking queue,
  * registered with a {@link QueueService}. Every callback is delivered on
  * the Swing EDT (the {@code WebSocketQueueService} marshals), so panels
  * may mutate Swing components directly. All methods are {@code default}
@@ -15,7 +15,7 @@ public interface QueueEventListener
 {
     /** {@code queue/state} — after join / leave / expand / status and every
      *  tick while searching. {@code state == idle} with a {@code reason}
-     *  means the worker tore a proposed fight down (expired / declined). */
+     *  means a proposed fight ended (expired / declined). */
     default void onQueueState(QueueState state) {}
 
     /** {@code queue/timeout} — the wait preference elapsed; the user is

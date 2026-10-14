@@ -178,7 +178,7 @@ public final class Ui
         }
     }
 
-    // ---- Plan 46 S2 (the Tournaments tab): a shared palette and the helpers below.
+    // ---- The Tournaments tab: a shared palette and the helpers below.
 
     /** Muted grey text. */
     public static final Color MUTED = new Color(0x9a9a9a);

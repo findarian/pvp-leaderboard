@@ -17,10 +17,7 @@ import java.util.*;
  * </ol>
  *
  * <p>"Unlocked" is conveyed by returning {@link JoinGate#THRESHOLD}
- * (i.e. exactly the threshold) for every style — that's the safest
- * default because the server-side {@code SMURF_GUARD} is the authoritative
- * check. A misbehaving local gate that says "unlocked" just means the
- * server gets the final word.
+ * (i.e. exactly the threshold) for every style.
  */
 public final class NoOpGate implements JoinGate
 {

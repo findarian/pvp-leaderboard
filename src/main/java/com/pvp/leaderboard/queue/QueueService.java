@@ -3,8 +3,8 @@ package com.pvp.leaderboard.queue;
 import com.pvp.leaderboard.lobby.*;
 
 /**
- * The seam between the matchmaking panel and the queue transport (Plan
- * 10 Part B / F.1). Fire-and-forget: outcomes arrive through the
+ * The seam between the matchmaking panel and the queue transport.
+ * Fire-and-forget: outcomes arrive through the
  * registered {@link QueueEventListener}. The production implementation is
  * {@link WebSocketQueueService}; {@link NoOpQueue} is the inert
  * fallback (the gate then hides the queue button). Every call defaults to
@@ -12,7 +12,7 @@ import com.pvp.leaderboard.lobby.*;
  */
 public interface QueueService
 {
-    /** Wait-time choices (seconds) shared with Discord — AS-64. */
+    /** Wait-time choices (seconds) shared with Discord. */
     int[] WAIT_CHOICES = {30, 300, 600, 900};
 
     /** The index of the choice nearest {@code waitPrefS}; of two equally
@@ -51,14 +51,14 @@ public interface QueueService
     /** {@code queue/recent} now and every 5 minutes while {@code open}; {@code false} stops it. */
     default void watchRecent(boolean open) { }
 
-    // ---- shared preferences (parity gap G-2) -------------------------
-    // The wait time and the rank range live in ONE server-side row shared
-    // with the Discord queue, so the plugin writes it on a local pick and
-    // re-reads it when the socket comes up. Each is one job.
+    // ---- shared preferences ------------------------------------------
+    // The wait time and the rank range are shared with the Discord queue,
+    // so the plugin writes them on a local pick and re-reads them when the
+    // socket comes up. Each is one job.
 
     /** {@code queue/set_prefs} with an <b>empty</b> {@code prefs} object:
-     *  merges nothing server-side and answers {@code queue/prefs} with the
-     *  stored row — the read-through that brings a Discord-side change to
+     *  changes nothing and answers {@code queue/prefs} with the
+     *  stored preferences — the read-through that brings a Discord-side change to
      *  the plugin's pickers. */
     default void requestPrefs() { }
 

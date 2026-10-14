@@ -61,7 +61,7 @@ public class FightMonitor
      *  ganked / opener-attacked in a matchmaking arena reads as
      *  out-of-combat for the ~600ms–4s window before they retaliate,
      *  and an invite popup arriving in that window slips through
-     *  the suppression gate (QA bug 2026-05-25). */
+     *  the suppression gate. */
     private volatile long inboundHitMs;
 
     /** Push-model cache for {@link #isInCombat()}: combat is state, so it
@@ -101,7 +101,7 @@ public class FightMonitor
      *  plugin on the next {@code LOGGED_IN}. */
     public static final String LMS_WARN_KEY = "lmsDisablePendingWarning";
 
-    /** Config keys for the "show the doubled freeze-log MMR delta on next
+    /** Config keys for the "show the freeze-log MMR delta on next
      *  login" marker. A freeze-log is submitted at logout / shutdown, so
      *  there is no live session left to poll the match-history API and
      *  surface the {@code -XX.XX MMR} notification the way a normal loss
@@ -113,9 +113,8 @@ public class FightMonitor
     public static final String LMS_END_KEY = "lmsFreezeMmrEndTs";
 
     /** How long an in-progress fight is retained for freeze-log
-     *  purposes while the player is in an LMS arena. Much longer than
-     *  the normal 10s idle-GC window because LMS freeze-logging
-     *  happens deliberately after the combat timer has lapsed. */
+     *  purposes while the player is in an LMS arena (longer than the
+     *  normal 10s idle-GC window). */
     static final long LMS_KEEP_MS = 90_000L;
 
     /** How recently (ms) the player must have been confirmed inside an
@@ -199,7 +198,7 @@ public class FightMonitor
         if (f != null) pending.add(f);
     }
 
-    /** Plan 10 F.2 (AS-72): while the local player is in a RUNNING tournament
+    /** While the local player is in a RUNNING tournament
      *  (and the config allows it) the auto-switch targets the Tournament
      *  bucket instead of the fight's style, so a tournament game does not
      *  flip the panel to NH. Cleared by the session tracker when the player
@@ -231,7 +230,7 @@ public class FightMonitor
     }
 
     /** The bucket of the last fight this session classified — the
-     *  kill-streak box's "current style" (BOARD row 33); {@code null} until
+     *  kill-streak box's "current style"; {@code null} until
      *  then. Deliberately not cleared by {@link #resetFight()}: a relog
      *  does not change the style you were last fighting in. */
     private volatile RankBucket lastBucket;
@@ -400,10 +399,10 @@ public class FightMonitor
                 gcTicks = 0;
                 long now = currentTimeMillis();
                 // While the player is inside an LMS arena, retain
-                // in-progress fights far longer (90s) so a deliberate
-                // freeze-log after the combat timer lapses still has a
-                // live FightEntry to submit as a doubled loss. Outside
-                // LMS the normal 10s idle window is unchanged.
+                // in-progress fights far longer (90s) so a freeze-log
+                // after the combat timer lapses still has a live
+                // FightEntry to submit. Outside LMS the normal 10s
+                // idle window is unchanged.
                 long idleLimit = isLmsRecent(lmsSeenMs, now) ? LMS_KEEP_MS : 10_000L;
                 activeFights.values().removeIf(fe -> !fe.finalized && now - fe.activityMs > idleLimit);
             }
@@ -654,7 +653,7 @@ public class FightMonitor
         // Release the popup-suppression gate the moment the match is
         // submitted, instead of waiting up to {@link #COMBAT_MS}
         // for the lingering {@link #inboundHitMs} from the
-        // just-finished fight to age out (user spec 2026-05-25). Stays
+        // just-finished fight to age out. Stays
         // engaged while any other {@code activeFights} entry remains
         // OR a fresh player attacker is interacting-with the local player.
         Player local = client.getLocalPlayer();
@@ -748,7 +747,7 @@ public class FightMonitor
         return elapsed <= LMS_AREA_MS;
     }
 
-    /** Pure freeze-log gate: submit a doubled loss iff the player is on
+    /** Pure freeze-log gate: submit a freeze-log iff the player is on
      *  an LMS world, was inside an LMS arena recently, and an eligible
      *  in-progress fight exists. Extracted static so the truth table is
      *  unit-testable without the injected-client graph (mirrors
@@ -762,8 +761,7 @@ public class FightMonitor
 
     /** Normalise the caller-supplied reason to one of the two known
      *  wire values. Anything other than {@code "plugin_disabled"}
-     *  (including null / blank) collapses to {@code "logout"} — the
-     *  benign, no-ban variant. */
+     *  (including null / blank) collapses to {@code "logout"}. */
     static String cleanReason(String reason)
     {
         return "plugin_disabled".equals(reason) ? "plugin_disabled" : "logout";
@@ -831,7 +829,7 @@ public class FightMonitor
      * (reason {@code "plugin_disabled"}) paths <b>before</b>
      * {@link #resetFight}. When an eligible in-progress fight is
      * found in an LMS arena, it is finalized as a {@code loss} carrying
-     * the {@code lms_freeze_logout} flag (backend doubles the MMR loss).
+     * the {@code lms_freeze_logout} flag.
      * For {@code plugin_disabled} it additionally persists a
      * pending-warning marker so the ban warning shows on next login.
      *
@@ -888,7 +886,7 @@ public class FightMonitor
         }
     }
 
-    /** Persist the "show the doubled freeze-log MMR delta on next login"
+    /** Persist the "show the freeze-log MMR delta on next login"
      *  marker (opponent id + the fight_end_ts the loss was submitted
      *  with). Written to RuneLite config so it survives the plugin being
      *  toggled off / the client restarting. */
@@ -918,7 +916,7 @@ public class FightMonitor
     }
 
     /**
-     * Surface the doubled MMR loss from a prior-session freeze-log the
+     * Surface the MMR loss from a prior-session freeze-log the
      * next time the player logs in. If the pending marker is present the
      * <em>same</em> match-history delta fetch the normal post-fight path
      * uses is scheduled — so the player sees the identical {@code -XX.XX
@@ -975,7 +973,7 @@ public class FightMonitor
         }
     }
 
-    /** The fight as the backend records it; the caller adds the client id and any flags. */
+    /** The fight's match payload; the caller adds the client id and any flags. */
     private static MatchResult.MatchResultBuilder matchOf(String self, String opponent, String result, int world, FightEntry fe,
         long endTs, String startBook, String endSpellbook)
     {
@@ -994,8 +992,7 @@ public class FightMonitor
 
     /** Build + submit the freeze-log loss using cached values (the live
      *  player object is already gone at logout / shutdown). Spellbook is
-     *  best-effort from the fight's start value; the backend penalty is
-     *  bucket-independent. */
+     *  best-effort from the fight's start value. */
     private CompletableFuture<Boolean> finalizeLms(String opponentName,
                                                               int world,
                                                               FightEntry fe,
@@ -1041,7 +1038,7 @@ public class FightMonitor
             .ffaPortal(ffaPortal)
             .bountyHunter(entry.wasInBounty);
 
-        // Determine the bucket this fight will be classified as (server-side logic)
+        // Determine the bucket this fight will be classified as
         RankBucket fb = determineBucket(world, entry.wasInMulti, startBook, endSpellbook, entry.wasInBounty);
         String fightBucket = RankBucket.key(fb);
         lastBucket = fb;
@@ -1051,7 +1048,7 @@ public class FightMonitor
         // Show the bucket label on the rating pop-up when the fight's bucket is
         // not the one the leaderboard shows; with auto-switch on, switch to it.
         RankBucket currentBucket = config.rankBucket();
-        // Plan 10 F.2: a running tournament pins the target to the Tournament bucket.
+        // A running tournament pins the target to the Tournament bucket.
         boolean isPinned = tournamentBucketPin.getAsBoolean();
         RankBucket target = resolveAutoSwitchTarget(fb, isPinned);
         boolean bucketInMmr = currentBucket != target;
@@ -1068,7 +1065,7 @@ public class FightMonitor
             {
             }
             // Use fight bucket for API refresh when auto-switch is enabled;
-            // a pinned tournament game is rated in the tournament bucket (Plan 10 A.3).
+            // a pinned tournament game is rated in the tournament bucket.
             apiBucket = isPinned ? "tournament" : fightBucket;
         }
         else
@@ -1120,8 +1117,8 @@ public class FightMonitor
     }
 
     /** Re-fetch the local player's cumulative_stats for the lobby
-     *  SMURF_GUARD gate after a successful match submit. Delayed so
-     *  the backend has time to fold the new fight into /user. */
+     *  match-count gate after a successful match submit, after a delay
+     *  so /user includes the new fight. */
     private void scheduleLobbyGateRefresh()
     {
         later(() -> {
@@ -1442,7 +1439,7 @@ public class FightMonitor
         return spellbook != null && "Lunar".equals(spellbook.trim());
     }
 
-    /** The bucket the server will rate this fight in: DMM world, then the
+    /** This fight's bucket: DMM world, then the
      *  Bounty Hunter area (Veng), then multi, then Veng when either spellbook
      *  is Lunar, else NH. */
     private RankBucket determineBucket(int world, boolean wasInMulti, String startBook, String endSpellbook,

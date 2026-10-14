@@ -71,12 +71,12 @@ public class TourneySvc
         status();
         String sub = subscribedTo;
         if (sub != null) subscribe(sub);
-        // Set 7: the sub-tab re-asks for the list it could not send while
+        // The sub-tab re-asks for the list it could not send while
         // the socket was down (SocketMgr.send drops without a socket).
         fire(TournamentEventListener::onConnected);
     }
 
-    /** {@code true} while the socket is open (set 7): the sub-tab waits
+    /** {@code true} while the socket is open: the sub-tab waits
      *  with "Connecting…" instead of sending frames the manager would drop,
      *  and re-asks from {@link TournamentEventListener#onConnected()}. */
     public boolean isConnected()
@@ -176,8 +176,8 @@ public class TourneySvc
         socket.send("tournament/world", d);
     }
 
-    /** {@code tournament/report_problem}: the text trimmed and cut to the 280 characters the server accepts
-     *  (socket_protocol.PROBLEM_TEXT_MAX); blank text sends nothing. */
+    /** {@code tournament/report_problem}: the text trimmed and cut to 280
+     *  characters; blank text sends nothing. */
     public void reportProblem(String tournamentId, String text)
     {
         if (blank(text)) return;

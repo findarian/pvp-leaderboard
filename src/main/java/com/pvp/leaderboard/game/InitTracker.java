@@ -7,15 +7,12 @@ import com.pvp.leaderboard.util.*;
  * login init for, so the init chain runs on a genuine login rather than
  * on every event that happens to arm it.
  *
- * <p><b>Why.</b> The delayed-init block in
- * {@code PvPLeaderboardPlugin.onGameTick} is armed by
- * {@code GameState.LOGGED_IN} and also by {@code HOPPING}/{@code LOADING}.
- * {@code LOADING} fires on every map region load, so ordinary movement
- * re-ran the whole chain — including {@code profileGate.onLogin()},
- * which forces a cache-bypassing {@code /user} fetch, and a heartbeat
- * schedule restart. None of that can produce a different answer within
- * a session, and the resulting API traffic contributed to a client
- * being blocked by the API's WAF.
+ * <p>The delayed-init block in {@code PvPLeaderboardPlugin.onGameTick}
+ * is armed by {@code GameState.LOGGED_IN} and also by
+ * {@code HOPPING}/{@code LOADING}; {@code LOADING} fires on every map
+ * region load. The per-session part of the chain
+ * ({@code profileGate.onLogin()}'s cache-bypassing {@code /user} fetch,
+ * the heartbeat schedule restart) runs once per session.
  *
  * <p>Only the per-session work is gated on this. Genuinely per-hop work
  * (the overlay's self-rank refresh, which {@code onWorldHop}

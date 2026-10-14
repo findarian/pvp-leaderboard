@@ -25,7 +25,7 @@ public class PerfStats extends JPanel
 
     /** All-time wins/losses/ties per bucket from {@code /user} →
      *  {@code cumulative_stats}. Source of truth for the K/D summary
-     *  row — matches the website's {@code updatePerformanceOverviewDisplay}. */
+     *  row — matches the website's Performance Overview. */
     private Map<String, int[]> bucketTotals;
 
     // Cumulative opponent rank stats per bucket: bucket -> (rank -> [wins, losses])

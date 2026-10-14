@@ -100,7 +100,7 @@ public class Dashboard extends PluginPanel
     /** The lobby transport ({@code WebSocketLobbyService} in production). */
     private final LobbyService lobbyService;
 
-    /** Anti-smurf gate driving {@link MatchmakingLobbyPanel}'s per-style
+    /** Match-count gate driving {@link MatchmakingLobbyPanel}'s per-style
      *  lock state ({@code ProfileGate} in production, auto
      *  refreshed every hour via {@link PvpApi}). */
     private final JoinGate joinGate;
@@ -305,9 +305,8 @@ public class Dashboard extends PluginPanel
         tierToggle.addActionListener(e -> showAlt(tierScroll, tierToggle, tierPanel::onShown, mainPanel));
         topToggle.addActionListener(e -> showAlt(topScroll, topToggle, topPanel::onShown, mainPanel));
 
-        // Default tab: Matchmaking Lobby (per design — encourages people to
-        // explore the new lobby; stats keep loading in the background so
-        // switching to Player Lookup is instant).
+        // Default tab: Matchmaking Lobby; stats keep loading in the
+        // background so switching to Player Lookup is instant.
         setActiveTab(CARD_LOBBY);
 
         return mainPanel;
@@ -427,8 +426,8 @@ public class Dashboard extends PluginPanel
     /** Active-tab indicator: a 3px bottom underline in {@link Ui#ACCENT}. The
      *  inactive state uses the same height border but in the panel background
      *  colour, so flipping active/inactive doesn't shift the layout by a pixel.
-     *  Critically, font weight + size never change — that was the source of
-     *  the "Player Loo..." clipping bug (BOLD vs PLAIN have different metrics).
+     *  Critically, font weight + size never change (BOLD vs PLAIN have
+     *  different metrics).
      *  Also stamps {@link #TAB_ACTIVE} for test introspection. */
     private static void styleTab(JButton b, boolean active)
     {
@@ -446,9 +445,8 @@ public class Dashboard extends PluginPanel
      *  Matches {@code MatchmakingLobbyPanel.GATE_PT} so the whole
      *  sidepanel reads as one consistent typographic block.
      *
-     *  <p>Was 18pt; trimmed to 16pt because at 18pt "Player Lookup" was
-     *  clipping at the right edge of its half-width tab cell on the
-     *  default 215px sidepanel. 16pt fits comfortably with ~6px slack. */
+     *  <p>16pt fits "Player Lookup" in its half-width tab cell on the
+     *  default 215px sidepanel with ~6px slack. */
     private static final float NAV_FONT_PT = 16f;
 
     /** Per-row height the community-box buttons are sized to. Tracks
@@ -541,9 +539,9 @@ public class Dashboard extends PluginPanel
         setActiveNav(tab);
     }
 
-    // -------------------- Plan 10 step 7: queue + tournaments wiring --------------------
+    // -------------------- Queue + tournaments wiring --------------------
 
-    /** Plan 10 F.1: hands the queue transport to the lobby gate (the plugin
+    /** Hands the queue transport to the lobby gate (the plugin
      *  passes the inert service while {@code enableQuickMatch} is off). */
     public void setQueue(QueueService svc)
     {
@@ -576,7 +574,7 @@ public class Dashboard extends PluginPanel
             tourneyPanel.setGameCheck(plugin::isInGame);
             tourneyPanel.setWorldCheck(plugin::loggedInWorld);
             if (combatCheck != null) tourneyPanel.setInCombatProvider(combatCheck);
-            // Set 6: the Report gate is the same Discord login state onLoginState() reloads on.
+            // The Report gate is the same Discord login state onLoginState() reloads on.
             tourneyPanel.setDiscordLoginProvider(discordLogin::isLoggedIn);
             tourneyPanel.setMatchCountProvider(this::ownCount);
             countsHook = tourneyPanel::onCounts;
@@ -600,7 +598,7 @@ public class Dashboard extends PluginPanel
         viewBox.repaint();
     }
 
-    /** Plan 10 F.3: {@code FightMonitor::isInCombat} — drives the automatic
+    /** {@code FightMonitor::isInCombat} — drives the automatic
      *  {@code tournament/in_combat} signal. Kept so a panel built later
      *  (config flip) gets it too. */
     public void setTournamentInCombatProvider(BooleanSupplier provider)
@@ -743,7 +741,7 @@ public class Dashboard extends PluginPanel
 
     /** After a login: reload the searched player, else yourself. After a
      *  logout: reload whoever is shown. Site auth gates the Additional Stats
-     *  box; set 6: the Tournaments cards' Report buttons follow the same login. */
+     *  box; the Tournaments cards' Report buttons follow the same login. */
     private void onLoginState()
     {
         boolean loggedIn = discordLogin.isLoggedIn();
@@ -767,11 +765,10 @@ public class Dashboard extends PluginPanel
         String playerId = lookupId;
         if (playerId == null || playerId.isEmpty()) return;
         boolean nowBlocked = BlockList.toggle(playerId);
-        // Wire the toggle to the lobby/server (the server records the block
-        // and drops invites between the two players), then update the
-        // matchmaking panel at once: the server's lobby/block_added echo lands
-        // 100–500 ms later and is a no-op then (onBlockAdded short-circuits
-        // when the id is already in the set).
+        // Send the toggle to the lobby, then update the matchmaking
+        // panel at once: the lobby/block_added echo lands 100–500 ms
+        // later and is a no-op then (onBlockAdded short-circuits when
+        // the id is already in the set).
         if (nowBlocked)
         {
             lobbyService.blockById(playerId);
@@ -1185,13 +1182,10 @@ public class Dashboard extends PluginPanel
     {
         try {
             // bypassCache=true: this method runs on a SwingWorker
-            // background thread spawned from openLookup —
-            // i.e. a user gesture. The 2026-05-24 backend handoff
-            // moved shard writes to a DynamoDB-stream-driven path
-            // with ≈30 s propagation, so an explicit "look this
-            // player up" should pick up post-match rank changes
-            // instead of serving the cached payload (which could
-            // be up to 60 min stale).
+            // background thread spawned from openLookup — i.e. a user
+            // gesture — so an explicit "look this player up" picks up
+            // post-match rank changes instead of serving the cached
+            // payload (which could be up to 60 min stale).
             ShardRank sr = pvpApi.getShardRank(playerName, bucket, true)
                 .get(5, TimeUnit.SECONDS);
             return sr != null && sr.rank > 0 ? sr.rank : -1;

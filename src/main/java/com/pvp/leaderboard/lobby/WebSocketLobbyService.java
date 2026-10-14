@@ -121,9 +121,7 @@ public class WebSocketLobbyService implements LobbyService
         // The panel works against a "one fight at a time" model — there's
         // no concept of overlapping confirm windows in the UI — so the
         // service caches the most recently proposed session id and uses
-        // it here. The server-side state machine enforces the same rule:
-        // joining a fight removes you from the lobby, so overlapping
-        // sessions for one user are impossible.
+        // it here.
         String sid = liveFightId;
         if (sid == null)
         {
@@ -142,12 +140,9 @@ public class WebSocketLobbyService implements LobbyService
         else
         {
             // Socket was closed at send time (the SocketMgr
-            // backoff ladder runs 1-2-4-8 s; if Confirm is clicked
-            // during that window the frame is silently dropped today,
-            // which surfaced as the "30-second confirm window expired"
-            // QA report). Buffer the session id so the connect
-            // listener can flush it on the next onOpen — bounded by
-            // the server's confirm window via
+            // backoff ladder runs 1-2-4-8 s). Buffer the session id
+            // so the connect listener can flush it on the next
+            // onOpen — bounded by the confirm window via
             // handleSessionExpired clearing the buffer.
             heldConfirm = sid;
         }
@@ -237,10 +232,9 @@ public class WebSocketLobbyService implements LobbyService
 
     private void handleBlockListSnapshot(JsonObject data)
     {
-        // Backend pushes data={"blocked": [{player_id, name}, ...]} per
-        // get_block_list (backend/core/lobby.py). Older builds emitted a
-        // flat string array under "blocked_player_ids" — accept either
-        // shape so a partial deploy doesn't drop blocks silently.
+        // The push carries data={"blocked": [{player_id, name}, ...]}
+        // or a flat string array under "blocked_player_ids"; either
+        // shape is accepted.
         Set<String> ids = new HashSet<>();
         for (JsonElement el : optArray(data, "blocked"))
         {
@@ -295,19 +289,12 @@ public class WebSocketLobbyService implements LobbyService
         if (style == null || build == null) return;
         // Inbound wire-protocol boundary — see handleInviteReceived.
         String location = PlaceCodec.toDisplay(optString(data, "location"));
-        // Canonical wire field per BACKEND_HANDOFF_LOBBY.md §FightSession
-        // is `confirm_expires_at_epoch_ms`. The plugin previously read
-        // the wrong key (`expires_at_epoch_ms`, the IncomingInvite
-        // field), which silently defaulted the deadline to 0L and made
-        // the panel's 1-Hz fight tick exit the Confirm-Fight card on
-        // its very first tick — the user saw the popup vanish before
-        // they could click anything (QA bug 2026-05-25). Read the
-        // canonical key first; fall back to the legacy name so a
-        // partial backend deploy doesn't strand every fight; and if
-        // BOTH are missing/zero, synthesise now + the confirm window
-        // keyed to the local clock so the user still gets a usable popup.
+        // The deadline is `confirm_expires_at_epoch_ms`, else
+        // `expires_at_epoch_ms`; if BOTH are missing/zero, synthesise
+        // now + the confirm window keyed to the local clock so the
+        // user still gets a usable popup.
         //
-        // NOTE: the panel no longer trusts this absolute deadline for
+        // NOTE: the panel does not trust this absolute deadline for
         // the confirm countdown — MatchmakingLobbyPanel.LocalFightState
         // counts the confirm window off a monotonic clock so a wrong /
         // skewed client wall clock can't cut the window short. This
@@ -353,9 +340,8 @@ public class WebSocketLobbyService implements LobbyService
         LobbyMember opponent = resolveOpponent(data);
         queueOpps.remove(sid);
         if (opponent == null) return;
-        // Server has already deleted both LobbyMembers rows + the
-        // session at this point — the lobby state is consumed, clear
-        // our local session-id cache. Also drop any buffered confirm
+        // The lobby session is consumed at this point — clear our
+        // local session-id cache. Also drop any buffered confirm
         // for this session: the match landed, so a late flush would
         // be a no-op at best, an error/lobby at worst.
         liveFightId = null;
@@ -388,7 +374,7 @@ public class WebSocketLobbyService implements LobbyService
         // Surfaced at WARN because error/lobby pushes are exceptional
         // by definition — the user is going to ask why their fight
         // button didn't work, and the answer is almost always in this
-        // single log line (RANK_OUT_OF_RANGE, BLOCKED, SMURF_GUARD…).
+        // single log line (RANK_OUT_OF_RANGE, BLOCKED…).
         log.warn("WebSocketLobbyService: error/lobby code={} message={}", code, message);
         LobbyEventListener l = listener;
         if (l == null) return;

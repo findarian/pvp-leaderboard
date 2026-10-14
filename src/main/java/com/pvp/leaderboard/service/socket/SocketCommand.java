@@ -5,9 +5,7 @@ import com.google.gson.*;
 /**
  * Immutable wire-envelope value object for socket-lobby traffic. Both
  * directions (client→server cmds and server→client pushes) share the
- * same shape per the locked decision in
- * {@code OSRS-MMR/lambda_code/docs/WEBSOCKET_PROTOCOL.md §0.2}
- * ("symmetric envelope"):
+ * same shape:
  *
  * <pre>{ "cmd": "&lt;namespace&gt;/&lt;verb&gt;", "data": { ... } }</pre>
  *
@@ -19,8 +17,7 @@ import com.google.gson.*;
  * factory methods in {@link SocketProtocol} (encode side) or parsed
  * straight off the wire by {@link com.google.gson.Gson#fromJson} (decode
  * side). The {@link #data} object is never null — empty payloads use
- * {@code new JsonObject()} per the protocol's
- * {@code "data": {}} rule (§2 "always an object, never null or omitted").
+ * {@code new JsonObject()}.
  */
 public final class SocketCommand
 {

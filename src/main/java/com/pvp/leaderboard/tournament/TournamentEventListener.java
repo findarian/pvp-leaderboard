@@ -4,12 +4,12 @@ import com.google.gson.*;
 import java.util.*;
 
 /**
- * Server-push callbacks for the Swiss tournaments (Plan 10 Part C / F.3),
+ * Server-push callbacks for the Swiss tournaments,
  * registered with the {@link TourneySvc}. Every callback is delivered
  * on the Swing EDT (the {@code TourneySvc} marshals), so
  * panels may touch Swing directly and the session tracker / overlay
  * supplier read plain volatile fields. All methods are {@code default}
- * no-ops. Mirrors WEBSOCKET_PROTOCOL.md § 6.3 (server → client).
+ * no-ops.
  */
 public interface TournamentEventListener
 {
@@ -60,7 +60,7 @@ public interface TournamentEventListener
     /** {@code error/tournament} — stable code + message; {@code cmd} echoes the rejected cmd. */
     default void onTournamentError(String code, String message, String cmd) {}
 
-    /** Not a push: the socket (re)opened (set 7). The transport tells its
+    /** Not a push: the socket (re)opened. The transport tells its
      *  listeners from the manager's connect hook, on the EDT, so a panel
      *  that asked for the list while the socket was down asks again. */
     default void onConnected() {}

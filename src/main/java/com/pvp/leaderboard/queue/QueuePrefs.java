@@ -5,26 +5,21 @@ import com.pvp.leaderboard.util.*;
 
 /**
  * The shared matchmaking preferences carried by a {@code queue/prefs}
- * push (WEBSOCKET_PROTOCOL.md § 6.2b) — the plugin's inbound half of
- * parity gap <b>G-2</b>. The same {@code OSRS-MatchmakingPrefs} row backs
- * the plugin's gate pickers and the Discord modal, so a wait time or rank
- * range set on either surface has to land on the other.
+ * push. The plugin's gate pickers and the Discord modal share them, so a
+ * wait time or rank range set on either surface lands on the other.
  *
- * <p><b>Tri-state on purpose.</b> The wire distinguishes three things and
- * so does this object: a key the server did not send states nothing and
- * must not overwrite a local pick; an explicit {@code null}
- * {@code rank_range} is the server saying "no range"; an object turns the
- * range on. {@link #waitPrefS} is {@link QueueState#UNKNOWN} when unstated
- * and {@link #rangeEnabled} is {@code null} when unstated.
+ * <p><b>Tri-state.</b> The wire distinguishes three things and so does
+ * this object: a key the push did not send states nothing and must not
+ * overwrite a local pick; an explicit {@code null} {@code rank_range}
+ * means "no range"; an object turns the range on. {@link #waitPrefS} is
+ * {@link QueueState#UNKNOWN} when unstated and {@link #rangeEnabled} is
+ * {@code null} when unstated.
  *
- * <p><b>Nothing here is required.</b> Plugin releases take days and cannot
- * be reverted (CLAUDE.md § 10), so the backend must keep serving the
- * previous client: every field is optional, wrong types degrade to
- * "unstated" and unknown fields are ignored rather than rejected. The
- * server's own keys that the plugin has no picker for ({@code region},
- * {@code style}, {@code build}, {@code location},
- * {@code auto_switch_bucket}, {@code discord_user_id}) are deliberately
- * not read here — the gate owns those locally.
+ * <p>Every field is optional: wrong types degrade to "unstated" and
+ * unknown fields are ignored. Keys the plugin has no picker for
+ * ({@code region}, {@code style}, {@code build}, {@code location},
+ * {@code auto_switch_bucket}, {@code discord_user_id}) are not read
+ * here — the gate owns those locally.
  */
 public final class QueuePrefs
 {

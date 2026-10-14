@@ -130,9 +130,9 @@ public final class Tourney
 
     /** {@code rank_limits: {<bucket>: {min_idx?, max_idx?}}} → one
      *  {@link RankLimit} per bucket that carries at least one numeric bound,
-     *  in bucket order (what {@code discord_tournament_messages._rank_limit_parts}
-     *  prints). Junk — not an object, a non-object bucket, a non-numeric
-     *  bound — is skipped, never thrown on. */
+     *  in bucket order (the order Discord prints them). Junk — not an
+     *  object, a non-object bucket, a non-numeric bound — is skipped, never
+     *  thrown on. */
     static List<RankLimit> limitsFrom(JsonObject o)
     {
         JsonObject limits = optObject(o, "rank_limits");
@@ -198,7 +198,7 @@ public final class Tourney
         return style.isEmpty() ? "Main" : Character.toUpperCase(style.charAt(0)) + style.substring(1);
     }
 
-    /** The bucket label the Discord messages use ({@code STYLE_LABELS}): nh → NH, dmm → DMM, else capitalised; {@code "?"} for none. */
+    /** The bucket label the Discord messages use: nh → NH, dmm → DMM, else capitalised; {@code "?"} for none. */
     public static String categoryLabel(String category)
     {
         return "nh".equals(category) ? "NH" : "dmm".equals(category) ? "DMM" : category.isEmpty() ? "?" : Character.toUpperCase(category.charAt(0)) + category.substring(1);

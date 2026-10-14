@@ -26,8 +26,7 @@ public class RankOverlay extends Overlay
     private final PvpApi pvpApi;
     /** Opt-in membership set from the snapshot/delta feed (names only). The
      *  overlay gates rendering on this; rank itself comes from the name-keyed
-     *  shards (see {@link #fetchSceneRankIfNeeded}). Replaces the
-     *  whitelist.json membership blob (see PLAN_PRESENCE_FRESHNESS.md). */
+     *  shards (see {@link #fetchSceneRankIfNeeded}). */
     private final MemberCache memberCache;
 
     // Resolved rank labels keyed by canonical name — populated by the
@@ -42,15 +41,11 @@ public class RankOverlay extends Overlay
     private final ConcurrentHashMap<String, Long> rankShownMs = new ConcurrentHashMap<>();
 
     /** How long a peer's rank label may go without a re-resolution
-     *  attempt (exactly one interval old counts as due). Without this, a
-     *  label resolved once was pinned for the whole session: the scene loop
-     *  only looks a player up when it has NO label, so an existing entry
-     *  short-circuited every later read and
-     *  {@code PvpApi}'s 6h shard TTL was never reached for overhead
-     *  ranks. Deliberately far below that TTL so a refresh lands on the next
-     *  shard generation shortly after it expires; refreshes inside the TTL
-     *  are served from the in-memory shard cache, so the added CDN cost is
-     *  one read per player per 6h. Pinned by RankOverlayPeerRankRefreshTest. */
+     *  attempt (exactly one interval old counts as due). Far below
+     *  {@code PvpApi}'s 6h shard TTL so a refresh lands on the next shard
+     *  generation shortly after it expires; refreshes inside the TTL are
+     *  served from the in-memory shard cache. Pinned by
+     *  RankOverlayPeerRankRefreshTest. */
     static final long PEER_RANK_MS = 15L * 60L * 1000L;
 
     // API-set ranks that should persist until shard cache refreshes with matching data
@@ -87,7 +82,7 @@ public class RankOverlay extends Overlay
     /** Negative backoff for the profile-API fallback used when a scene
      *  player misses the CDN shard. The shard GET is cheap +
      *  CDN/negative-cached, but the {@code /user} profile fetch is a
-     *  Lambda+DynamoDB call, so a player who resolves in NEITHER shard nor
+     *  full API call, so a player who resolves in NEITHER shard nor
      *  profile must not re-hit /user on every {@link #SHARD_GAP_MS}
      *  tick. Positive resolutions are cached permanently in
      *  {@link #shownRanks}, so this only rate limits
@@ -451,7 +446,7 @@ public class RankOverlay extends Overlay
             // the current value, so a peer who ranked up mid-session stops
             // showing a label frozen at whatever it was when we first saw
             // them. Shard only: we already have something to display, so a
-            // miss must not escalate to the /user Lambda.
+            // miss must not escalate to the /user API.
             Long setAt = rankShownMs.get(nameKey);
             if (setAt == null || currentTimeMillis() - setAt >= PEER_RANK_MS)
             {
@@ -482,11 +477,10 @@ public class RankOverlay extends Overlay
      *   <li><b>Shard</b> (passive, cache-first): served from the 6h
      *       positive shard cache, or the missing-player negative cache,
      *       so a crowded scene doesn't re-hit the CDN every retry.</li>
-     *   <li><b>Profile API fallback</b> on a shard miss: players the shard
-     *       writer hasn't picked up for this bucket only resolve via the
-     *       {@code /user} endpoint. Rate-limited by
-     *       {@link #MISS_WAIT_MS} so an unresolvable
-     *       player doesn't hammer the Lambda+DynamoDB path.</li>
+     *   <li><b>Profile API fallback</b> on a shard miss: players missing
+     *       from this bucket's shard only resolve via the {@code /user}
+     *       endpoint. Rate-limited by {@link #MISS_WAIT_MS} so an
+     *       unresolvable player doesn't hammer it.</li>
      * </ol>
      * Throttled to one in-flight attempt per player and
      * {@link #SHARD_GAP_MS} between attempts so render() never
@@ -499,7 +493,7 @@ public class RankOverlay extends Overlay
      * @param useProfile whether a shard miss may escalate to
      *        the {@code /user} profile API. True for a player with no
      *        label at all, false for a periodic refresh of a label we can
-     *        already render — the fallback is a Lambda+DynamoDB call and
+     *        already render — the fallback is a full API call and
      *        isn't worth paying to confirm a rank we're already showing.
      */
     private void fetchSceneRankIfNeeded(String playerName, String bucket, String nameKey,
@@ -507,9 +501,8 @@ public class RankOverlay extends Overlay
     {
         long now = currentTimeMillis();
         // A player never attempted has no stamp. A null last-attempt
-        // timestamp must never be unboxed into a primitive here: that NPE,
-        // swallowed by the render() wrapper, once silently blocked EVERY
-        // scene rank resolution.
+        // timestamp must never be unboxed into a primitive here: the
+        // render() wrapper would swallow that NPE.
         Long lastAttempt = shardTriedMs.get(nameKey);
         if (lastAttempt != null && now - lastAttempt < SHARD_GAP_MS || !shardBusy.add(nameKey))
         {
@@ -543,11 +536,10 @@ public class RankOverlay extends Overlay
                     shardBusy.remove(nameKey);
                     return;
                 }
-                // Shard miss — fall back to the profile API. Players the
-                // shard writer hasn't picked up for this bucket (e.g. "RUN
-                // PIGGY") only resolve via /user. Rate-limited by a negative
-                // backoff so an unresolvable player doesn't re-hit the
-                // Lambda+DynamoDB path on every scene-retry tick.
+                // Shard miss — fall back to the profile API. Players missing
+                // from this bucket's shard only resolve via /user. Rate-limited
+                // by a negative backoff so an unresolvable player doesn't re-hit
+                // /user on every scene-retry tick.
                 Long missUntil = missUntilMs.get(nameKey);
                 if (missUntil != null && currentTimeMillis() < missUntil)
                 {

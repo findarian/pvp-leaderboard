@@ -4,12 +4,12 @@ import com.google.gson.*;
 import java.util.function.*;
 
 /**
- * Null- and type-tolerant readers for server-pushed JSON (Plan 10,
- * 2026-09-21). Every socket push is parsed on OkHttp's read-loop thread,
- * where a {@code ClassCastException} from a missing or re-typed key would
- * be swallowed by the event bus and silently drop the frame; these
- * helpers make a partial payload degrade to a neutral value instead.
- * Shared by the queue and tournament wire adapters.
+ * Null- and type-tolerant readers for server-pushed JSON. Every socket
+ * push is parsed on OkHttp's read-loop thread, where a
+ * {@code ClassCastException} from a missing or re-typed key would be
+ * swallowed by the event bus and silently drop the frame; these helpers
+ * make a partial payload degrade to a neutral value instead. Shared by
+ * the queue and tournament wire adapters.
  */
 public final class JsonLenient
 {

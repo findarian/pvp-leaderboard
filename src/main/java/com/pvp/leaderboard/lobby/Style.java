@@ -1,8 +1,7 @@
 package com.pvp.leaderboard.lobby;
 
 /**
- * Fight styles the lobby supports. Matches the server's
- * {@code ALLOWED_STYLES = {nh,veng,multi,dmm}} validation set.
+ * Fight styles the lobby supports.
  *
  * <p>Declaration order is the on-screen order used by the pre-lobby
  * gate's style-toggle row and the per-row chip strip — keep it stable

@@ -16,7 +16,7 @@ import static com.pvp.leaderboard.ui.Ui.*;
  * one row per account: <code>#rank &nbsp; Player Name &nbsp; Rank</code>, sized
  * to the largest font the sidepanel width allows.
  *
- * <p>Reads the exact same cached S3 artifact the website uses
+ * <p>Reads the same cached file the website uses
  * ({@code /leaderboard[_<bucket>].json}) via
  * {@link PvpApi#getLeaderboard(String)} — a single CDN call cached
  * ~1 hour. A bucket toggle ([Overall][NH][Veng][Multi][DMM][Tournament], NH
@@ -208,9 +208,8 @@ public class TopPlayers extends RowsPanel
         name.setName("topPlayerName");
         name.setForeground(Color.WHITE);
 
-        // Rank tier only — the in-tier "% to next" used to sit here, but it
-        // was the widest thing in the row and bought the least: it pushed
-        // the auto-fit down and squeezed the player name.
+        // Rank tier only (no in-tier "% to next"), so the auto-fit
+        // leaves the player name its width.
         var tier = new JLabel(r.tierLabel);
         tier.setName("topPlayerTier");
         tier.setForeground(RankUtils.getRankColor(r.rankFamily));
@@ -247,7 +246,7 @@ public class TopPlayers extends RowsPanel
      * rows, mirroring the website's {@code fetchLeaderboard} exactly:
      * <ol>
      *   <li>keep only rows with an account id + finite MMR;</li>
-     *   <li>de-duplicate by account ({@code account_hash || account}) — the S3
+     *   <li>de-duplicate by account ({@code account_hash || account}) — the
      *       file can carry more than one row per account — unioning names in
      *       first-seen order and keeping the highest-MMR entry's rank/division;</li>
      *   <li>sort by MMR descending, assign world rank by position;</li>

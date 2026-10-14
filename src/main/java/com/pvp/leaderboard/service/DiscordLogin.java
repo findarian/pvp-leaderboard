@@ -15,30 +15,20 @@ import net.runelite.client.util.*;
 import okhttp3.*;
 
 /**
- * "Login with Discord" service — loopback-free, server-brokered handshake.
- *
- * <p>Discord is a <b>confidential</b> OAuth client, so the plugin cannot
- * exchange the authorization {@code code} itself (the token endpoint needs the
- * {@code client_secret}). The old flow ran a {@code http://127.0.0.1:49215}
- * loopback HTTP server and surfaced a raw localhost page in the browser. This
- * flow removes the loopback entirely:
+ * "Login with Discord" service.
  *
  * <ol>
- *   <li>{@code GET /auth/discord/plugin-init} — the backend mints a
- *       {@code login_id} (== OAuth {@code state}) + PKCE (verifier held
- *       server-side) and returns {@code {login_id, authorize_url}}.</li>
- *   <li>Open {@code authorize_url} in the browser. The OAuth redirect lands on
- *       a <b>hosted</b> page on {@code pvp-leaderboard.com} (NOT
- *       {@code 127.0.0.1}); that page relays {@code {code, state}} to the
- *       backend, which performs the secret-bearing exchange and stores a
- *       minimal session.</li>
+ *   <li>{@code GET /auth/discord/plugin-init} returns
+ *       {@code {login_id, authorize_url}}.</li>
+ *   <li>Open {@code authorize_url} in the browser; the OAuth redirect lands
+ *       on a hosted page on {@code pvp-leaderboard.com}.</li>
  *   <li>The plugin polls {@code GET /auth/discord/plugin-poll?login_id=} until
  *       {@code status=complete} and adopts the returned minimal session.</li>
  * </ol>
  *
- * <p>The plugin never sees the Discord access token or the client secret —
- * only the minimal session (Discord id + display name). {@link #isLoggedIn()}
- * reflects "a Discord identity was linked this session".
+ * <p>The plugin only receives the minimal session (Discord id + display
+ * name). {@link #isLoggedIn()} reflects "a Discord identity was linked this
+ * session".
  */
 public class DiscordLogin
 {
@@ -76,7 +66,7 @@ public class DiscordLogin
     }
 
     /**
-     * Start a loopback-free Discord login. Resolves {@code true} once a minimal
+     * Start a Discord login. Resolves {@code true} once a minimal
      * session has been adopted, {@code false} on cancel/timeout/error.
      */
     public CompletableFuture<Boolean> login()

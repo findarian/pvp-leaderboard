@@ -5,10 +5,10 @@ import java.util.*;
 import static com.pvp.leaderboard.util.JsonLenient.*;
 
 /**
- * A {@code tournament/standings} push (Plan 10 Part C / C.8): the live
+ * A {@code tournament/standings} push: the live
  * leaderboard of one tournament plus the round clock. Pushed at once
  * after {@code tournament/subscribe} and on every score change while
- * subscribed; the same payload feeds the website (IoT) and Discord.
+ * subscribed.
  */
 public final class TourneyBoard
 {

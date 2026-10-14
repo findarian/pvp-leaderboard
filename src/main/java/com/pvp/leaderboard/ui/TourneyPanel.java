@@ -228,8 +228,8 @@ public class TourneyPanel extends JPanel implements TournamentEventListener
     }
 
     /** The dashboard wires {@code DiscordLogin::isLoggedIn} — the
-     *  Report gate: a report is accepted only from a player logged in with
-     *  Discord, so the button follows the plugin's own login state. */
+     *  Report gate: the button follows the plugin's own Discord login
+     *  state. */
     public void setDiscordLoginProvider(BooleanSupplier provider)
     {
         discordLoggedIn = provider;
@@ -1278,9 +1278,9 @@ public class TourneyPanel extends JPanel implements TournamentEventListener
         reportProblem(activeId, text);
     }
 
-    /** One sender for both surfaces (the transport trims and drops blank text). The
-     *  Discord-login gate lives on the buttons and on the server, whose answer
-     *  becomes a banner. */
+    /** One sender for both surfaces (the transport trims and drops blank text).
+     *  The Discord-login gate lives on the buttons; a refusal becomes a
+     *  banner. */
     void reportProblem(String tournamentId, String text)
     {
         service.reportProblem(tournamentId, text);
@@ -1295,9 +1295,9 @@ public class TourneyPanel extends JPanel implements TournamentEventListener
 
     // ---------------------------------------------------------------- rules
     /** A card's Rules button: the in-panel page when the entry carries a
-     *  rules block, else the event's {@code rules_url} in the browser (an
-     *  older backend, or a junk block — {@code TourneyRules.fromJson}
-     *  already read that as absent). */
+     *  rules block, else the event's {@code rules_url} in the browser (no
+     *  block, or a junk one — {@code TourneyRules.fromJson} already read
+     *  that as absent). */
     void openRules(Tourney t)
     {
         if (t == null) return;
@@ -1791,9 +1791,8 @@ public class TourneyPanel extends JPanel implements TournamentEventListener
         showBanner(friendlyError(code, message));
     }
 
-    /** The banner for an {@code error/tournament}. The server's own sentence for the report gate
-     *  ({@code DISCORD_NOT_LINKED}, {@code REPORT_RATE_LIMITED}: discord_tournament_messages
-     *  REPORT_LINK_REQUIRED_TEXT / REPORT_RATE_LIMITED_TEXT), a state refusal and an update request. */
+    /** The banner for an {@code error/tournament}: the server's own sentence for the report gate
+     *  ({@code DISCORD_NOT_LINKED}, {@code REPORT_RATE_LIMITED}), a state refusal and an update request. */
     static String friendlyError(String code, String message)
     {
         switch (code)

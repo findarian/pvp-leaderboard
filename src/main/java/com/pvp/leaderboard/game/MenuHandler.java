@@ -85,8 +85,7 @@ public class MenuHandler
             // Open plugin side panel first so the panel exists/visible by the time
             // we ask it to switch tabs. openLookup() handles its own EDT
             // marshalling + forces the Player Lookup tab to the foreground (the
-            // 2-tab revamp introduced the Matchmaking Lobby as the default; the
-            // old single-view code didn't need to switch).
+            // Matchmaking Lobby is the default tab).
             if (navButton != null) {
                 SwingUtilities.invokeLater(() -> clientToolbar.openPanel(navButton));
             }

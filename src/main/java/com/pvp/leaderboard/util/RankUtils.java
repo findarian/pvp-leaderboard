@@ -142,8 +142,7 @@ public class RankUtils
 
     /**
      * Total population recorded in a rank histogram artifact
-     * ({@code rank_hist/<bucket>.json}, produced by the infra-side
-     * {@code backend/core/rank_histogram.py}). Returns {@code 0} for a
+     * ({@code rank_hist/<bucket>.json}). Returns {@code 0} for a
      * {@code null}, empty, or malformed histogram (all of which throw
      * below) so callers can render "No one yet" without special-casing
      * failures.
@@ -202,8 +201,7 @@ public class RankUtils
      * <p>The empty-tier label is kept short on purpose: it's the widest
      * string in that view, and the view sizes all 25 rows to fit its
      * widest row, so every extra character shrinks every rank name on
-     * screen. The previous "No one currently here" cost ~5pt across the
-     * whole list.
+     * screen.
      *
      * <p>Precision scales with the magnitude so the exclusive top tiers stay
      * legible: whole numbers at/above 10%, one decimal in {@code [1%, 10%)},

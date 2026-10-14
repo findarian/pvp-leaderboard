@@ -11,18 +11,16 @@ import javax.inject.*;
 import javax.swing.*;
 
 /**
- * {@link QueueService} over the plugin's WebSocket (Plan 10 Part B / F.1,
- * 2026-09-21). Encodes the {@code queue/*} cmds and turns the server
- * pushes + {@code error/queue} into EDT-delivered
- * {@link QueueEventListener} callbacks.
+ * {@link QueueService} over the plugin's WebSocket. Encodes the
+ * {@code queue/*} cmds and turns the server pushes + {@code error/queue}
+ * into EDT-delivered {@link QueueEventListener} callbacks.
  *
- * <p>Reconnect: after a socket re-open the server's row may or may not
- * still exist (queue rows expire with the wait preference), so the
- * service re-asks with {@code queue/status} instead of replaying the
- * join — the panel re-renders from the answer.
+ * <p>Reconnect: after a socket re-open the service re-asks with
+ * {@code queue/status} instead of replaying the join — the panel
+ * re-renders from the answer.
  *
- * <p>No UUIDs: {@code queue/join} carries region / style / build / range
- * / wait only; the server keys the row on the trusted connection.
+ * <p>{@code queue/join} carries region / style / build / range / wait
+ * only.
  */
 @Singleton
 public class WebSocketQueueService implements QueueService
@@ -60,7 +58,7 @@ public class WebSocketQueueService implements QueueService
         bus.register("error/queue", this::handleError);
         bus.register("queue/recent_list", this::handleRecent);
         // ONE re-sync listener: on a socket (re-)open, ask for the live queue
-        // row and re-read the shared prefs row (G-2) in the same hook, and the
+        // row and re-read the shared prefs row in the same hook, and the
         // recent joins while the Matchmaking tab is open.
         socket.addResyncListener(() ->
         {
@@ -95,7 +93,7 @@ public class WebSocketQueueService implements QueueService
         return rr;
     }
 
-    /** Snaps any value onto the shared choice list (AS-64). */
+    /** Snaps any value onto the shared choice list. */
     static int snapWait(int waitPrefS)
     {
         return WAIT_CHOICES[QueueService.waitIndex(waitPrefS)];
@@ -139,15 +137,14 @@ public class WebSocketQueueService implements QueueService
         socket.send("queue/recent", new JsonObject());
     }
 
-    // ---- shared preferences (G-2) ----
+    // ---- shared preferences ----
 
     @Override
     public void requestPrefs()
     {
-        // An EMPTY prefs object: matchmaking_queue.save_prefs validates it
-        // to {}, merges nothing, and answers queue/prefs with the stored
-        // row. A read without a backend change — and without the risk of
-        // pushing a stale local value over one set from Discord.
+        // An EMPTY prefs object: answered with queue/prefs carrying the
+        // stored preferences, without pushing a stale local value over one
+        // set from Discord.
         sendPrefs(new JsonObject());
     }
 
@@ -184,10 +181,7 @@ public class WebSocketQueueService implements QueueService
     {
         QueueState state = QueueState.fromJson(d);
         onEdt(l -> l.onQueueState(state));
-        // Forward compatibility with the G-2 backend half: when
-        // matchmaking_queue.status_snapshot starts carrying an additive
-        // `prefs` object, this client already applies it — no second
-        // plugin release needed (CLAUDE.md § 10).
+        // An additive `prefs` object on queue/state is applied too.
         JsonObject prefs = JsonLenient.optObject(d, "prefs");
         if (prefs != null) onEdt(l -> l.onQueuePrefs(prefs));
     }

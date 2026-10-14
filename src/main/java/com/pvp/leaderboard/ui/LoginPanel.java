@@ -189,8 +189,7 @@ public class LoginPanel extends JPanel
         if (loggingIn)
         {
             // The button doubles as "Cancel login" while a handshake is in
-            // flight (the OAuth redirect now lands on a hosted page, so login
-            // takes a browser round-trip + polling).
+            // flight (login takes a browser round-trip + polling).
             discordLogin.cancelLogin();
             setLoginBusy(false);
             return;

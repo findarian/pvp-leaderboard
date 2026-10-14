@@ -8,15 +8,8 @@ import java.util.*;
  * <p>The {@link MatchmakingLobbyPanel}'s sub-location pickers
  * surface display strings — {@code "Arena"} / {@code "Wildy"} /
  * {@code "FFA Portal"} for NH and {@code "Wilderness"} /
- * {@code "Clan Wars"} for Multi — while the backend's
- * {@code ALLOWED_LOCATIONS_BY_STYLE} validator
- * (in {@code backend/core/lobby.py}) expects a tight canonical enum
- * {@code {arena, wildy, ffa, wilderness, clan_wars, none}} on the
- * wire. Without translation the picker would send {@code "FFA Portal"}
- * and the server would reject the invite with {@code INVALID_LOCATION}
- * before the row was even minted (operator report 2026-05-25 — exact
- * symptom on the screenshot of the {@code "That fight location isn't
- * supported. Pick a different one."} toast).
+ * {@code "Clan Wars"} for Multi — while the wire carries the canonical
+ * values {@code {arena, wildy, ffa, wilderness, clan_wars, none}}.
  *
  * <p>This codec is the single point of conversion at the wire
  * boundary in {@link WebSocketLobbyService}. The {@link
@@ -26,17 +19,9 @@ import java.util.*;
  * ({@code inviteLabel}, {@code formatSetup},
  * {@code meetAtPlace}) read cleanly without churn.
  *
- * <p><strong>Symmetry with the backend.</strong> The backend has a
- * <em>lenient</em> validator layer (commit
- * {@code p2-lobby-location-display-aliases}, 2026-05-25) that also
- * accepts the plugin's display strings as aliases — kept as
- * defense-in-depth + back-compat for older plugin builds. With this
- * codec live, the wire is canonical end-to-end and the backend's
- * lenient layer is a no-op for new clients.
- *
  * <p><strong>Veng / DMM convention.</strong> Those styles have no
  * sub-location picker — the panel passes {@code null} or
- * {@code ""} when constructing invites. The backend's canonical
+ * {@code ""} when constructing invites. The wire's
  * sentinel for "world-only, no sub-location" is the literal string
  * {@code "none"}. {@link #toCanonical} maps both
  * {@code (VENG, null)} and {@code (DMM, "")} (and every combination
@@ -72,7 +57,7 @@ public final class PlaceCodec
      *
      * <p>{@code null} / empty / unrecognised inputs pass through
      * (empty stays empty; unrecognised renders verbatim so it
-     * surfaces in CloudWatch-via-debug-logs rather than vanishing).
+     * surfaces in the debug logs rather than vanishing).
      */
     public static String toDisplay(String canonOrNull)
     {

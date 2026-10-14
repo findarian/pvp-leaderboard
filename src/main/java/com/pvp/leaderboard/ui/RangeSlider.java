@@ -19,8 +19,7 @@ import java.util.List;
  *       nav + filters + roster + chat all share ~700px).</li>
  *   <li>{@link JSlider} reserves a "thumb-radius" inset on each side of
  *       its track which makes the track visually offset from the panel's
- *       left edge — that was the source of the "left-side gap" the user
- *       called out. This widget paints the track edge-to-edge.</li>
+ *       left edge. This widget paints the track edge-to-edge.</li>
  *   <li>The Substance L&F draws JSlider in a way that ignores opacity
  *       overrides, making it impossible to colour-match the lobby palette.</li>
  * </ul>

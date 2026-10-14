@@ -5,13 +5,9 @@ package com.pvp.leaderboard.lobby;
  * the fight. Sent by the server via {@code lobby/match_found}.
  *
  * <p>{@link #world} is the world number the players should world-hop to
- * (e.g. {@code "W370"} for NA Arena), resolved server-side per the
- * style + location + both players' regions. The client renders this
- * verbatim — no client-side world-picking — so the world tables can be
- * updated server-side without a plugin release. {@link #meetingPlace}
- * is the in-game meeting spot per style+location (e.g. {@code "Arena"},
- * {@code "Ferox Enclave"}, {@code "Grand Exchange"}), also resolved
- * server-side.
+ * (e.g. {@code "W370"}), rendered verbatim. {@link #meetingPlace} is the
+ * in-game meeting spot (e.g. {@code "Arena"}, {@code "Ferox Enclave"},
+ * {@code "Grand Exchange"}).
  *
  * <p>Pure immutable data carrier. The panel renders this in its Meet-At
  * view (the terminal state of the fight flow).

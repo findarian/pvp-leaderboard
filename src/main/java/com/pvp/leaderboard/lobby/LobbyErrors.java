@@ -22,8 +22,7 @@ public final class LobbyErrors
     /** {@code FIGHT_SESSION_EXPIRED}, and the queue's idle {@code reason} {@code expired}. */
     public static final String MATCH_EXPIRED = "Your match expired before both players confirmed.";
 
-    /** Stable code → user-facing string map. Keep in sync with the
-     *  server-side error enum every time a new code is added. */
+    /** Stable code → user-facing string map. */
     private static final Map<String, String> MESSAGES;
     static
     {

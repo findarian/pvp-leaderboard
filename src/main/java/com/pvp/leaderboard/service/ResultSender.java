@@ -17,7 +17,7 @@ public class ResultSender
 {
     private static final String API_URL = PvpConsts.API_BASE_URL + "/matchresult";
     private static final String CLIENT_ID = "runelite";
-    // This is meant to be hardcoded and be this value for everyone. New versions of the plugin will update this on the backend so that it doesn't take matches from old clients if there is an incompatibility added.
+    // The shared match-signing key, the same for every install.
     private static final String HMAC_SECRET = "7f2f6a0e-2c6b-4b1d-9a39-6f2b2a8a1f3c"; 
     private static final MediaType JSON = MediaType.parse("application/json; charset=utf-8");
 
@@ -63,9 +63,7 @@ public class ResultSender
 
             String bodyJson = buildBody(match);
 
-            // HMAC-signed submission is the sole path. The plugin holds no
-            // user token (Discord login does not mint one for the client),
-            // so every match is authenticated by the shared client secret.
+            // Every match is HMAC-signed with the shared client secret.
             return submitSigned(bodyJson, match.getClientUniqueId()).exceptionally(ex -> false);
         }
         catch (Exception e)

@@ -44,7 +44,7 @@ public class LobbyPrefs
 
     public static final String KEY_REGION = "lobbyRegion";
 
-    /** Plan 10 F.1 (2026-09-21): the queue's own picks — the wait preference
+    /** The queue's own picks — the wait preference
      *  (seconds, one of QueueService.WAIT_CHOICES; also the server-side
      *  shared pref) and the optional rank range for the queue, kept apart
      *  from the lobby slider so the two features never fight over one key. */
@@ -84,7 +84,7 @@ public class LobbyPrefs
         return new LobbyPrefs();
     }
 
-    // -------------------- Queue (Plan 10 F.1) --------------------
+    // -------------------- Queue --------------------
 
     public int getWaitPrefS(int defaultValue)
     {

@@ -16,8 +16,7 @@ import static java.awt.RenderingHints.*;
  *
  * <p>Painted in the same OSRS Collection-Log palette as
  * {@link MatchFoundNotificationOverlay} so the two popups visually
- * rhyme, but with two deliberate differences dictated by the
- * ban-warning product spec:
+ * rhyme, with two differences:
  * <ul>
  *   <li>It carries an explicit <b>OK</b> button the user must click to
  *       acknowledge — it does not silently fade away like the
@@ -45,7 +44,7 @@ public final class PluginDisableWarningOverlay extends Popup
     /** Total on-screen window (safety self-dismiss). */
     static final long VISIBLE_MS = 10_000L;
 
-    /** The exact warning copy required by the product spec. */
+    /** The warning copy. */
     static final String[] BODY_LINES = {
         "Turning off a plugin mid fight will",
         "result in you being banned from",

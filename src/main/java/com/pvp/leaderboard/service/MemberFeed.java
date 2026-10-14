@@ -14,11 +14,7 @@ import okhttp3.*;
 
 /**
  * Fetches the rank-overlay MEMBERSHIP feed (names only) and maintains
- * {@link MemberCache}.
- *
- * <p>Replaces the per-poll {@code whitelist.json} download (which bundled
- * membership + rank into one O(N) blob every client re-pulled every poll →
- * O(N^2) egress). Here:</p>
+ * {@link MemberCache}:
  * <ul>
  *   <li>{@code plugin-users/snapshot.json} — full member set, fetched once on
  *       login + ETag-revalidated (304 the rest of the day).</li>
@@ -27,11 +23,8 @@ import okhttp3.*;
  * </ul>
  *
  * <p>Rank is NOT in this feed — the overlay resolves rank per on-screen name
- * via the name-keyed {@code rank_idx} shards. See PLAN_PRESENCE_FRESHNESS.md.</p>
- *
- * <p>The plugin uses ONLY this feed for membership; the legacy
- * {@code whitelist.json} path is retired client-side (the backend keeps it as
- * a fallback). Heartbeats still flow via {@link WhitelistService}.</p>
+ * via the name-keyed {@code rank_idx} shards. Heartbeats flow via
+ * {@link WhitelistService}.</p>
  */
 @Singleton
 public class MemberFeed
@@ -41,7 +34,7 @@ public class MemberFeed
     private static final String DELTA_URL =
         PvpConsts.SITE_URL + "/plugin-users/delta.json";
 
-    /** Matches the backend membership_generator 10-min delta cadence. */
+    /** The delta poll cadence (10 minutes). */
     private static final long DELTA_MS = 10L * 60L * 1000L;
 
     private final OkHttpClient okHttpClient;

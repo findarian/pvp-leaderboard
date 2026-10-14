@@ -3,22 +3,14 @@ package com.pvp.leaderboard.util;
 import java.util.*;
 
 /**
- * The backend's Overall rating, mirrored for the tier graph's locally
- * computed "Overall" history (parity gap G-16, operator decision
- * 2026-09-22). Keep in step with {@code backend/core/buckets.py}
- * ({@code STANDARD_WEIGHTS}, {@code TOURNAMENT_WEIGHT},
- * {@code with_tournament}, {@code missing_overrides}) and
- * {@code backend/core/mmr.compute_overall_with_tournament} — the same
- * obligation {@link RankUtils} carries for the rank thresholds.
+ * The Overall rating for the tier graph's locally computed "Overall"
+ * history.
  *
  * <p>The formula is a plain weighted SUM, never normalised: the four
  * standard buckets at {@code nh 0.55 / veng 0.30 / multi 0.05 / dmm 0.10}
  * (a bucket with no rating counts as {@link #DEFAULT_MU}), plus
  * {@code 0.10 × tournament} <b>on top</b> of that 100 %. The tournament
- * term exists only once the player has a tournament match — on the
- * backend a sign-up seed alone contributes nothing, and locally there is
- * no seed at all, only match points — so a history with no tournament
- * game keeps exactly the legacy Overall.
+ * term exists only once the history has a tournament match.
  *
  * <p>An accumulator ({@link #record}, {@link #overall()}) that walks a
  * match history in order.

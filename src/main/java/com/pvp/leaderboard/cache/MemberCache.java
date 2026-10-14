@@ -10,11 +10,11 @@ import javax.inject.*;
  * Plugin-side membership set for the rank overlay's opt-in gate.
  *
  * <p>Membership comes from the backend snapshot/delta feed
- * ({@code plugin-users/snapshot.json} + {@code plugin-users/delta.json}),
- * which replaces the per-poll {@code whitelist.json} blob. The overlay only
- * needs to know <em>whether</em> an on-screen name is an opted-in plugin user;
- * the rank itself is resolved separately and on-demand via the name-keyed
- * {@code rank_idx} shards. So this cache stores <strong>names only</strong>.</p>
+ * ({@code plugin-users/snapshot.json} + {@code plugin-users/delta.json}).
+ * The overlay only needs to know <em>whether</em> an on-screen name is an
+ * opted-in plugin user; the rank itself is resolved separately and
+ * on-demand via the name-keyed {@code rank_idx} shards. So this cache
+ * stores <strong>names only</strong>.</p>
  *
  * <h2>Why a baseline + absolute delta (not a mutating log)</h2>
  * The delta is an <strong>absolute</strong> diff vs the day's snapshot, so the
@@ -98,7 +98,7 @@ public class MemberCache
         return members.size();
     }
 
-    /** The names canonicalized like the backend {@code canon_name}: trim, collapse spaces,
+    /** The names canonicalized: trim, collapse spaces,
      *  lowercase; blank and null names are dropped.
      *  Uses {@link NameUtils#canonicalKey} — the single plugin-side
      *  canonicalization authority — so nameplate forms with non-breaking

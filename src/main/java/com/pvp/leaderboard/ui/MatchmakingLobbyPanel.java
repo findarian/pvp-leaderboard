@@ -62,7 +62,7 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
      *  {@link #showCard(String)}. */
     public static final String CARD_GATE = "gate";
     public static final String CARD_FIGHT = "fight";
-    /** Plan 10 F.1: the matchmaking queue's "Searching…" card
+    /** The matchmaking queue's "Searching…" card
      *  ({@link QueueSearchingPanel}), shown while {@code queue/state} says
      *  searching and never over a fight being set up. */
     public static final String CARD_QUEUE = "queue";
@@ -75,11 +75,8 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
      *  ("Set up matchmaking", "Your region", "Pick your styles") and for the
      *  region dropdown's text — so the whole gate reads as one block.
      *
-     *  <p>Was 18pt; matched down to 16pt to align with
-     *  {@code Dashboard.NAV_FONT_PT} (which dropped from 18→16 to keep
-     *  "Player Lookup" from clipping). At 18pt + bold the wider gate
-     *  headers ("Pick your styles") were also clipping on the right edge
-     *  of the 215px sidepanel. */
+     *  <p>16pt, the same as {@code Dashboard.NAV_FONT_PT}, so the bold gate
+     *  headers fit the 215px sidepanel. */
     private static final float GATE_PT = 16f;
 
     /** Region short codes used both as the dropdown values and as
@@ -111,7 +108,7 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
      *  back to the default. */
     private JComboBox<String> regionCombo;
 
-    // -------------------- Plan 10 F.1: matchmaking queue --------------------
+    // -------------------- Matchmaking queue --------------------
     /** Queue transport. Inert until {@link #setQueue} wires the real
      *  one (the plugin does, config-gated); the gate hides the queue block
      *  while it is inert. */
@@ -200,14 +197,7 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
      *  {@code confirmByMs}. The monotonic clock
      *  ({@link System#nanoTime()} unless a test replaces it) is immune
      *  to the wall clock being set wrong, to NTP step corrections, to
-     *  manual clock edits, and to DST jumps. This fixes the QA report
-     *  where a player whose computer clock was wrong saw the
-     *  Confirm-Fight card flash and return to the lobby immediately
-     *  instead of waiting the full window — with the old wall-clock
-     *  comparison a clock running ahead of the server (or a
-     *  seconds-as-ms units bug on the wire) produced an already-elapsed
-     *  deadline, so {@code onFightTick} called {@code exitSetup()}
-     *  on its very first tick.
+     *  manual clock edits, and to DST jumps.
      *
      *  <p>{@link #confirmBy} is retained as the server's advisory
      *  deadline (for logging / diagnostics) but is deliberately NOT used
@@ -291,18 +281,14 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
      *  production. */
     private final LobbyService service;
 
-    /** Per-style match-count gate (anti-smurf: need
-     *  {@link JoinGate#THRESHOLD} kills + deaths in a style before
-     *  the user can advertise it). Drives the locked-style rendering on
-     *  the gate's style toggles + the [Refresh count] / "Updated X min
-     *  ago" status row. The server enforces the same rule at
-     *  {@code lobby/join} (returning {@code SMURF_GUARD}); this client
-     *  gate is UX-only.
+    /** Per-style match-count gate (need {@link JoinGate#THRESHOLD}
+     *  kills + deaths in a style before the user can advertise it).
+     *  Drives the locked-style rendering on the gate's style toggles +
+     *  the [Refresh count] / "Updated X min ago" status row. UX only.
      *
-     *  <p>Default to {@link NoOpGate} so the panel is
-     *  constructible in tests that don't need the anti-smurf UX — the
-     *  no-op reports every style unlocked, so the server-side check is
-     *  the safety net. */
+     *  <p>Default to {@link NoOpGate} so the panel is constructible in
+     *  tests that don't need the gate — the no-op reports every style
+     *  unlocked. */
     private final JoinGate joinGate;
 
     private final Runnable gateListener = this::onGateChange;
@@ -353,7 +339,7 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
     private final LobbyPrefs prefs;
 
     /** Top-of-panel inline error banner. Persists across the gate / lobby /
-     *  fight cards (lives above the {@link CardLayout}) so a SMURF_GUARD
+     *  fight cards (lives above the {@link CardLayout}) so an error
      *  triggered from the gate doesn't vanish when the user navigates
      *  away. {@link #errorTimer} auto-dismisses after
      *  {@link #DISMISS_MS}. Driven by
@@ -395,8 +381,7 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         if (service == null) throw new IllegalArgumentException("LobbyService is required");
         this.service = service;
         // NoOpGate is the safe fallback — reports every style
-        // unlocked so a wiring bug doesn't lock the user out (server
-        // still has the final word via the v2 SMURF_GUARD check).
+        // unlocked so a wiring bug doesn't lock the user out.
         this.joinGate = joinGate != null ? joinGate : new NoOpGate();
         // In-memory fallback so test call sites + the existing
         // NoOpLobby production placeholder continue to build
@@ -411,8 +396,6 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         // Outer = BorderLayout so the error banner can pin to NORTH
         // above the cards. The card-switching subpanel goes in CENTER
         // and owns the gate/lobby/fight subviews via {@link #rootCards}.
-        // Was a top-level CardLayout pre-banner; that meant any pinned
-        // chrome had to be duplicated into every card.
         setLayout(new BorderLayout());
         setBorder(pad(4, 4, 4, 4));
 
@@ -444,7 +427,7 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         setupBox = new JPanel(new BorderLayout());
         setupBox.setName(CARD_FIGHT);
         rootCardHost.add(setupBox, CARD_FIGHT);
-        // Plan 10 F.1: the queue's Searching card. The two buttons route
+        // The queue's Searching card. The two buttons route
         // straight to the transport; the card itself only renders.
         queueCard = new QueueSearchingPanel(() -> queueService.expandRange(), () -> queueService.leave());
         queueCard.setName(CARD_QUEUE);
@@ -518,9 +501,7 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         loginNotice.setForeground(new Color(0xcccccc));
         // Cap height to the rendered preferred height so BoxLayout
         // doesn't stretch the label vertically into the space freed up
-        // by the hidden gateContent. Was Integer.MAX_VALUE which made
-        // BoxLayout give the entire empty cell to the label — text
-        // visually pinned to the bottom of the gate.
+        // by the hidden gateContent.
         Dimension noticePref = loginNotice.getPreferredSize();
         loginNotice.setMaximumSize(new Dimension(noticePref.width, noticePref.height));
         gate.add(loginNotice);
@@ -534,9 +515,8 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         gateContent.setOpaque(false);
 
         // ---- Region picker ----
-        // Header + dropdown both share the title's 18pt BOLD treatment so the
-        // gate reads as one consistent typographic block (per spec: match the
-        // "Set up matchmaking" title).
+        // Header + dropdown both share the title's BOLD treatment so the
+        // gate reads as one consistent typographic block.
         var regionTitle = new JLabel("Your region");
         bold(regionTitle, GATE_PT);
         gateContent.add(regionTitle);
@@ -545,7 +525,7 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         regionCombo = new JComboBox<>(REGION_LABELS);
         regionCombo.setSelectedIndex(regionIndex(selfRegion));
         plain(regionCombo, GATE_PT);
-        // Bumped from 32 to 40 to fit the larger 18pt font without clipping descenders.
+        // 40 px tall so the bold font's descenders are not clipped.
         maxH(regionCombo, 40);
         left(regionCombo);
         regionCombo.addActionListener(e ->
@@ -621,7 +601,7 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         else if (gameLoggedIn)
         {
             // Logged into OSRS but plugin still resolving identity +
-            // smurf-guard counts. Show a low-key "Loading…" so the
+            // match counts. Show a low-key "Loading…" so the
             // user knows the panel saw their login and isn't broken.
             // Same hand-broken <br> markup as the logged-out copy
             // (see field doc) to dodge Substance's HTML-wrap clip bug.
@@ -659,20 +639,17 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
             // (onFightTick), and "Back to queue" is the user's manual
             // escape hatch. MeetAt has no auto-expiry; the user clicks
             // "Back to queue" when ready.
-            // Backend rules: a logged-out user's fight session is
-            // expired server-side on $disconnect, so a re-login won't
-            // resume a real session — but the panel staying on
-            // CARD_FIGHT gives the user visual continuity so they can
-            // hop to the meeting world without losing their place.
+            // Staying on CARD_FIGHT gives the user visual continuity so
+            // they can hop to the meeting world without losing their place.
             if (currentFight != null) return;
-            // Plan 10 F.1: a logged-out player cannot fight — leave the
+            // A logged-out player cannot fight — leave the
             // queue so the server stops searching for them.
             if (isOnCard(CARD_QUEUE)) queueService.leave();
             showCard(CARD_GATE);
         }
     }
 
-    // -------------------- Plan 10 F.1: matchmaking queue --------------------
+    // -------------------- Matchmaking queue --------------------
 
     /** Wires the queue transport. The plugin passes
      *  {@code WebSocketQueueService} while the {@code enableQuickMatch}
@@ -697,10 +674,10 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         if (queueSection != null)
         {
             queueSection.setVisible(available);
-            // G-2: the wait time / rank range live in one row shared with
-            // Discord — write the touched key on a local pick, read the row
-            // back on wire-up. One key per frame: pushing both would let a
-            // wait change overwrite a rank range set on Discord.
+            // The wait time / rank range are shared with Discord — write
+            // the touched key on a local pick, read them back on wire-up.
+            // One key per frame: pushing both would let a wait change
+            // overwrite a rank range set on Discord.
             queueSection.setOnWaitChanged(this::pushWait);
             queueSection.setOnRangeChanged(this::pushRange);
         }
@@ -848,7 +825,7 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         @Override
         public void onQueuePrefs(JsonObject prefs)
         {
-            // G-2: the shared row, possibly last written from Discord.
+            // The shared preferences, possibly last written from Discord.
             if (queueSection != null) queueSection.applyPrefs(QueuePrefs.fromJson(prefs));
         }
 
@@ -1026,8 +1003,7 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
 
     /** Cleans up any in-flight FIGHT session + outgoing invite for the same
      *  opponent (Back to queue exit, window expiry, both-confirmed exit, etc.)
-     *  and returns the user to the queue view. The server's session TTL keeps
-     *  running server-side; the panel just drops its local state and
+     *  and returns the user to the queue view. The panel drops its local state and
      *  ignores the late {@link #onFightConfirmedByPeer onFightConfirmedByPeer}
      *  / {@link #onMatchFound onMatchFound} push since
      *  {@code currentFight} is already null. */
@@ -1059,10 +1035,7 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
      *        the button flips to "(expired)", disabled, and the view
      *        DOES NOT swap — the user is left on the Confirm Fight
      *        card with the dead button so they can read the label and
-     *        click Back to queue. Pre-debounce, this code path was
-     *        a silent no-op (matches the "I clicked Confirm and
-     *        nothing happened" QA report when a race clears the
-     *        session between view-build and click).</li>
+     *        click Back to queue.</li>
      *  </ul>
      *
      *  <p>Also emits a {@code DEBUG} log on every click so the receiver
@@ -1092,17 +1065,9 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         }
         s.iConfirmed = true;
         service.confirmFight();
-        // Always swap to the Waiting view after the local confirm fires.
-        // Pre-fix, this was guarded by !bothConfirmed() under the
-        // assumption that match_found would land before the user notices
-        // — but a peer who confirmed FIRST already set peerConfirmed=true,
-        // so the second-to-confirm hits bothConfirmed=true at click time
-        // and the guard skipped the swap. Result: stuck-on-Confirm-Fight
-        // with a disabled "Confirming\u2026" button until the local timer
-        // (now unconditional) kicks them out when the window ends. Swapping every
-        // time keeps the visual transition consistent for both confirm
-        // orderings; if match_found lands milliseconds later,
-        // {@link #onMatchFound} immediately swaps Waiting \u2192 MeetAt.
+        // Always swap to the Waiting view after the local confirm fires,
+        // for both confirm orderings; if match_found lands milliseconds
+        // later, {@link #onMatchFound} immediately swaps Waiting to MeetAt.
         if (currentFight != null)
         {
             showSetup(buildWaiting());
@@ -1139,12 +1104,10 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         card.add(lgap(14));
 
         JButton confirm = makeAction(CONFIRM_TEXT, true);
-        // Primary CTA — green (the colour the exit button used to be) so
-        // it reads as the prominent positive action; the secondary
-        // "Back to queue" exit below now uses the neutral default
-        // button colour (2026-05-29 request). Label is "Get Match Location"
-        // (2026-05-30 request) since confirming reveals the match world +
-        // meeting place.
+        // Primary CTA — green so it reads as the prominent positive
+        // action; the secondary "Back to queue" exit below uses the
+        // neutral default button colour. Label is "Get Match Location"
+        // since confirming reveals the match world + meeting place.
         confirm.setBackground(ACCENT);
         confirm.setForeground(Color.WHITE);
         confirm.setOpaque(true);
@@ -1173,10 +1136,7 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
      *  window expires. The two headers describe the same wait but
      *  attribute it correctly: in the first case we're waiting on the
      *  peer's wire confirm, in the second we're waiting on the server's
-     *  {@code lobby/match_found} push. Without the second header the
-     *  second-to-confirm player saw "Waiting on other player to
-     *  confirm" even though the peer had already confirmed (the same
-     *  scenario the QA test surfaced when match_found never landed). */
+     *  {@code lobby/match_found} push. */
     private JComponent buildWaiting()
     {
         LocalFightState s = currentFight;
@@ -1197,19 +1157,9 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         return wrapInScroll(card);
     }
 
-    /** Terminal MeetAt view — shown after both confirmed. The server
-     *  resolves the world + meeting place authoritatively via
-     *  {@code resolve_match_world} / {@code resolve_meeting_place} in
-     *  {@code backend/core/lobby.py}: NH Arena → W370 (AUS) / W558 (EU)
-     *  / W578 (NA) with random-pick-of-the-two on mixed regions
-     *  defaulting to W578; NH Wildy/FFA + Multi → world + Ferox Enclave;
-     *  Veng → random PvP world from the member list + Grand Exchange;
-     *  DMM → W345 + Grand Exchange. The plugin renders the values
-     *  verbatim from {@link MatchInfo#world} / {@link MatchInfo#meetingPlace}
-     *  per the handoff "render verbatim, no client-side world picking"
-     *  rule — keeping the resolution logic server-side means the
-     *  world tables can be updated (e.g. when Jagex retires a PvP
-     *  world) without a plugin release.
+    /** Terminal MeetAt view — shown after both confirmed. The plugin
+     *  renders the world + meeting place verbatim from
+     *  {@link MatchInfo#world} / {@link MatchInfo#meetingPlace}.
      *
      *  <p>{@code match} is null only when the view is being re-rendered
      *  outside an {@link #onMatchFound} flow (currently unreachable —
@@ -1236,9 +1186,7 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         card.add(makeMeetRow("Meet at:", meetText));
         card.add(lgap(14));
 
-        // Per spec: this screen also has a Back to queue exit; auto-return
-        // on real fight submission is a future hook tied to the in-game match
-        // submission pipeline ().
+        // This screen also has a Back to queue exit.
         card.add(makeCancel(BACK_TEXT, this::exitSetup));
         return wrapInScroll(card);
     }
@@ -1246,7 +1194,7 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
     /** Appends the opponent block used by Confirm/Waiting/MeetAt: the player
      *  name as a full-size header plus a same-sized but de-emphasized
      *  subheader carrying "Style - Build @ Place" for context (matches the
-     *  incoming invite card's info-row format). Per spec, every text line
+     *  incoming invite card's info-row format). Every text line
      *  on these screens must read at button size. */
     private static void addOpponentLines(JPanel card, LocalFightState s)
     {
@@ -1300,11 +1248,10 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
      *  label, and force-exits the FIGHT card when the confirm window
      *  elapses <em>and the peer has not confirmed</em>.
      *
-     *  <p><b>Expiry policy (2026-05-29 user request).</b> On window
+     *  <p><b>Expiry policy.</b> On window
      *  elapse the panel returns to the lobby ONLY when
      *  {@code !peerConfirmed}. Once the other player has confirmed the
-     *  screen stays put — the user explicitly does not want to be bounced
-     *  back to the lobby while a match is being finalized. In that state
+     *  screen stays put while a match is being finalized. In that state
      *  the panel waits for the server's authoritative
      *  {@code lobby/match_found} (\u2192 MeetAt) or
      *  {@code lobby/session_expired} (\u2192 lobby) push, or the user's
@@ -1313,11 +1260,8 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
      *  so this branch is moot — the outer {@code if (s != null)} guard
      *  skips.
      *
-     *  <p>Trade-off: if the backend ever loses BOTH confirms (the old
-     *  {@code confirmed_by} overwrite bug) and never pushes
-     *  match_found/session_expired, a both-confirmed user is no longer
-     *  auto-evicted when the window ends — the manual "Back to queue" button is
-     *  the intended escape hatch in that (server-bug) scenario. */
+     *  <p>If neither push arrives, the manual "Back to queue" button is
+     *  the escape hatch for a both-confirmed user. */
     private void onFightTick()
     {
         LocalFightState s = currentFight;
@@ -1326,7 +1270,7 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
             // Monotonic, clock-independent window — see LocalFightState
             // doc. The window only elapses after windowMs of
             // REAL time, so a wrong / skewed wall clock (or a
-            // seconds-as-ms deadline on the wire) can no longer pop the
+            // seconds-as-ms deadline on the wire) cannot pop the
             // card on the first tick. If match_found landed in time,
             // handleMatchFound already nulled currentFight and we
             // never reach here.
@@ -1343,9 +1287,8 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
                     // the past when elapsedMs reaches windowMs).
                     exitSetup();
                 }
-                // else: the peer HAS confirmed — per the 2026-05-29 user
-                // request the screen must stay put (a match is being
-                // finalized; don't bounce the user back to the lobby).
+                // else: the peer HAS confirmed — the screen stays put (a match
+                // is being finalized; don't bounce the user back to the lobby).
                 // The server stays authoritative: lobby/match_found swaps
                 // to MeetAt and lobby/session_expired returns to the
                 // lobby. The user's manual "Back to queue" button is
@@ -1359,7 +1302,7 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
             }
         }
 
-        // Plan 10 F.1: the Searching card's elapsed clock between server pushes.
+        // The Searching card's elapsed clock between server pushes.
         if (queueCard != null && isOnCard(CARD_QUEUE)) queueCard.tick();
     }
 
@@ -1371,9 +1314,8 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
      *  freshly-joined player whose shard hasn't published yet still
      *  reads cleanly. Package-private + static for testability.
      *
-     *  <p>Note: {@code blocked} doesn't apply here — by the time an
-     *  invite from a blocked sender reaches us, server-side filtering
-     *  has already dropped it. The lobby row's grey-blocked path is
+     *  <p>Note: {@code blocked} doesn't apply here — an invite from a
+     *  blocked sender never arrives. The lobby row's grey-blocked path is
      *  intentionally NOT mirrored. */
     static Color senderColor(LobbyMember sender)
     {
@@ -1553,7 +1495,7 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         errorLabel = new JLabel(" ");
         errorLabel.setForeground(new Color(0xffeeee));
         plain(errorLabel, 12f);
-        // Wrap long messages inside the sidepanel width — SMURF_GUARD's
+        // Wrap long messages inside the sidepanel width — e.g.
         // "Play casual PvP to build…" doesn't fit on one line at 225px.
         banner.add(errorLabel);
         banner.add(Box.createHorizontalGlue());
@@ -1753,7 +1695,7 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         BlockList.unblock(playerId);
     }
 
-    /** Meeting place per (style, sub-location). Per spec:
+    /** Meeting place per (style, sub-location):
      *  NH Arena → Arena; NH Wildy / FFA Portal → Ferox Enclave;
      *  Veng → Grand Exchange; Multi → Ferox Enclave; DMM → Grand Exchange. */
     private static String meetAtPlace(Style style, String location)
@@ -1786,7 +1728,7 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
 
     /** Same size + weight as {@link #makeHeader} but with a muted color
      *  — used on Confirm/Waiting/MeetAt where every line needs to read at
-     *  button size per spec, but secondary lines (style/loc context,
+     *  button size, but secondary lines (style/loc context,
      *  "Confirmed by other player", countdown) should still be visually
      *  de-emphasized vs the primary header + opponent name. */
     private static JLabel makeSubhead(String text)
@@ -1808,11 +1750,9 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
     }
 
     /** Bottom exit button ("Back to queue"). Neutral default button
-     *  colour — it deliberately does NOT set a background so it matches
-     *  the colour the Confirm button used to be. The green tint moved to
-     *  the Confirm CTA (see {@link #buildConfirm}) so green now
-     *  reads exclusively as the prominent positive action and the exit
-     *  is the secondary, de-emphasised affordance (2026-05-29 request). */
+     *  colour — it deliberately does NOT set a background; green is the
+     *  Confirm CTA's (see {@link #buildConfirm}), so the exit reads as the
+     *  secondary, de-emphasised affordance. */
     private static JButton makeCancel(String text, Runnable onClick)
     {
         JButton b = maxH(bold(new JButton(text), 16f), 44);

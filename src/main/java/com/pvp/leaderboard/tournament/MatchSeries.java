@@ -5,7 +5,7 @@ import java.util.*;
 import static com.pvp.leaderboard.util.JsonLenient.*;
 
 /**
- * The local player's series in the current round (Plan 10 Part C):
+ * The local player's series in the current round:
  * {@code tournament/match_assigned} and {@code tournament/state.active.series}
  * both parse into this. The opponent is identified by name / acct_sha /
  * player_id only.

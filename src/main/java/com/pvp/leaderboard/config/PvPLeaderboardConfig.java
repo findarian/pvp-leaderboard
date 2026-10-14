@@ -53,7 +53,7 @@ public interface PvPLeaderboardConfig extends Config
 		VENG("Veng"),
 		MULTI("Multi"),
 		DMM("DMM"),
-		/** Plan 10: the Swiss-tournament rating bucket (2026-09-21). */
+		/** The Swiss-tournament rating bucket. */
 		TOURNAMENT("Tournament");
 
 		private final String label;
@@ -389,10 +389,7 @@ public interface PvPLeaderboardConfig extends Config
 		return true;
 	}
 
-	// ==================== Kill Streak Box (BOARD row 33) ====================
-	// The section is declared here with its items so the whole feature is ONE
-	// hunk at the end of the file, apart from the Plan 10 step-7 hunks above
-	// (staging map in docs/PLUGIN_PROGRESS.md).
+	// ==================== Kill Streak Box ====================
 
 	@ConfigSection(
 		name = "Kill Streak Box",

@@ -4,14 +4,13 @@ import com.pvp.leaderboard.lobby.*;
 import java.util.*;
 
 /**
- * User-facing text for the matchmaking queue (Plan 10 F.1, 2026-09-21):
- * the wait-time labels shared by the gate picker and the timeout banner,
- * the banners for the server's idle {@code reason}s (Part E), the
- * {@code error/queue} table, and the style / build labels the searching
- * card prints. Pure functions — {@code MatchmakingLobbyPanel} decides
- * <i>when</i> to show them. Wording is the operator's (mockup v4 / plan
- * § Part F); lobby codes defer to {@link LobbyErrors} so one code
- * never has two translations, except {@code MATCHMAKING_SUSPENDED} ({@link #BANNED}).
+ * User-facing text for the matchmaking queue: the wait-time labels shared
+ * by the gate picker and the timeout banner, the banners for the idle
+ * {@code reason}s, the {@code error/queue} table, and the style / build
+ * labels the searching card prints. Pure functions —
+ * {@code MatchmakingLobbyPanel} decides <i>when</i> to show them. Lobby
+ * codes defer to {@link LobbyErrors} so one code never has two
+ * translations, except {@code MATCHMAKING_SUSPENDED} ({@link #BANNED}).
  */
 public final class QueueText
 {

@@ -22,12 +22,8 @@ import java.util.*;
  * (1 hour). Users can also force a manual refresh via {@link #refresh()};
  * a manual refresh resets the auto-refresh clock to avoid double-fires.
  *
- * <p><b>Trust boundary.</b> This gate is UX-only — it gives the user
- * immediate feedback without having to attempt a {@code lobby/join} the
- * server would reject. The server enforces the same rule at
- * {@code lobby/join} time; a modified plugin that bypasses this gate
- * still trips the server-side check and receives an
- * {@code error/lobby SMURF_GUARD} response.
+ * <p>The gate is UX only: it gives the user immediate feedback before a
+ * {@code lobby/join}.
  *
  * <p><b>Threading.</b> Listeners fire on the EDT; getters are safe to
  * call from any thread but their return values are point-in-time.
@@ -37,12 +33,7 @@ import java.util.*;
  */
 public interface JoinGate
 {
-    /** Per-style minimum {@code wins + losses + ties} needed to queue.
-     *  Mirror this exactly on the backend's {@code SMURF_GUARD} check —
-     *  any drift between client and server would surface as the user
-     *  passing the local gate but getting {@code SMURF_GUARD} back from
-     *  {@code lobby/join} (or vice versa, which is worse — UI says
-     *  "locked" but the server would have let them in). */
+    /** Per-style minimum {@code wins + losses + ties} needed to queue. */
     int THRESHOLD = 20;
 
     /** Auto-refresh cadence — once per hour. Manual {@link #refresh()}
@@ -76,7 +67,7 @@ public interface JoinGate
      *  / locked for reasons they can't fix from outside the game.
      *
      *  <p>Note this is the <b>game</b> login state, not the website's
-     *  Cognito session. A user authenticated to the website but parked
+     *  login session. A user authenticated to the website but parked
      *  on the OSRS login screen still reports {@code false} here. */
     boolean isLoggedIn();
 

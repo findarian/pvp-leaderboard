@@ -31,10 +31,9 @@ public class MatchResult
     /**
      * Detection reason accompanying {@link #lmsFreezeLogout}: {@code
      * "logout"} (logout / connection lost mid-fight) or {@code
-     * "plugin_disabled"} (plugin toggled off mid-fight — carries the
-     * ban-escalation consequence). Null/blank when {@link #lmsFreezeLogout}
-     * is false; serialized as the trailing {@code lms_freeze_reason} field
-     * only when present.
+     * "plugin_disabled"} (plugin toggled off mid-fight). Null/blank when
+     * {@link #lmsFreezeLogout} is false; serialized as the trailing
+     * {@code lms_freeze_reason} field only when present.
      */
     private final String lmsFreezeReason;
 

@@ -6,10 +6,10 @@ import static com.pvp.leaderboard.util.JsonLenient.*;
 
 /**
  * The optional {@code rules} block of a {@code tournament/list_response}
- * entry (plugin set 6, operator request 2026-09-22):
+ * entry:
  * <pre>{"version": 1, "sections": [{"heading": "...", "lines": ["...", "..."]}, ...]}</pre>
  * rendered by the in-panel Rules dialog as headings + wrapped plain lines.
- * The field is additive — an older backend sends none and the plugin falls
+ * The field is optional — without it the plugin falls
  * back to the entry's {@code rules_url} — so it is parsed defensively:
  * anything that is not an object with at least one usable section reads as
  * <b>absent</b> ({@code null}); a section needs a string heading or at

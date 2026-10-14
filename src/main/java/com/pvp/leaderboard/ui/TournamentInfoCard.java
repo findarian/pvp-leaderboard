@@ -250,7 +250,7 @@ final class TournamentInfoCard extends CapPanel
     }
 
     /** {@code "Rank NH Rune 3 – Dragon 1"} / {@code "Min rank NH Rune 3"} / {@code "Max rank DMM Dragon 1"},
-     *  one part per bucket ({@code _rank_limit_parts}); {@code ""} when the event has no limits. */
+     *  one part per bucket; {@code ""} when the event has no limits. */
     static String limitsLine(Tourney t)
     {
         List<String> parts = new ArrayList<>();
@@ -311,8 +311,7 @@ final class TournamentInfoCard extends CapPanel
         return String.join(" · ", parts);
     }
 
-    /** {@code 18} → {@code "Rune 3"}, {@code 24} → {@code "3rd Age"}, out of range → {@code "?"}
-     *  (the backend's {@code rank_label}). */
+    /** {@code 18} → {@code "Rune 3"}, {@code 24} → {@code "3rd Age"}, out of range → {@code "?"}. */
     static String rankLabel(int idx)
     {
         return idx < 0 || idx >= PlayerCard.RANK_LABELS.length ? "?" : PlayerCard.RANK_LABELS[idx];
