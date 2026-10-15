@@ -106,10 +106,14 @@ public class TourneyPanel extends JPanel implements TournamentEventListener
     private int opponentRankIdx = -1;
     private final JLabel roundEndBox = new JLabel(" ");
     private final BoardPanel boardPanel = new BoardPanel();
+    /** A live list of more rows than this is drawn again only when its view opens, at another round or status. */
+    static final int LIVE_ROWS = 40;
+    /** The event, status and round of the live list's rows; {@code null} until its view's next rows. */
+    private String drawnFor;
     /** Layouts of the page a board's fit may still ask for, for its current rows. */
     private int refits;
     private final JButton withdrawBtn = tabButton("Withdraw");
-    /** The active footer's report button — gated like every card's. */
+    /** The running event's report button — gated like every card's. */
     private final JButton reportBtn = tabButton(REPORT_LABEL, "tournaments-report", () -> { if (this.activeId != null) onReport(this.activeId); });
     /** The running event's own Rules; enabled once its list entry is known. */
     private final JButton rulesBtn = tabButton("Rules", "tournaments-active-rules", this::openRulesForActive);
@@ -296,13 +300,15 @@ public class TourneyPanel extends JPanel implements TournamentEventListener
     }
 
     /** The dashboard calls this when the sub-tab is shown / hidden: a shown
-     *  panel re-syncs (status + list) and subscribes to the active event's
-     *  standings; a hidden one unsubscribes and drops the Rules page. */
+     *  panel re-syncs (status + list), subscribes to the active event's
+     *  standings and draws the next ones; a hidden one unsubscribes and drops
+     *  the Rules page. */
     public void setShowing(boolean visible)
     {
         showing = visible;
         if (visible)
         {
+            drawnFor = null;
             sync();
         }
         else
@@ -329,11 +335,13 @@ public class TourneyPanel extends JPanel implements TournamentEventListener
     }
 
     /** The transport's connect hook: a showing tab re-asks for
-     *  everything it may have missed; a hidden one waits for its next show. */
+     *  everything it may have missed and draws the next standings; a hidden
+     *  one waits for its next show. */
     @Override
     public void onConnected()
     {
         pendingReg = null;
+        drawnFor = null;
         if (!gamesRefused.isEmpty())
         {
             gamesRefused.clear();
@@ -429,29 +437,29 @@ public class TourneyPanel extends JPanel implements TournamentEventListener
         roundEndBox.setVisible(false);
         top.add(roundEndBox);
 
+        JPanel buttons = column();
+        buttons.setBorder(pad(6, 0, 0, 0));
+        rulesBtn.setEnabled(false);
+        syncReport();
+        activePair = pairRow(reportBtn, rulesBtn);
+        buttons.add(activePair);
+        buttons.add(backBtn);
+        buttons.add(vgap(4));
+        withdrawBtn.setName("tournaments-active-withdraw");
+        withdrawBtn.setBackground(RED);
+        withdrawBtn.setForeground(RED_FG);
+        withdrawBtn.addActionListener(e -> { if (activeId != null) service.withdraw(activeId); });
+        buttons.add(withdrawBtn);
+        buttons.add(fullBtn);
+        buttons(true);
+        top.add(buttons);
+
         boardTitle.setBorder(pad(8, 0, 2, 0));
         top.add(boardTitle);
         card.add(top, NORTH);
 
         boardPanel.setName("tournaments-standings");
         card.add(scroll(boardPanel), CENTER);
-
-        JPanel footer = column();
-        footer.setBorder(pad(6, 0, 0, 0));
-        rulesBtn.setEnabled(false);
-        syncReport();
-        activePair = pairRow(reportBtn, rulesBtn);
-        footer.add(activePair);
-        footer.add(backBtn);
-        footer.add(vgap(4));
-        withdrawBtn.setName("tournaments-active-withdraw");
-        withdrawBtn.setBackground(RED);
-        withdrawBtn.setForeground(RED_FG);
-        withdrawBtn.addActionListener(e -> { if (activeId != null) service.withdraw(activeId); });
-        footer.add(withdrawBtn);
-        footer.add(fullBtn);
-        footer(true);
-        card.add(footer, SOUTH);
         return card;
     }
 
@@ -819,7 +827,7 @@ public class TourneyPanel extends JPanel implements TournamentEventListener
         rounds = t.rounds;
         setWrapped(activeHeader, header());
         renderBoardTitle();
-        renderBoard(Collections.emptyList());
+        renderBoard(boardPanel, "standings-", Collections.emptyList(), true);
         renderEta();
         resubscribe();
     }
@@ -870,7 +878,7 @@ public class TourneyPanel extends JPanel implements TournamentEventListener
             activeWhere.setVisible(false);
             activeStatus.setVisible(false);
         }
-        footer(true);
+        buttons(true);
         renderEta();
         renderStatus();
         syncNoShow();
@@ -1043,10 +1051,14 @@ public class TourneyPanel extends JPanel implements TournamentEventListener
         return EnumSet.of(b == null ? BuildType.MAIN : b);
     }
 
-    /** The live leaderboard: the first 40 rows. */
-    private void renderBoard(List<StandingsRow> rows)
+    /** The live leaderboard, every row; a list of more than {@link #LIVE_ROWS} rows stays as drawn until its view opens
+     *  again or the rows are for another event, status or round. */
+    private void renderBoard(String tournamentId, String status, int round, List<StandingsRow> rows)
     {
-        renderBoard(boardPanel, "standings-", rows.subList(0, Math.min(rows.size(), 40)), true);
+        String stage = tournamentId + " " + status + " " + round;
+        if (boardPanel.rows.size() > LIVE_ROWS && stage.equals(drawnFor)) return;
+        drawnFor = stage;
+        renderBoard(boardPanel, "standings-", rows, true);
     }
 
     /** Every row of {@code rows}: the name white, green once the player's round is done, red and struck through with
@@ -1056,7 +1068,6 @@ public class TourneyPanel extends JPanel implements TournamentEventListener
         body.removeAll();
         String self = selfNameSupplier.get();
         String selfKey = self == null ? null : NameUtils.canonicalKey(self);
-        Component mine = null;
         body.rows.clear();
         body.appliedPt = -1;
         if (rows.isEmpty())
@@ -1113,18 +1124,12 @@ public class TourneyPanel extends JPanel implements TournamentEventListener
             line.add(foot, SOUTH);
             body.add(line);
             body.rows.add(new BoardPanel.Row(line, left, pts, rank, prize, recLine, rec, me, out, r.streamUrl != null));
-            if (me) mine = line;
         }
         body.applyPt(HEADER_PT, 0);
         body.revalidate();
         body.repaint();
         refits = 1;
         revalidate();
-        if (mine != null)
-        {
-            final Component target = mine;
-            SwingUtilities.invokeLater(() -> body.scrollRectToVisible(target.getBounds()));
-        }
     }
 
     /** A board's fit changed its height: the page around it is laid out once more per set of rows, the board's sizes
@@ -1477,7 +1482,7 @@ public class TourneyPanel extends JPanel implements TournamentEventListener
         if (state.gearDeadline > 0) gearUntilS = state.gearDeadline;
         roundEndMs = state.etaS >= 0 ? nowMs.getAsLong() + state.etaS * 1000L : 0L;
         renderActive();
-        renderBoard(state.standings);
+        renderBoard(state.tournamentId, state.status, state.round, state.standings);
         resubscribe();
         renderList();
     }
@@ -1499,7 +1504,7 @@ public class TourneyPanel extends JPanel implements TournamentEventListener
         setWrapped(activeHeader, header());
         renderBoardTitle();
         renderEta();
-        renderBoard(standings.rows);
+        renderBoard(standings.tournamentId, standings.status, standings.round, standings.rows);
         if (standings.isFinished() || "cancelled".equals(standings.status))
         {
             // the dedicated finished / cancelled pushes drive the exit; the standings just stop moving
@@ -1844,10 +1849,10 @@ public class TourneyPanel extends JPanel implements TournamentEventListener
         roundEndBox.setVisible(false);
         dropCard();
         syncNoShow();
-        footer(live);
+        buttons(live);
     }
 
-    private void footer(boolean live)
+    private void buttons(boolean live)
     {
         activePair.setVisible(live);
         withdrawBtn.setVisible(live);
