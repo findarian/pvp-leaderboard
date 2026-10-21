@@ -49,6 +49,12 @@ public class FightMonitor
     private static final int IDLE_TICKS = 16;
     private int gcTicks;
 
+    /** Death events from one game tick are settled together on the next tick. */
+    private int pendingDeathTick = -1;
+    private final Set<String> deadOpponents = new LinkedHashSet<>();
+    private boolean localDied;
+    private String deathKiller;
+
     /** Wall-clock timestamp (ms) of the most recent inbound damage
      *  hitsplat where the attacker is identifiable as another Player
      *  (not an NPC, not a self-deal). Updated on every qualifying
@@ -215,6 +221,7 @@ public class FightMonitor
 
     public void resetFight()
     {
+        clearPendingDeaths();
         muteTicks = 2;
         activeFights.clear();
         oppMuteUntil.clear();
@@ -385,6 +392,11 @@ public class FightMonitor
             // Per-opponent suppression: one tick less each; gone at zero.
             oppMuteUntil.replaceAll((name, ticks) -> ticks - 1);
             oppMuteUntil.values().removeIf(ticks -> ticks < 1);
+
+            if (pendingDeathTick >= 0 && client.getTickCount() > pendingDeathTick)
+            {
+                resolvePendingDeaths();
+            }
 
             // Refresh the LMS-arena presence cache BEFORE the GC pass so
             // the extended-retention decision below sees the current
@@ -604,24 +616,22 @@ public class FightMonitor
             Player player = (Player) event.getActor();
             Player localPlayer = client.getLocalPlayer();
 
+            int eventTick = client.getTickCount();
+            if (pendingDeathTick >= 0 && eventTick > pendingDeathTick)
+            {
+                resolvePendingDeaths();
+            }
+
             if (player == localPlayer)
             {
-                String killer = findKillerByDamage();
-
-                if (killer == null) killer = findKiller(localPlayer);
-                if (killer == null) killer = recentOpp();
-
-                if (killer != null)
+                if (!localDied)
                 {
-                    endFightFor(killer, "loss");
+                    localDied = true;
+                    deathKiller = findKillerByDamage();
+                    if (deathKiller == null) deathKiller = findKiller(localPlayer);
+                    if (deathKiller == null) deathKiller = recentOpp();
+                    pendingDeathTick = eventTick;
                 }
-
-                for (String remaining : new ArrayList<>(activeFights.keySet()))
-                {
-                    clearFight(remaining);
-                }
-
-                resetFight();
             }
             else
             {
@@ -629,9 +639,10 @@ public class FightMonitor
                 if (name != null)
                 {
                     FightEntry fe = activeFights.get(name);
-                    if (fe != null && fe.damageDealt.get() > 0)
+                    if (fe != null && !fe.finalized && fe.damageDealt.get() > 0)
                     {
-                        endFightFor(name, "win");
+                        deadOpponents.add(name);
+                        if (pendingDeathTick < 0) pendingDeathTick = eventTick;
                     }
                 }
             }
@@ -639,6 +650,36 @@ public class FightMonitor
         catch (Exception e)
         {
         }
+    }
+
+    private void resolvePendingDeaths()
+    {
+        boolean died = localDied;
+        String killer = deathKiller;
+        Set<String> opponents = new LinkedHashSet<>(deadOpponents);
+        clearPendingDeaths();
+
+        for (String opponent : opponents)
+        {
+            endFightFor(opponent, died ? "tie" : "win");
+        }
+
+        if (died)
+        {
+            if (killer != null && !opponents.contains(killer))
+            {
+                endFightFor(killer, "loss");
+            }
+            resetFight();
+        }
+    }
+
+    private void clearPendingDeaths()
+    {
+        pendingDeathTick = -1;
+        deadOpponents.clear();
+        localDied = false;
+        deathKiller = null;
     }
 
     private void endFightFor(String opponentName, String result)
