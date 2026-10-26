@@ -77,6 +77,7 @@ public class GearSearch
     Consumer<Runnable> onClientThread;
     Runnable layoutBank;
     BooleanSupplier autoFilterBank;
+    volatile BooleanSupplier window = () -> false;
     LongSupplier nowMs = System::currentTimeMillis;
     IntUnaryOperator base = ItemVariationMapping::map;
     IntFunction<Collection<Integer>> variations = ItemVariationMapping::getVariations;
@@ -92,6 +93,12 @@ public class GearSearch
         onClientThread = clientThread::invokeLater;
         layoutBank = bankSearch::layoutBank;
         autoFilterBank = config::gearAutoFilterBank;
+    }
+
+    /** True from the player's kit event's start until they are out of it: the kit list is scrolled only then. */
+    public void setWindow(BooleanSupplier inWindow)
+    {
+        window = inWindow == null ? () -> false : inWindow;
     }
 
     public void setMissing(Supplier<Collection<Integer>> supplier)
@@ -132,7 +139,7 @@ public class GearSearch
             ArenaWidgets.KitPanel panel = shownPanel();
             if (panel != null)
             {
-                scrollTo(panel, h);
+                if (GearKit.safe(window)) scrollTo(panel, h);
                 return;
             }
             if (bankOpen()) filterBank(h.ids());

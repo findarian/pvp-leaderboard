@@ -180,6 +180,14 @@ public final class Tourney
         return "registered".equals(myStatus);
     }
 
+    /** The player's status in {@code t}: its own, else its row in {@code regs}; {@code null} when neither has one. */
+    public static String statusIn(Tourney t, List<Tourney> regs)
+    {
+        if (t.myStatus != null) return t.myStatus;
+        for (Tourney r : regs) if (r.tournamentId.equals(t.tournamentId)) return r.myStatus;
+        return null;
+    }
+
     /** {@code "NH Main"} — the category + build the way the lobby chips spell them. */
     public String styleLabel()
     {

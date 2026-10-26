@@ -3,8 +3,10 @@ package com.pvp.leaderboard.tournament;
 import com.google.gson.*;
 import java.util.*;
 import java.util.regex.*;
+import lombok.*;
 import static com.pvp.leaderboard.util.JsonLenient.*;
 
+@EqualsAndHashCode
 public final class StandingsRow
 {
     public final int rank;
@@ -22,6 +24,8 @@ public final class StandingsRow
     public final boolean roundDone;
     /** The player's stream page from {@code stream} ({@code "t:<channel>"} Twitch, {@code "k:<channel>"} Kick); {@code null} for anything else. */
     public final String streamUrl;
+    /** The row's key ({@code k}), {@code ""} without one. */
+    final String k;
     private static final Pattern STREAM = Pattern.compile("[tk]:[A-Za-z0-9_]{1,25}");
 
     private StandingsRow(JsonObject o, int fallbackRank, List<String> tierLabels)
@@ -44,6 +48,7 @@ public final class StandingsRow
         String stream = str(o.get("stream"));
         streamUrl = stream == null || !STREAM.matcher(stream).matches() ? null
             : (stream.charAt(0) == 't' ? "https://www.twitch.tv/" : "https://kick.com/") + stream.substring(2);
+        k = optString(o, "k");
     }
 
     /** The payload's {@code tier_labels} in order, a non-string entry as {@code null}; empty when absent. */

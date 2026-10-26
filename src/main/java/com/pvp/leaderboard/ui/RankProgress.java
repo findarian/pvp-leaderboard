@@ -1,17 +1,19 @@
 package com.pvp.leaderboard.ui;
 
 import lombok.*;
+import com.google.gson.*;
 import com.pvp.leaderboard.util.*;
 import java.awt.*;
 import java.util.*;
 import javax.swing.*;
 import javax.swing.plaf.basic.*;
 import static com.pvp.leaderboard.ui.Ui.*;
+import static com.pvp.leaderboard.util.JsonLenient.*;
 
 /**
  * The Player Lookup rating rows: one block per bucket with the bucket
  * name, the rank line ({@code "Adamant 3 #731 Top 0.07%"}) and the
- * progress-to-next-rank bar.
+ * progress bar, all from the bucket's v3 card.
  *
  * <p>The <b>Tournament Rating</b> row (index 1) sits between Overall and NH and is
  * hidden until the player has a tournament rating (the bucket is absent
@@ -127,52 +129,37 @@ public class RankProgress extends JPanel
     }
 
     /**
-     * @param topPercent the player's "Top X.XX%" for this bucket (from the
-     *                   rank histogram), or {@code null} to omit the suffix.
-     *                   Renders {@code "Adamant 3 #731 Top X.XX%"}.
+     * A row from its v3 card ({@code buckets.<bucket>.v3}): the division in its colour, then {@code " #<rank>"} and
+     * the card's {@code top_percent} when set. The bar shows {@code progress}, or {@code "<rating> MMR"} from
+     * Dragon 1 up; the title (progress null) has a full bar. No card, or no division, reads "—" with an empty bar
+     * and hides the Tournament row. {@code streak} / {@code bestStreak} feed the streak lines under the bar.
      */
-    public void updateBucket(String bucket, String rankLabel, int division, double pct, int rankNumber, String topPercent)
-    {
-        updateBucket(bucket, rankLabel, division, pct, rankNumber, topPercent, -1, -1);
-    }
-
-    /**
-     * Full form: {@code streak} / {@code bestStreak} feed the streak lines
-     * under the bar; pass {@code -1} for either to leave the lines as they
-     * are (the rank-only refreshes do). A {@code "—"} rank on the tournament
-     * row hides that row; anything else shows it.
-     */
-    public void updateBucket(String bucket, String rankLabel, int division, double pct, int rankNumber, String topPercent,
-                             int streak, int bestStreak)
+    public void updateBucket(String bucket, JsonObject card, int streak, int bestStreak)
     {
         int idx = getBucketIndex(bucket);
         if (idx < 0) return;
+        String division = RankUtils.division(card);
+        int rankNumber = optInt(card, "rank", -1);
+        String top = card == null ? null : str(card.get("top_percent"));
+        String line = division == null ? "—" : division + (rankNumber > 0 ? " #" + rankNumber : "")
+            + (top == null || top.isEmpty() ? "" : " " + top);
+        double pct = division == null ? 0 : Math.max(0, Math.min(100, optDouble(card, "progress", "3rd Age".equals(division) ? 100 : 0)));
+        double rating = optDouble(card, "rating", Double.NaN);
+        String barText = !"Dragon 1".equals(division) && !"3rd Age".equals(division) ? Math.round(pct) + "%"
+            : Double.isNaN(rating) ? "-" : Math.round(rating) + " MMR";
         SwingUtilities.invokeLater(() -> {
-            Color rankColor = RankUtils.getRankColor(rankLabel);
-
-            String displayRank = rankLabel + (division > 0 ? " " + division : "");
-            if (rankNumber > 0)
-            {
-                displayRank += " #" + rankNumber;
-            }
-            if (topPercent != null && !topPercent.isEmpty())
-            {
-                displayRank += " " + topPercent;
-            }
-            rankLabels[idx].setText(displayRank);
+            Color rankColor = RankUtils.getRankColor(line);
+            rankLabels[idx].setText(line);
             rankLabels[idx].setForeground(rankColor);
 
             progressBars[idx].setValue((int) pct);
-            progressBars[idx].setString(Math.round(pct) + "%");
+            progressBars[idx].setString(barText);
             progressBars[idx].setForeground(rankColor);
 
-            if (streak >= 0 && bestStreak >= 0)
-            {
-                setStreaks(idx, streak, false, bestStreak);
-            }
+            setStreaks(idx, streak, false, bestStreak);
             if (idx == 1)
             {
-                setTournamentRowVisible(rankLabel != null && !"—".equals(rankLabel) && !rankLabel.trim().isEmpty());
+                setTournamentRowVisible(division != null);
             }
         });
     }

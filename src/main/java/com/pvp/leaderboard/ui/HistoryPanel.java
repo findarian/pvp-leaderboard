@@ -1,8 +1,8 @@
 package com.pvp.leaderboard.ui;
 
 import com.google.gson.*;
+import com.pvp.leaderboard.perf.FightsPanel;
 import com.pvp.leaderboard.service.*;
-import com.pvp.leaderboard.util.*;
 import java.awt.*;
 import java.text.*;
 import java.util.*;
@@ -44,29 +44,28 @@ public class HistoryPanel extends JPanel
                     optString(match, "result"),
                     optString(match, "opponent_id"),
                     match.has("bucket") ? match.get("bucket").getAsString().toUpperCase() : "Unknown",
-                    computeRank(match, "player_") + " vs " + computeRank(match, "opponent_"),
+                    division(match, "v3_to") + " vs " + division(match, "v3_opponent_to"),
                     computeRatingChangePlain(match),
                     match.has("when") ? new SimpleDateFormat("MM/dd/yyyy HH:mm").format(new Date(match.get("when").getAsLong() * 1000)) : ""});
             }
         });
     }
 
-    private static String computeRank(JsonObject match, String prefix)
+    /** A match row's division text at {@code key}; "-" for none. */
+    private static String division(JsonObject match, String key)
     {
-        String rank = optString(match, prefix + "rank", null);
-        if (rank == null) return "Unknown";
-        int division = optInt(match, prefix + "division", 0);
-        return rank + (division > 0 ? " " + division : "");
+        String d = str(match.get(key));
+        return d == null || d.trim().isEmpty() ? "-" : d;
     }
 
-    /** The capped label, else {@code rating_change.mmr_delta}, else "-". */
+    /** The capped label, else the row's {@code v3_change} ("+7.9 MMR", "0.0 MMR"), else "-". */
     private static String computeRatingChangePlain(JsonObject match)
     {
         if (PortalCap.isCapped(match))
         {
             return PortalCap.LABEL;
         }
-        double delta = optDouble(optObject(match, "rating_change"), "mmr_delta", Double.NaN);
-        return Double.isNaN(delta) ? "-" : String.format("%+.2f MMR", delta);
+        String change = FightsPanel.change(match);
+        return "-".equals(change) ? change : change + " MMR";
     }
 }

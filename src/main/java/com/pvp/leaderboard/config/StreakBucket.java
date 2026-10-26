@@ -4,11 +4,11 @@ import java.util.*;
 /**
  * The five styles the kill-streak box can show — the ONE place for the
  * box's on-screen label and the {@code /user} {@code buckets.<key>} it
- * reads. Overall has no streak box; {@link #EVENT} is the Swiss
- * tournament bucket under the name players see for it.
+ * reads. Overall has no streak box; {@link #EVENT} is the tournament
+ * bucket. Saved settings hold the constant names, so they stay unchanged.
  *
  * <p>{@link #toString()} returns the label so RuneLite's config combo shows
- * "Veng" / "Event" rather than the constant name — the same trick as
+ * "Veng" / "Tournament" rather than the constant name — the same trick as
  * {@link PvPLeaderboardConfig.RankBucket}.
  */
 public enum StreakBucket
@@ -19,7 +19,7 @@ public enum StreakBucket
 	DMM("DMM", "dmm"),
 	/** The tournament rating bucket ({@code buckets.tournament}; JSON null
 	 *  on /user for players who never entered one). */
-	EVENT("Event", "tournament");
+	EVENT("Tournament", "tournament");
 
 	/** The word before "Current Kill Streak" in the box. */
 	public final String label;
@@ -32,8 +32,8 @@ public enum StreakBucket
 		this.bucketKey = bucketKey;
 	}
 
-	/** The box's style for a leaderboard bucket: Tournament reads "Event";
-	 *  Overall (and {@code null}) has no streak box, so {@code null}. */
+	/** The box's style for a leaderboard bucket; Overall (and {@code null})
+	 *  has no streak box, so {@code null}. */
 	public static StreakBucket forRank(PvPLeaderboardConfig.RankBucket bucket)
 	{
 		return bucket == null ? null : forKey(bucket.name());

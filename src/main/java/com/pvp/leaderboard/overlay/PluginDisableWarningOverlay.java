@@ -53,9 +53,6 @@ public final class PluginDisableWarningOverlay extends Popup
     private static final String TITLE = "Warning";
     private static final String OK_LABEL = "OK";
 
-    // ---- Collection-Log popup palette: Popup's, plus the OK button's fill ----
-    private static final Color OK_FILL = new Color(0x3a342a);
-
     // ---- Geometry ----
     private static final int POPUP_W = 340;
     private static final int POPUP_H = 168;
@@ -77,7 +74,7 @@ public final class PluginDisableWarningOverlay extends Popup
     @Inject
     public PluginDisableWarningOverlay(Client client)
     {
-        super(client, log, "PluginDisableWarningOverlay", POPUP_W, POPUP_H, TITLE_BAR_H, TOP_OFFSET);
+        super(client, log, "PluginDisableWarningOverlay", POPUP_W, TOP_OFFSET);
     }
 
     /** Show the warning. Safe from any thread; a re-show while one is
@@ -135,7 +132,7 @@ public final class PluginDisableWarningOverlay extends Popup
             dismiss();
             return null;
         }
-        return paint(g, fade(elapsed, VISIBLE_MS), null);
+        return paint(g, fade(elapsed, VISIBLE_MS), null, POPUP_H, TITLE_BAR_H);
     }
 
     /** The title, the warning lines and the OK button. */
@@ -169,27 +166,8 @@ public final class PluginDisableWarningOverlay extends Popup
             g.drawString(line, lx, startY + i * lineH);
         }
 
-        int okX = x + (POPUP_W - OK_W) / 2;
-        int okY = y + POPUP_H - OK_H - OK_MARGIN;
         // Record the screen-space bounds so the mouse handler can hit-test.
-        okBounds = new Rectangle(okX, okY, OK_W, OK_H);
-
-        g.setRenderingHint(KEY_ANTIALIASING, VALUE_ANTIALIAS_OFF);
-        g.setColor(OK_FILL);
-        g.fillRect(okX, okY, OK_W, OK_H);
-        g.setColor(FRAME_BEVEL);
-        g.drawRect(okX, okY, OK_W - 1, OK_H - 1);
-        g.setColor(OUTER_OUTLINE);
-        g.drawRect(okX - 1, okY - 1, OK_W + 1, OK_H + 1);
-
-        Font okFont = FontManager.getRunescapeBoldFont();
-        g.setFont(okFont);
-        FontMetrics fm = g.getFontMetrics();
-        int lw = fm.stringWidth(OK_LABEL);
-        int lx = okX + (OK_W - lw) / 2;
-        int ly = okY + (OK_H + fm.getAscent()) / 2 - 2;
-        g.setColor(TITLE_FG);
-        g.drawString(OK_LABEL, lx, ly);
+        okBounds = button(g, x + (POPUP_W - OK_W) / 2, y + POPUP_H - OK_H - OK_MARGIN, OK_W, OK_H, OK_LABEL);
     }
 
     /** Registered with RuneLite's mouse manager: a press on the OK button

@@ -17,12 +17,12 @@ import static com.pvp.leaderboard.ui.Ui.*;
  * to the largest font the sidepanel width allows.
  *
  * <p>Reads the same cached file the website uses
- * ({@code /leaderboard[_<bucket>].json}) via
+ * ({@code /leaderboard_v3_<bucket>.json}) via
  * {@link PvpApi#getLeaderboard(String)} — a single CDN call cached
  * ~1 hour. A bucket toggle ([Overall][NH][Veng][Multi][DMM][Tournament], NH
  * by default) matches the website's leaderboard tabs and the sibling "What
- * are the ranks" view. Unlike the website, only the account's first/primary
- * name is shown.
+ * are the ranks" view. Each row is the file's {@code position}, the first of
+ * {@code player_names} and the {@code division}.
  *
  * <p>Row text: the player name is the row's primary element; the rank number
  * and tier columns render one point below it, bold. The rank column is sized
@@ -41,8 +41,7 @@ public class TopPlayers extends RowsPanel
     {
         final int worldRank;
         final String name;
-        final String rankFamily; // e.g. "Rune" / "3rd Age" — drives the colour
-        final String tierLabel;  // e.g. "Rune 1" / "3rd Age"
+        final String tierLabel;  // e.g. "Rune 1" / "3rd Age"; its first word drives the colour
     }
 
     private final PvpApi pvpApi;
@@ -212,7 +211,7 @@ public class TopPlayers extends RowsPanel
         // leaves the player name its width.
         var tier = new JLabel(r.tierLabel);
         tier.setName("topPlayerTier");
-        tier.setForeground(RankUtils.getRankColor(r.rankFamily));
+        tier.setForeground(RankUtils.getRankColor(r.tierLabel));
         tier.setHorizontalAlignment(SwingConstants.RIGHT);
 
         return fit.row("topPlayerRow", rankNum, name, tier);
@@ -232,97 +231,28 @@ public class TopPlayers extends RowsPanel
         super.doLayout();
     }
 
-    /** Per-account aggregate built while de-duplicating the raw player rows. */
-    private static final class Agg
-    {
-        final LinkedHashSet<String> names = new LinkedHashSet<>();
-        double mmr = Double.NEGATIVE_INFINITY;
-        String rank = null;
-        int division = 0;
-    }
-
     /**
-     * Convert a cached leaderboard payload into the top {@code limit} display
-     * rows, mirroring the website's {@code fetchLeaderboard} exactly:
-     * <ol>
-     *   <li>keep only rows with an account id + finite MMR;</li>
-     *   <li>de-duplicate by account ({@code account_hash || account}) — the
-     *       file can carry more than one row per account — unioning names in
-     *       first-seen order and keeping the highest-MMR entry's rank/division;</li>
-     *   <li>sort by MMR descending, assign world rank by position;</li>
-     *   <li>take the top {@code limit}.</li>
-     * </ol>
-     * The plugin shows only the account's first/primary name (the website
-     * joins them all).
-     *
-     * <p>Pure + null-safe so it's unit-testable without Swing/network.
+     * The top {@code limit} rows of a {@code leaderboard_v3_<bucket>.json} payload, by {@code position}: each
+     * player's position (a whole number), first name (the first text of {@code player_names}) and
+     * {@code division}. A row missing any of them is skipped. Pure and null-safe.
      */
     static List<Row> parseTop(JsonObject data, int limit)
     {
-        Map<String, Agg> byAccount = new LinkedHashMap<>();
+        List<Row> rows = new ArrayList<>();
         for (JsonElement el : JsonLenient.optArray(data, "players"))
         {
-            if (!el.isJsonObject()) continue;
-            JsonObject p = el.getAsJsonObject();
-            double mmr = JsonLenient.optDouble(p, "mmr", JsonLenient.optDouble(p, "MMR", Double.NaN));
-            String account = accountOf(p);
-            if (!Double.isFinite(mmr) || account == null) continue;
-
-            Agg agg = byAccount.computeIfAbsent(account, k -> new Agg());
-            addNames(agg.names, p);
-            if (mmr > agg.mmr)
-            {
-                agg.mmr = mmr;
-                agg.rank = strOrNull(p, "rank");
-                agg.division = JsonLenient.optInt(p, "division", 0);
-            }
-        }
-
-        List<Agg> ranked = new ArrayList<>(byAccount.values());
-        ranked.sort((a, b) -> Double.compare(b.mmr, a.mmr));
-
-        List<Row> rows = new ArrayList<>();
-        int n = Math.min(Math.max(0, limit), ranked.size());
-        for (int i = 0; i < n; i++)
-        {
-            Agg a = ranked.get(i);
-            String rankFamily = a.rank;
-            int division = a.division;
-            if (rankFamily == null)
-            {
-                RankInfo ri = RankUtils.toRankInfo(a.mmr);
-                rankFamily = ri.rank;
-                division = ri.division;
-            }
-            rows.add(new Row(i + 1, a.names.isEmpty() ? "Unknown" : a.names.iterator().next(), rankFamily,
-                "3rd Age".equals(rankFamily) ? rankFamily : rankFamily + " " + division));
-        }
-        return rows;
-    }
-
-    /** Account id, mirroring the website's {@code account_hash || account}. */
-    private static String accountOf(JsonObject p)
-    {
-        String a = strOrNull(p, "account_hash");
-        return (a != null) ? a : strOrNull(p, "account");
-    }
-
-    private static void addNames(Set<String> out, JsonObject p)
-    {
-        try
-        {
+            JsonObject p = el.isJsonObject() ? el.getAsJsonObject() : null;
+            long position = JsonLenient.optWhole(p, "position");
+            String name = null;
             for (JsonElement n : JsonLenient.optArray(p, "player_names"))
             {
-                if (!n.isJsonNull() && !n.getAsString().trim().isEmpty()) out.add(n.getAsString());
+                String s = JsonLenient.str(n);
+                if (name == null && s != null && !s.trim().isEmpty()) name = s;
             }
+            String division = RankUtils.division(p);
+            if (position > 0 && name != null && division != null) rows.add(new Row((int) position, name, division));
         }
-        catch (RuntimeException ignore) { }
-    }
-
-    /** The key's text, or {@code null} when absent, not text, or blank. */
-    private static String strOrNull(JsonObject p, String key)
-    {
-        String s = JsonLenient.optString(p, key);
-        return s.trim().isEmpty() ? null : s;
+        rows.sort(Comparator.comparingInt(r -> r.worldRank));
+        return rows.subList(0, Math.min(Math.max(0, limit), rows.size()));
     }
 }

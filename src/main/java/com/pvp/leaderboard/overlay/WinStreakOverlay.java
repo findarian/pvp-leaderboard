@@ -33,6 +33,7 @@ public class WinStreakOverlay extends OverlayPanel
 	/** Its auto-switch target is the style shown; its FFA portal flag gates the box. */
 	private final FightMonitor fightMonitor;
 	private final LongSupplier nowMs;
+	final Footer footer = new Footer();
 
 	// ---- profile-peek state: client thread only ----
 	private String peekedSelf;
@@ -102,6 +103,7 @@ public class WinStreakOverlay extends OverlayPanel
 			if (!tracker.isKnown()) return null;
 			List<String> lines = linesFor(resolveBucket(), tracker, profile, config.killStreakBoxShowLongest(),
 				config.killStreakBoxShowWinLoss(), config.killStreakBoxShowPeak());
+			if (footer.shown(nowMs.getAsLong(), config.alwaysShowPvpLeaderboard())) lines.add(Footer.TEXT);
 			Font font = FontManager.getRunescapeSmallFont();
 			FontMetrics fm = graphics.getFontMetrics(font);
 			int widest = 0;
@@ -122,7 +124,7 @@ public class WinStreakOverlay extends OverlayPanel
 	}
 
 	/** The style to show: the pinned one while auto-switch is off; else the
-	 *  auto-switch target (Tournament reads Event), the leaderboard bucket the
+	 *  auto-switch target, the leaderboard bucket the
 	 *  config holds, then NH. */
 	StreakBucket resolveBucket()
 	{

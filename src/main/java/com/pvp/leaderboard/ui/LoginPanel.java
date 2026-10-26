@@ -1,8 +1,6 @@
 package com.pvp.leaderboard.ui;
 
-import lombok.*;
 import com.pvp.leaderboard.*;
-import com.pvp.leaderboard.service.*;
 import java.awt.*;
 import java.awt.event.*;
 import java.net.*;
@@ -18,29 +16,18 @@ public class LoginPanel extends JPanel
 {
     private static final int MAX_SEARCHES = 10;
 
-    /** Discord brand "blurple" (#5865F2) — matches flipping-copilot's button. */
-    private static final Color BLURPLE = new Color(88, 101, 242);
-
-    private final DiscordLogin discordLogin;
     private final Consumer<String> onSearch;
-    private final Runnable onLoginState;
 
     private JTextField searchField;
     private JButton searchBtn;
-    @Getter private JButton loginButton;
-
-    private boolean loggingIn = false;
-    private boolean isLoggedIn = false;
 
     // Rate limiting for plugin search (10 per minute)
     private final Deque<Long> searchTimes = new ArrayDeque<>();
 
-    /** Both callbacks are always wired (the dashboard passes them). */
-    public LoginPanel(DiscordLogin discordLogin, Consumer<String> onSearch, Runnable onLoginState)
+    /** The search box; {@code onSearch} is always wired (the dashboard passes it). */
+    public LoginPanel(Consumer<String> onSearch)
     {
-        this.discordLogin = discordLogin;
         this.onSearch = onSearch;
-        this.onLoginState = onLoginState;
 
         setLayout(new BoxLayout(this, BoxLayout.Y_AXIS));
         setBorder(pad(4, 4, 4, 4));
@@ -93,15 +80,6 @@ public class LoginPanel extends JPanel
         btnPanel.add(siteBtn);
         btnPanel.add(searchBtn);
         add(btnPanel);
-
-        // Hoisted into the dashboard's community box, which sizes it.
-        // Discord blurple (#5865F2), matching flipping-copilot's login button.
-        loginButton = new JButton("Login with Discord");
-        loginButton.setBackground(BLURPLE);
-        loginButton.setForeground(Color.WHITE);
-        loginButton.setOpaque(true);
-        loginButton.setFocusPainted(false);
-        loginButton.addActionListener(e -> handleLogin());
     }
 
     /** RuneScape name format: 1-12 letters, digits, spaces, underscores or
@@ -182,51 +160,6 @@ public class LoginPanel extends JPanel
         // Record this search
         searchTimes.addLast(now);
         return true;
-    }
-
-    private void handleLogin()
-    {
-        if (loggingIn)
-        {
-            // The button doubles as "Cancel login" while a handshake is in
-            // flight (login takes a browser round-trip + polling).
-            discordLogin.cancelLogin();
-            setLoginBusy(false);
-            return;
-        }
-        if (isLoggedIn)
-        {
-            setLoggedIn(false);
-            discordLogin.logout();
-            onLoginState.run();
-            return;
-        }
-
-        // Use Discord OAuth flow. The login state is read on the Swing
-        // thread; no logout can happen meanwhile, the button reads Cancel.
-        setLoginBusy(true);
-        discordLogin.login().whenComplete((success, ex) -> SwingUtilities.invokeLater(() -> {
-            setLoginBusy(false);
-            if (Boolean.TRUE.equals(success) && discordLogin.isLoggedIn())
-            {
-                setLoggedIn(true);
-                onLoginState.run();
-            }
-        }));
-    }
-
-    /** The button stays enabled while busy so the user can cancel the handshake. */
-    private void setLoginBusy(boolean busy)
-    {
-        loggingIn = busy;
-        loginButton.setText(busy ? "Cancel login" : (isLoggedIn ? "Logout" : "Login with Discord"));
-        searchField.setEnabled(!busy);
-    }
-
-    public void setLoggedIn(boolean loggedIn)
-    {
-        isLoggedIn = loggedIn;
-        loginButton.setText(loggedIn ? "Logout" : "Login with Discord");
     }
 
     public void setPluginSearchText(String text)

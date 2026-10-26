@@ -5,13 +5,13 @@ import com.pvp.leaderboard.config.*;
 import com.pvp.leaderboard.game.*;
 import com.pvp.leaderboard.lobby.*;
 import com.pvp.leaderboard.overlay.*;
+import com.pvp.leaderboard.perf.*;
 import com.pvp.leaderboard.queue.*;
 import com.pvp.leaderboard.service.*;
 import com.pvp.leaderboard.service.socket.*;
 import com.pvp.leaderboard.tournament.*;
 import com.pvp.leaderboard.ui.*;
 import java.awt.*;
-import java.awt.datatransfer.*;
 import java.awt.image.*;
 import java.util.*;
 import java.util.concurrent.*;
@@ -21,6 +21,7 @@ import lombok.extern.slf4j.*;
 import net.runelite.api.*;
 import net.runelite.api.events.*;
 import net.runelite.client.callback.*;
+import net.runelite.client.chat.*;
 import net.runelite.client.config.*;
 import net.runelite.client.eventbus.*;
 import net.runelite.client.events.*;
@@ -32,6 +33,7 @@ import net.runelite.client.ui.overlay.*;
 import net.runelite.client.util.*;
 import javax.inject.Inject;
 import javax.swing.Timer;
+import java.awt.event.MouseEvent;
 import java.util.List;
 
 @Slf4j
@@ -69,6 +71,9 @@ public class PvPLeaderboardPlugin extends Plugin
 	private WinStreakOverlay winStreakOverlay;
 
 	@Inject
+	private FightBoxOverlay fightBoxOverlay;
+
+	@Inject
 	private WinStreakTracker winStreakTracker;
 
 	@Inject
@@ -88,9 +93,6 @@ public class PvPLeaderboardPlugin extends Plugin
 
 	@Inject
 	private PvpApi pvpApi;
-
-	@Inject
-	private DiscordLogin discordLogin;
 
 	@Inject
 	private IdentitySvc identitySvc;
@@ -155,13 +157,36 @@ public class PvPLeaderboardPlugin extends Plugin
 	private GearWatcher gearWatcher;
 
 	@Inject
-	private ArenaLocator arenaLocator;
-
-	@Inject
 	private GearSearch gearSearch;
 
 	@Inject
 	private ArenaGearOverlay gearOverlay;
+
+	@Inject
+	private PerfTracker perfTracker;
+
+	@Inject
+	private FightLog fightLog;
+
+	private FightsPanel fightsPanel;
+
+	@Inject
+	private ChatMessageManager chatMessageManager;
+
+	/** The tournament box and what it says: each round's pairing and the start reminders. */
+	private TourneyPopup tourneyPopup;
+	private TourneyAlerts alerts;
+
+	/** The pop-ups' buttons: the ban warning's OK, then the tournament box's two. */
+	private final MouseAdapter popupMouse = new MouseAdapter()
+	{
+		@Override
+		public MouseEvent mousePressed(MouseEvent e)
+		{
+			MouseEvent r = warnOverlay.mouse.mousePressed(e);
+			return r.isConsumed() ? r : tourneyPopup.press(r);
+		}
+	};
 
 	private GearTracker gearTracker;
 	private GearReporter gearReporter;
@@ -282,7 +307,7 @@ public class PvPLeaderboardPlugin extends Plugin
 		// suppliers resolve at refresh time, not now, so it's fine that
 		// the local player isn't loaded yet.
 		profileGate.configure(this::getLocalName);
-		dashPanel = new Dashboard(this, pvpApi, discordLogin,
+		dashPanel = new Dashboard(this, pvpApi,
 			lobbySvc, profileGate, lobbyPrefs);
 		// Queue section + Tournaments sub-tab, per the two
 		// config flags; the in-combat probe drives tournament/in_combat.
@@ -317,7 +342,12 @@ public class PvPLeaderboardPlugin extends Plugin
 		overlayManager.add(warnOverlay);
 		warnOverlay.setOnDismiss(() -> configManager.unsetConfiguration(
 			FightMonitor.CONFIG_GROUP, FightMonitor.LMS_WARN_KEY));
-		mouseManager.registerMouseListener(warnOverlay.mouse);
+		// The tournament box: never shown during a fight; every pairing and reminder is also a chat line.
+		tourneyPopup = new TourneyPopup(client, config, configManager, fightMonitor::isInCombat, System::currentTimeMillis);
+		overlayManager.add(tourneyPopup);
+		alerts = new TourneyAlerts(tourneySvc, tourneyPopup::show, this::chat, System::currentTimeMillis);
+		tourneySvc.addListener(alerts);
+		mouseManager.registerMouseListener(popupMouse);
 
 		// The outline around the current tournament opponent: the tracker
 		// answers the canonical keys of every name the opponent is logged in
@@ -329,6 +359,8 @@ public class PvPLeaderboardPlugin extends Plugin
 		// lands on the Tournament bucket instead of the fight's style; once
 		// they leave the bracket the next fight switches back like every bucket.
 		fightMonitor.setTournamentBucketPin(() -> config.autoSwitchTournamentBucket() && oppTracker.isPlaying());
+		// The open tournament match, for the forfeits.
+		fightMonitor.setTourneyMatch(oppTracker::getActiveSeries);
 
 		// One-shot startup diagnostic: the in-combat suppression toggle and
 		// whether each overlay's provider is wired. Pairs with the per-popup
@@ -341,6 +373,7 @@ public class PvPLeaderboardPlugin extends Plugin
 		// streak line; the panel exists from here on and is never nulled.
 		streakBoxOnOnce();
 		overlayManager.add(winStreakOverlay);
+		overlayManager.add(fightBoxOverlay);
 		dashPanel.setWinStreakTracker(winStreakTracker);
 		fightMonitor.setStreakSink((bucketKey, result) ->
 		{
@@ -349,6 +382,14 @@ public class PvPLeaderboardPlugin extends Plugin
 		});
 		// The side panel's own rating rows follow the post-fight profile refresh.
 		fightMonitor.setProfileRefreshSink(dashPanel::refreshOwn);
+		// Each finished fight's performance stats ride with its result; the Performance tab lists them, with the ranks
+		// read right after it.
+		fightMonitor.setPerfSink(perfTracker::finish);
+		fightMonitor.setRankSink(fightLog::rank);
+		// Completed fights loads again once a result is sent.
+		fightsPanel = new FightsPanel(pvpApi, fightLog, this::getLocalName);
+		fightMonitor.setSentSink(fightsPanel::sent);
+		dashPanel.setPerformanceView(fightsPanel);
 
 		// Init menu handler with RankOverlay
 		menuHandler.init(dashPanel, navButton);
@@ -412,9 +453,12 @@ public class PvPLeaderboardPlugin extends Plugin
 		clientThread.invokeLater(scenePlayers::clear);
 		overlayManager.remove(matchPopup);
 		matchPopup.clear();
-		mouseManager.unregisterMouseListener(warnOverlay.mouse);
+		mouseManager.unregisterMouseListener(popupMouse);
 		overlayManager.remove(warnOverlay);
 		warnOverlay.clear();
+		overlayManager.remove(tourneyPopup);
+		if (tourneyPopup != null) tourneyPopup.clear();
+		tourneySvc.removeListener(alerts);
 		// Drop the opponent outline, forget the tournament
 		// session (bucket pin + highlight) and stop the sub-tab's ticker.
 		overlayManager.remove(oppOverlay);
@@ -434,9 +478,14 @@ public class PvPLeaderboardPlugin extends Plugin
 		// The Matchmaking tab's recent-joins repeat.
 		queueSvc.watchRecent(false);
 		overlayManager.remove(winStreakOverlay);
+		overlayManager.remove(fightBoxOverlay);
 		winStreakOverlay.clear();
 		fightMonitor.setStreakSink(null);
 		fightMonitor.setProfileRefreshSink(null);
+		fightMonitor.setPerfSink(null);
+		fightMonitor.setRankSink(null);
+		fightMonitor.setSentSink(null);
+		perfTracker.reset();
 		fightMonitor.cancelPending();
 		winStreakTracker.clear();
 		// Hard-close the socket and forbid future reconnects — the
@@ -576,6 +625,7 @@ public class PvPLeaderboardPlugin extends Plugin
 	public void onMenuOptionClicked(MenuOptionClicked event)
 	{
 		menuHandler.onMenuClick(event);
+		fightMonitor.handleOption(event);
 	}
 
 	@Subscribe
@@ -630,6 +680,8 @@ public class PvPLeaderboardPlugin extends Plugin
 					// mid-fight inside an LMS arena is submitted as a
 					// freeze-log (reason=logout).
 					fightMonitor.handleFreeze("logout");
+					// Open fights are kept as Partial in All fights.
+					perfTracker.reset();
 					// Fully clear fight state on logout
 					fightMonitor.resetFight();
 					kitStore.clearSession();
@@ -658,6 +710,13 @@ public class PvPLeaderboardPlugin extends Plugin
 					// opponent outline); tournament/status re-syncs it on the
 					// next login.
 					oppTracker.clear();
+					// The tournament box's queue goes; the next login asks for the event list again.
+					tourneyPopup.clear();
+					alerts.loggedOut();
+					break;
+				// A lost connection during a tournament match's fight is its forfeit.
+				case CONNECTION_LOST:
+					fightMonitor.handleQuit();
 					break;
 				case HOPPING:
 				case LOADING:
@@ -676,8 +735,11 @@ public class PvPLeaderboardPlugin extends Plugin
 	{
 		try
 		{
+			// The tracker settles the last tick's hits first, so a fight that ends this tick has them.
+			perfTracker.onTick();
 			// Delegate logic to FightMonitor
 			fightMonitor.handleTick(tick);
+			alerts.tick();
 
 			// Handle pending init after login (tick-based delay for player to be ready)
 			if (selfRankWait > 0 && --selfRankWait == 0)
@@ -715,6 +777,10 @@ public class PvPLeaderboardPlugin extends Plugin
 					{
 						// Load dashboard data
 						dashPanel.loadIfIdle(self);
+						// The Performance tab builds itself again for this character.
+						fightsPanel.characterReady();
+						// The open Events tab asks for its events at once.
+						dashPanel.loginReady();
 
 						// Start heartbeat (fires now, then every 5 mins)
 						if (heartbeatDue)
@@ -748,12 +814,37 @@ public class PvPLeaderboardPlugin extends Plugin
 	public void onHitsplatApplied(HitsplatApplied hitsplatApplied)
 	{
 		fightMonitor.handleHit(hitsplatApplied);
+		perfTracker.onHit(hitsplatApplied);
+	}
+
+	@Subscribe
+	public void onAnimationChanged(AnimationChanged animationChanged)
+	{
+		perfTracker.onAnimation(animationChanged);
+	}
+
+	@Subscribe
+	public void onStatChanged(StatChanged statChanged)
+	{
+		perfTracker.onStat(statChanged);
+	}
+
+	@Subscribe
+	public void onFakeXpDrop(FakeXpDrop fakeXpDrop)
+	{
+		perfTracker.onFakeXp(fakeXpDrop);
 	}
 
 	@Subscribe
 	public void onActorDeath(ActorDeath actorDeath)
 	{
 		fightMonitor.handleDeath(actorDeath);
+	}
+
+	@Subscribe
+	public void onPlayerDespawned(PlayerDespawned playerDespawned)
+	{
+		fightMonitor.handleDespawn(playerDespawned.getPlayer());
 	}
 
 	@Provides
@@ -766,7 +857,7 @@ public class PvPLeaderboardPlugin extends Plugin
 	{
 		final var tracker = new GearTracker(tourneySvc::status);
 		final var reporter = new GearReporter(tourneySvc, tracker,
-			new KitRouter(kitStore, kitReader, gearWatcher, arenaLocator),
+			new KitRouter(kitStore, kitReader, gearWatcher, this::loggedInWorld),
 			new GearMatcher(ItemVariationMapping::map, gearWatcher::isRune), fightMonitor::isInCombat,
 			System::currentTimeMillis, () -> ThreadLocalRandom.current().nextDouble());
 		gearTracker = tracker;
@@ -784,6 +875,11 @@ public class PvPLeaderboardPlugin extends Plugin
 			return e != null && e.arena;
 		});
 		gearSearch.setMissing(this::missingGear);
+		gearSearch.setWindow(() ->
+		{
+			GearTracker.GearEvent e = tracker.current();
+			return e != null && e.running;
+		});
 		gearParts().forEach(eventBus::register);
 		gearOverlay.setView(reporter::view);
 		overlayManager.add(gearOverlay);
@@ -793,12 +889,6 @@ public class PvPLeaderboardPlugin extends Plugin
 			public void findItem(int itemId, List<Integer> altIds, String name)
 			{
 				gearSearch.onItemClicked(itemId, altIds, name);
-			}
-
-			@Override
-			public void copySetup(GearKit kit)
-			{
-				copyText(GearCapture.toCatalog(kit));
 			}
 
 			@Override
@@ -823,7 +913,7 @@ public class PvPLeaderboardPlugin extends Plugin
 	/** The kit check's event subscribers, registered and unregistered in this order. */
 	private List<Object> gearParts()
 	{
-		return List.of(kitReader, gearWatcher, arenaLocator, gearSearch, gearOverlay);
+		return List.of(kitReader, gearWatcher, gearSearch, gearOverlay);
 	}
 
 	private void stopCheck()
@@ -866,16 +956,10 @@ public class PvPLeaderboardPlugin extends Plugin
 		}
 	}
 
-	private void copyText(String text)
+	/** {@code text} as a game message in the chatbox. */
+	private void chat(String text)
 	{
-		if (text == null) return;
-		try
-		{
-			Toolkit.getDefaultToolkit().getSystemClipboard().setContents(new StringSelection(text), null);
-		}
-		catch (RuntimeException e)
-		{
-		}
+		chatMessageManager.queue(QueuedMessage.builder().type(ChatMessageType.GAMEMESSAGE).runeLiteFormattedMessage(text).build());
 	}
 
 	/** Opens (or keeps) the socket as {@code name}, once the client UUID is known. */

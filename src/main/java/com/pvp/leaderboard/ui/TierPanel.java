@@ -8,21 +8,20 @@ import java.util.*;
 import java.util.concurrent.*;
 import javax.swing.*;
 import static com.pvp.leaderboard.ui.Ui.*;
+import static com.pvp.leaderboard.util.JsonLenient.*;
 
 /**
- * "What are the ranks" view: every tier from 3rd Age down to Bronze 3 with
- * a live "Top X%" derived from the rank histogram
- * ({@code rank_hist/<bucket>.json}).
+ * "What are the ranks" view: the 21 divisions from Dragon 1 down to Bronze 3,
+ * each with its "Top X%" from the board's {@code distribution_v3_<bucket>.json}:
+ * the players at or above the division over {@code total_players}.
  *
  * <p>A bucket toggle ([Overall][NH][Veng][Multi][DMM], NH selected by
  * default) mirrors the Performance Breakdown selector in Player Lookup.
- * Switching buckets re-fetches that bucket's histogram (cached per bucket)
- * and recomputes the per-tier share of the population at or above each
- * tier's MMR cutoff.
+ * Switching buckets fetches that bucket's file (cached per bucket).
  *
  * <p>Row text: the bold tier name is the row's primary element; the value
  * column renders one point below it, plain. The font cap (18 pt) matters
- * because 25 rows scale together: past it the list turns into a long scroll
+ * because 21 rows scale together: past it the list turns into a long scroll
  * and dwarfs the bucket toggles above it. The widest string in the view
  * governs the whole list — currently the "No one yet" placeholder.
  */
@@ -35,7 +34,7 @@ public class TierPanel extends RowsPanel
     private final JPanel bar;
     /** Tier name and value: 9-18 pt; a row loses 2 x 4 px padding and one 6 px gap. */
     private final RowTextFit fit = new RowTextFit(9, 18, 14, null, new int[]{Font.BOLD, Font.PLAIN}, new int[]{0, 1});
-    /** bucket key → fetched histogram (avoids refetching on toggle). */
+    /** bucket key → fetched distribution (avoids refetching on toggle). */
     private final Map<String, JsonObject> histCache = new ConcurrentHashMap<>();
 
     private volatile String selectedBucket = "nh";
@@ -53,7 +52,7 @@ public class TierPanel extends RowsPanel
     }
 
     /**
-     * Trigger (or refresh) the histogram load for the selected bucket.
+     * Trigger (or refresh) the distribution load for the selected bucket.
      * Called by {@link Dashboard} when the view is revealed so no
      * network request happens until the user actually opens it. Cached
      * buckets render instantly; a previously-failed fetch is retried.
@@ -63,7 +62,7 @@ public class TierPanel extends RowsPanel
         loadBucket(selectedBucket);
     }
 
-    /** One row per tier, 3rd Age first; row {@code j} is {@code THRESHOLDS[24 - j]}. */
+    /** One row per division, Dragon 1 first; row {@code j} is {@code DIVISIONS[20 - j]}. */
     private JPanel buildTiers()
     {
         var list = new JPanel();
@@ -71,11 +70,10 @@ public class TierPanel extends RowsPanel
         list.setName("rankTierList");
         left(list);
 
-        String[][] thresholds = RankUtils.THRESHOLDS;
-        for (int i = thresholds.length - 1; i >= 0; i--)
+        for (int i = RankUtils.DIVISIONS.length - 1; i >= 0; i--)
         {
-            String rankName = thresholds[i][0];
-            var nameLabel = new JLabel("3rd Age".equals(rankName) ? rankName : rankName + " " + thresholds[i][1]);
+            String rankName = RankUtils.DIVISIONS[i];
+            var nameLabel = new JLabel(rankName);
             nameLabel.setName("tierName");
             nameLabel.setForeground(RankUtils.getRankColor(rankName));
 
@@ -131,7 +129,7 @@ public class TierPanel extends RowsPanel
         }
 
         setAllValues("…"); // ellipsis = loading
-        CompletableFuture<JsonObject> future = pvpApi.getHistogram(bucketKey);
+        CompletableFuture<JsonObject> future = pvpApi.getDistribution(bucketKey);
         if (future == null)
         {
             setAllValues("Unavailable");
@@ -139,7 +137,7 @@ public class TierPanel extends RowsPanel
         }
         future.thenAccept(hist -> SwingUtilities.invokeLater(() ->
         {
-            if (hist != null && hist.has("bins"))
+            if (hist != null && hist.has("distribution"))
             {
                 histCache.put(bucketKey, hist);
                 if (bucketKey.equals(selectedBucket)) applyHist(hist);
@@ -158,14 +156,22 @@ public class TierPanel extends RowsPanel
         });
     }
 
-    private void applyHist(JsonObject hist)
+    /** Each row's "Top X%": the players in its division and every one above (the title's count first). */
+    private void applyHist(JsonObject dist)
     {
-        long total = RankUtils.histTotal(hist);
-        String[][] t = RankUtils.THRESHOLDS;
-        for (int i = 0; i < t.length; i++)
+        Map<String, Long> counts = new HashMap<>();
+        for (JsonElement e : optArray(dist, "distribution"))
         {
-            long atOrAbove = RankUtils.totalAbove(hist, Double.parseDouble(t[i][2]));
-            ((JLabel) fit.rows.get(t.length - 1 - i)[2]).setText(RankUtils.formatTopPercent(atOrAbove, total));
+            JsonObject o = e.isJsonObject() ? e.getAsJsonObject() : null;
+            String rank = o == null ? null : str(o.get("rank"));
+            if (rank != null) counts.merge(rank, Math.max(0L, optLong(o, "count", 0)), Long::sum);
+        }
+        long total = optLong(dist, "total_players", 0);
+        long atOrAbove = counts.getOrDefault("3rd Age", 0L);
+        for (int j = 0; j < fit.rows.size(); j++)
+        {
+            atOrAbove += counts.getOrDefault(RankUtils.DIVISIONS[RankUtils.DIVISIONS.length - 1 - j], 0L);
+            ((JLabel) fit.rows.get(j)[2]).setText(RankUtils.formatTopPercent(atOrAbove, total));
         }
         // The values just changed width ("—" → "No one yet"),
         // so the fit is stale even though the panel hasn't resized.

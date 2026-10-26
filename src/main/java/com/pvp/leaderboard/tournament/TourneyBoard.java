@@ -5,10 +5,9 @@ import java.util.*;
 import static com.pvp.leaderboard.util.JsonLenient.*;
 
 /**
- * A {@code tournament/standings} push: the live
- * leaderboard of one tournament plus the round clock. Pushed at once
- * after {@code tournament/subscribe} and on every score change while
- * subscribed.
+ * A {@code tournament/standings} push, or a
+ * {@code tournament/standings_delta} applied to it: the live leaderboard
+ * of one tournament plus the round clock.
  */
 public final class TourneyBoard
 {
@@ -24,7 +23,7 @@ public final class TourneyBoard
     public final List<StandingsRow> rows;
     public final long gearDeadline;
 
-    private TourneyBoard(JsonObject o, String id)
+    private TourneyBoard(JsonObject o, String id, List<StandingsRow> rows)
     {
         tournamentId = id;
         status = optString(o, "status");
@@ -33,7 +32,7 @@ public final class TourneyBoard
         etaS = optInt(o, "eta_s", -1);
         breakUntil = optLong(o, "break_until", 0L);
         extended = optInt(o, "extended", 0);
-        rows = StandingsRow.fromArray(optArray(o, "standings"), StandingsRow.tierLabels(o));
+        this.rows = rows;
         gearDeadline = Math.max(0L, optLong(o, "gear_check_until", 0L));
     }
 
@@ -42,7 +41,13 @@ public final class TourneyBoard
     {
         if (o == null) return null;
         String id = optString(o, "tournament_id");
-        return id.isEmpty() ? null : new TourneyBoard(o, id);
+        return id.isEmpty() ? null : new TourneyBoard(o, id, StandingsRow.fromArray(optArray(o, "standings"), StandingsRow.tierLabels(o)));
+    }
+
+    /** {@code o}'s id, status, round and clock with {@code rows}. */
+    static TourneyBoard of(JsonObject o, List<StandingsRow> rows)
+    {
+        return new TourneyBoard(o, optString(o, "tournament_id"), rows);
     }
 
     public boolean isFinished()

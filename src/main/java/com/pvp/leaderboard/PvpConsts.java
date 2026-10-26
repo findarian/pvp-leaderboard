@@ -27,33 +27,11 @@ public final class PvpConsts
      */
     public static final String SOCKET_URL = "wss://api.pvp-leaderboard.com/prod";
 
-    public static final String VERSION = "2.0.0";
+    public static final String VERSION = "2.1.0";
 
     /** The {@code User-Agent} of the plugin's own requests (the socket's
      *  $connect, the heartbeat, the membership feed). */
     public static final String USER_AGENT = "RuneLite/" + RuneLiteProperties.getVersion();
-
-    /** The Discord login API's base URL. */
-    private static final String DISCORD_API =
-        "https://5l3oex7zaa.execute-api.us-east-1.amazonaws.com/prod";
-
-    /**
-     * Plugin login — start endpoint ({@code GET /auth/discord/plugin-init}).
-     * Returns {@code {login_id, authorize_url}}; the plugin then polls
-     * {@link #POLL_URL}.
-     */
-    public static final String INIT_URL =
-        DISCORD_API + "/auth/discord/plugin-init";
-
-    /**
-     * Plugin login — poll endpoint
-     * ({@code GET /auth/discord/plugin-poll?login_id=}). Returns
-     * {@code {status: pending|complete|error|expired, session?}} until the
-     * browser side finishes; the plugin adopts the minimal session on
-     * {@code complete}.
-     */
-    public static final String POLL_URL =
-        DISCORD_API + "/auth/discord/plugin-poll";
 
     // ------------------------------------------------------------------
     // LMS (Last Man Standing) freeze-log detection

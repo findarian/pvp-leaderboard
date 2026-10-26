@@ -5,30 +5,53 @@ import java.awt.*;
 import java.util.*;
 import java.util.function.*;
 import javax.swing.*;
+import javax.swing.border.*;
 import java.util.List;
 import static com.pvp.leaderboard.ui.Ui.*;
 
 public class GearCard extends CapPanel
 {
     public static final String NAME = "tournament-gear-card";
-    static final String NEVER_READ = "Open your kit tab on the duel screen or the Supplies chest so the plugin can read your kit.";
-    static final String STALE_HINT = "Your kit changed since the plugin last read it (a Load-outs copy?) — open your kit tab so it can re-read it.";
-    static final String POUCH_HINT = "Open your kit's rune pouch once so the plugin can read its runes.";
-    static final String AWAY_HINT = "Fights are PvP Arena Unranked Duels — head to the PvP Arena.";
-    static final String STUB_BANNER = "Placeholder kit — the host's final kit may differ";
-    static final String COPIED = "Copied — paste it into gear_sets_catalog.json";
 
     private static final float LINE_PT = TourneyPanel.BODY_PT;
-    private static final float ITEM_PT = 14f;
-    /** An item icon's width plus its gap to the text. */
-    private static final int ICON_ROOM_PX = 40;
     static final Color RED = new Color(0xff6b6b);
+    /** One item slot: a 36 x 32 icon inside a 2 px border. */
+    private static final Dimension CELL = new Dimension(40, 36);
+    private static final int GAP = 2;
+    private static final int INV_W = 4 * CELL.width + 3 * GAP;
+    /** The equipment shape, 3 wide and 5 high: each cell's worn slot, null for an empty corner. */
+    private static final String[] DOLL = {null, "head", null, "cape", "neck", "ammo", "weapon", "body", "shield", null, "legs", null,
+        "hands", "feet", "ring"};
+    private static final Color SLOT_BG = new Color(0x3a3a3a);
+    private static final Border PLAIN = BorderFactory.createLineBorder(new Color(0x4a4a4a), 2);
+    private static final Border OUTLINE = BorderFactory.createLineBorder(RED, 2);
+    /** The "Missing items" key: a small red box. */
+    private static final Icon KEY = new Icon()
+    {
+        @Override
+        public void paintIcon(Component c, Graphics g, int x, int y)
+        {
+            g.setColor(RED);
+            g.drawRect(x, y + 1, 10, 10);
+            g.drawRect(x + 1, y + 2, 8, 8);
+        }
+
+        @Override
+        public int getIconWidth()
+        {
+            return 14;
+        }
+
+        @Override
+        public int getIconHeight()
+        {
+            return 12;
+        }
+    };
 
     public interface Actions
     {
         void findItem(int itemId, List<Integer> altIds, String name);
-
-        void copySetup(GearKit kit);
 
         void showMissing(List<Integer> itemIds);
 
@@ -63,12 +86,12 @@ public class GearCard extends CapPanel
     public void render(GearReporter.View v)
     {
         current = v == null ? GearReporter.View.EMPTY : v;
-        maybeOpen(current);
-        if (current.event == null || current.inCombat)
+        if (current.event == null || current.inCombat || current.event.arena && !current.atArena)
         {
             setVisible(false);
             return;
         }
+        maybeOpen(current);
         String nextShape = shapeOf(current);
         if (!nextShape.equals(shape))
         {
@@ -98,11 +121,11 @@ public class GearCard extends CapPanel
     private static String shapeOf(GearReporter.View v)
     {
         var sb = new StringBuilder(v.event.tournamentId).append('|').append(v.event.set.digest).append('|').append(v.event.arena)
-            .append('|').append(v.atArena).append('|').append(v.verifiedOk()).append('|').append(v.stale()).append('|').append(v.kit == null);
+            .append('|').append(v.verifiedOk()).append('|').append(v.kit == null);
         GearDiff d = v.diff;
         if (d != null)
         {
-            sb.append('|').append(d.buildOk).append(d.spellbookOk).append(d.pouchUnknown).append(d.missing).append(d.extra);
+            sb.append('|').append(d.buildOk).append(d.spellbookOk).append(d.missing).append(d.extra);
         }
         return sb.toString();
     }
@@ -122,93 +145,179 @@ public class GearCard extends CapPanel
             return;
         }
         add(label("gear-card-title", "Required kit: " + set.name, Color.WHITE, Font.BOLD, TourneyPanel.HEADER_PT));
-        if (set.placeholder) add(label("gear-card-placeholder", STUB_BANNER, AMBER));
         countdown = label("gear-card-countdown", " ", AMBER, Font.BOLD, LINE_PT);
         add(countdown);
-        if (v.event.arena && !v.atArena) add(label("gear-card-where", AWAY_HINT, MUTED));
-        if (v.kit == null)
-        {
-            add(label("gear-card-hint", NEVER_READ, AMBER));
-            for (GearItem item : set.items)
-            {
-                JLabel row = itemLabel("gear-card-need-" + item.id, item.qty + " × " + escape(item.name), "", INFO);
-                icons.apply(row, item.id, item.qty, item.stackable);
-                add(row);
-            }
-            finish();
-            return;
-        }
-        if (v.stale()) add(label("gear-card-hint", STALE_HINT, AMBER));
         GearDiff d = v.diff;
-        add(d.buildOk
-            ? label("gear-card-build", "Build: " + set.buildLabel, GREEN)
-            : label("gear-card-build", "Pick " + set.buildLabel + " on the duel screen's Stats tab", RED, Font.BOLD, LINE_PT));
-        for (GearDiff.Row r : d.missing) add(missingRow(r));
-        for (GearDiff.Row r : d.extra)
-        {
-            JLabel row = itemLabel("gear-card-extra-" + r.itemId, "remove: " + (r.need == 0 ? r.have : r.overBy()) + " × " + escape(r.name), "", AMBER);
-            icons.apply(row, r.itemId, Math.max(1, r.need == 0 ? r.have : r.overBy()), r.stackable);
-            add(row);
-        }
-        if (set.spellbook != null)
+        if (d != null && !d.buildOk) add(label("gear-card-build", "Pick " + set.buildLabel + " on the duel screen's Stats tab", RED));
+        if (d != null && set.spellbook != null && !d.spellbookOk)
         {
             String book = set.bookLabel == null ? set.spellbook : set.bookLabel;
-            add(d.spellbookOk
-                ? label("gear-card-spellbook", "Spellbook: " + book, GREEN)
-                : label("gear-card-spellbook", "Spellbook: " + book + " — switch it in the kit tab's drop-down", RED, Font.BOLD, LINE_PT));
+            add(label("gear-card-spellbook", "Spellbook: " + book + " — switch it in the kit tab's drop-down", RED));
         }
-        if (d.pouchUnknown) add(label("gear-card-pouch", POUCH_HINT, AMBER));
+        add(vgap(4));
+        add(worn(set, d));
+        add(vgap(GAP));
+        add(inventory(set, d));
+        if (d != null && !d.missing.isEmpty())
+        {
+            add(vgap(4));
+            JLabel key = label("gear-card-missing", "Missing items", RED);
+            key.setIcon(KEY);
+            add(key);
+        }
+        if (d != null && !d.extra.isEmpty())
+        {
+            add(vgap(4));
+            add(label("gear-card-extras", "Extra items to remove", RED));
+            add(extras(d.extra));
+        }
         finish();
     }
 
-    private JLabel missingRow(GearDiff.Row r)
+    /** The worn items in the equipment shape, centred over the inventory. */
+    private JComponent worn(GearSet set, GearDiff d)
     {
-        JLabel row = itemLabel("gear-card-missing-" + r.itemId, escape(r.name), " <font color='#ff6b6b'>" + r.have + " / " + r.need + "</font>", INFO);
-        icons.apply(row, r.itemId, r.need, r.stackable);
-        row.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
-        row.setToolTipText("Find it in the kit's supplies list (or the bank)");
-        onClick(row, () -> actions.findItem(r.itemId, r.altIds, r.name));
-        return row;
+        JPanel grid = grid("gear-card-worn", 5, 3);
+        for (String slot : DOLL)
+        {
+            GearItem item = null;
+            for (GearItem i : set.items) if (slot != null && slot.equals(i.slot)) item = i;
+            grid.add(slot == null ? new JLabel() : slot("gear-card-worn-" + slot, item, 0, 1, d));
+        }
+        var wrap = new JPanel(new FlowLayout(FlowLayout.CENTER, 0, 0));
+        wrap.setOpaque(false);
+        wrap.add(grid);
+        Dimension size = new Dimension(INV_W, grid.getPreferredSize().height);
+        wrap.setPreferredSize(size);
+        wrap.setMaximumSize(size);
+        return left(wrap);
+    }
+
+    private JComponent inventory(GearSet set, GearDiff d)
+    {
+        GearItem[] at = new GearItem[GearItem.INVENTORY_SLOTS];
+        int[] k = new int[at.length];
+        int[] n = new int[at.length];
+        for (Map.Entry<GearItem, List<Integer>> e : slots(set).entrySet())
+        {
+            List<Integer> s = e.getValue();
+            for (int i = 0; i < s.size(); i++)
+            {
+                at[s.get(i)] = e.getKey();
+                k[s.get(i)] = i;
+                n[s.get(i)] = s.size();
+            }
+        }
+        JPanel grid = grid("gear-card-inv", 7, 4);
+        for (int x = 0; x < at.length; x++) grid.add(slot("gear-card-inv-" + x, at[x], k[x], n[x], d));
+        return fixed(grid);
+    }
+
+    /** Each carried row's inventory slots: the set's own when every carried row has them and none is shared, else the
+     *  set's order, one slot per unit and one per stack. */
+    private static Map<GearItem, List<Integer>> slots(GearSet set)
+    {
+        Set<Integer> used = new HashSet<>();
+        boolean own = true;
+        for (GearItem i : set.items)
+        {
+            if (i.isWorn()) continue;
+            if (i.inv.isEmpty()) own = false;
+            for (int x : i.inv) own &= used.add(x);
+        }
+        Map<GearItem, List<Integer>> out = new LinkedHashMap<>();
+        int next = 0;
+        for (GearItem i : set.items)
+        {
+            if (i.isWorn()) continue;
+            List<Integer> s = own ? i.inv : new ArrayList<>();
+            for (int u = i.stackable ? 1 : i.qty; !own && u > 0 && next < GearItem.INVENTORY_SLOTS; u--) s.add(next++);
+            out.put(i, s);
+        }
+        return out;
+    }
+
+    /** One slot of the kit: {@code item}'s icon (a stack with its count), its name and have / need on hover, and a red
+     *  outline when it is one of the row's last {@code missing} of {@code n} icons; a click on it finds the item. */
+    private JLabel slot(String name, GearItem item, int k, int n, GearDiff d)
+    {
+        JLabel l = box(name);
+        if (item == null) return l;
+        icons.apply(l, item.id, item.stackable ? item.qty : 1, item.stackable);
+        int have = item.qty;
+        int need = item.qty;
+        if (d != null)
+        {
+            for (GearDiff.Row r : d.missing) if (r.itemId == item.id) have = r.have;
+            for (GearDiff.Row r : d.extra) if (r.need > 0 && r.itemId == item.id) have = r.have;
+        }
+        l.setToolTipText(d == null ? item.name : item.name + " " + have + " / " + need);
+        int missing = need - have;
+        if (missing > 0 && (n == 1 || k >= n - missing))
+        {
+            l.setBorder(OUTLINE);
+            l.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR));
+            onClick(l, () -> actions.findItem(item.id, item.altIds, item.name));
+        }
+        return l;
+    }
+
+    /** The extras, outlined, each showing how many to remove. */
+    private JComponent extras(List<GearDiff.Row> rows)
+    {
+        JPanel grid = grid("gear-card-extra", 0, 4);
+        for (GearDiff.Row r : rows)
+        {
+            int n = r.need == 0 ? r.have : r.overBy();
+            JLabel l = box("gear-card-extra-" + r.itemId);
+            l.setBorder(OUTLINE);
+            icons.apply(l, r.itemId, n, r.stackable || n > 1);
+            l.setToolTipText(r.name + ": remove " + n);
+            grid.add(l);
+        }
+        return fixed(grid);
+    }
+
+    private static JLabel box(String name)
+    {
+        var l = new JLabel();
+        l.setName(name);
+        l.setHorizontalAlignment(SwingConstants.CENTER);
+        l.setPreferredSize(CELL);
+        l.setOpaque(true);
+        l.setBackground(SLOT_BG);
+        l.setBorder(PLAIN);
+        return l;
+    }
+
+    private static JPanel grid(String name, int rows, int cols)
+    {
+        var p = new JPanel(new GridLayout(rows, cols, GAP, GAP));
+        p.setName(name);
+        p.setOpaque(false);
+        return p;
+    }
+
+    /** {@code c} at its preferred size, aligned left. */
+    private static JComponent fixed(JComponent c)
+    {
+        c.setMaximumSize(c.getPreferredSize());
+        return left(c);
     }
 
     private void finish()
     {
         GearReporter.View v = current;
-        var buttons = new JPanel();
-        buttons.setLayout(new BoxLayout(buttons, BoxLayout.Y_AXIS));
-        buttons.setOpaque(false);
-        left(buttons);
-        if (v.kit != null)
-        {
-            JButton copy = TourneyPanel.tabButton("Copy my setup", "gear-card-copy", this::onCopy);
-            copy.setToolTipText("Copy the kit the plugin read as a gear-set catalog entry");
-            buttons.add(copy);
-            buttons.add(vgap(4));
-        }
         if (!v.event.arena && v.diff != null && !v.diff.missing.isEmpty())
         {
+            var buttons = new JPanel();
+            buttons.setLayout(new BoxLayout(buttons, BoxLayout.Y_AXIS));
+            buttons.setOpaque(false);
+            left(buttons);
             buttons.add(TourneyPanel.tabButton("Show missing in bank", "gear-card-bank", () -> actions.showMissing(current.missingIds())));
-        }
-        if (buttons.getComponentCount() > 0)
-        {
             add(vgap(4));
             add(buttons);
         }
-        revalidate();
-        repaint();
-    }
-
-    private void onCopy()
-    {
-        GearKit kit = current.kit;
-        if (kit == null) return;
-        actions.copySetup(kit);
-        JLabel done = label("gear-card-copied", COPIED, GREEN);
-        for (Component c : getComponents())
-        {
-            if ("gear-card-copied".equals(c.getName())) remove(c);
-        }
-        add(done);
         revalidate();
         repaint();
     }
@@ -234,10 +343,10 @@ public class GearCard extends CapPanel
         }
     }
 
-    /** A plain line of text, wrapped to the card's width. */
+    /** A bold line of text in {@code fg}, wrapped to the card's width. */
     private static JLabel label(String name, String text, Color fg)
     {
-        return label(name, text, fg, Font.PLAIN, LINE_PT);
+        return label(name, text, fg, Font.BOLD, LINE_PT);
     }
 
     /** A line of text, wrapped to the card's width. */
@@ -247,18 +356,6 @@ public class GearCard extends CapPanel
         l.setName(name);
         l.setForeground(fg);
         wrap(font(l, style, pt), text);
-        return l;
-    }
-
-    /** An item row: escaped text wrapped to the width left beside its item
-     *  icon, then {@code suffix} markup (may be empty) on the last line. */
-    private static JLabel itemLabel(String name, String escaped, String suffix, Color fg)
-    {
-        var l = new JLabel();
-        l.setName(name);
-        l.setForeground(fg);
-        plain(l, ITEM_PT);
-        l.setText("<html>" + TournamentInfoCard.wrapInner(l.getFont(), TournamentInfoCard.TEXT_WIDTH - ICON_ROOM_PX, escaped) + suffix + "</html>");
         return l;
     }
 }

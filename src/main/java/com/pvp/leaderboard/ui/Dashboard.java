@@ -30,13 +30,11 @@ public class Dashboard extends PluginPanel
 {
     private final PvPLeaderboardPlugin plugin;
     private final PvpApi pvpApi;
-    private final DiscordLogin discordLogin;
 
     // Sub-panels
     private LoginPanel loginPanel;
     private RankProgress rankProgress;
     private PerfStats perfStats;
-    private ExtraStats extraStats;
     private WinRateChart chartPanel;
 
     // Header elements
@@ -51,25 +49,31 @@ public class Dashboard extends PluginPanel
     private JScrollPane topScroll;
     private JPanel statsBox;
 
-    // Top-level navigation: Matchmaking + Player Lookup on one row, the
-    // Tournaments tab alone on the row below. Each tab shows one card.
+    // Top-level navigation: Discord | FAQ; with FAQ open Top Players | Ranks,
+    // Website and Matchmaking, else Performance; then Events | Player Lookup.
+    // Each tab shows one card.
     private static final String CARD_LOBBY = "matchmaking";
     private static final String CARD_LOOKUP = "lookup";
     private static final String CARD_TOURNEY = "tournaments";
+    private static final String CARD_PERF = "performance";
+    private static final Color BLURPLE = new Color(88, 101, 242);
     private JButton tabLobbyBtn;
     private JButton tabLookupBtn;
     private JButton tabTourneys;
+    private JButton tabPerf;
+    private JButton faqBtn;
+    private JPanel faqBox;
     private CardLayout viewCards;
     private JPanel viewBox;
     /** The card {@link #showCard} showed last. */
-    private String activeCard = CARD_LOBBY;
+    private String activeCard = CARD_LOOKUP;
     /** Whether this panel is on screen (the sidebar open with this panel's
      *  tab selected); replaceable in tests. */
     private BooleanSupplier panelOpen = this::isShowing;
     /** Between RuneLite's {@link #onActivate} and {@link #onDeactivate}. */
     private boolean shown;
 
-    static final String OFF_TOOLTIP = "Tournaments are turned off in the plugin settings";
+    static final String OFF_TOOLTIP = "Events are turned off in the plugin settings";
     /** The Matchmaking card itself: the queue view. Held as a field so the
      *  dashboard can wire the profile-click → Player Lookup tab callback
      *  after construction. */
@@ -111,14 +115,12 @@ public class Dashboard extends PluginPanel
     private final LobbyPrefs lobbyPrefs;
 
     public Dashboard(PvPLeaderboardPlugin plugin, PvpApi pvpApi,
-                          DiscordLogin discordLogin,
                           LobbyService lobbyService,
                           JoinGate joinGate,
                           LobbyPrefs lobbyPrefs)
     {
         this.plugin = plugin;
         this.pvpApi = pvpApi;
-        this.discordLogin = discordLogin;
         this.joinGate = joinGate;
         this.lobbyService = lobbyService;
         this.lobbyPrefs = lobbyPrefs;
@@ -136,24 +138,20 @@ public class Dashboard extends PluginPanel
         var mainPanel = new JPanel();
         mainPanel.setLayout(new BoxLayout(mainPanel, Y_AXIS));
 
-        // The two community-box view toggles and the login panel are built up
-        // front so the community box can own their buttons (the toggles'
-        // listeners are wired below, once their views exist). The login
-        // panel's "Login with Discord" button lives in the community box so
-        // login is reachable from any tab; its search field stays in the
-        // Player Lookup card.
-        tierToggle = new JButton("What are the ranks");
-        topToggle = new JButton("Top players");
-        loginPanel = left(new LoginPanel(discordLogin, this::loadMatches, this::onLoginState));
+        // The two alternative-view tabs are built up front so the FAQ rows can
+        // own them (their listeners are wired below, once their views exist).
+        tierToggle = makeTab("Ranks", false);
+        topToggle = makeTab("Top Players", false);
+        loginPanel = left(new LoginPanel(this::loadMatches));
 
-        // 1. Community box — always pinned to the very top, never inside a tab.
+        // 1. Navigation, always on top: Discord | FAQ; the FAQ rows (Top
+        // Players | Ranks, Website, Matchmaking) or Performance; Events |
+        // Player Lookup.
         mainPanel.add(left(createLinks()));
-        mainPanel.add(vgap(8));
-
-        // 2. Navigation: Matchmaking / Player Lookup, then Tournaments on its own row.
-        mainPanel.add(left(createNav()));
+        mainPanel.add(left(createFaq()));
+        mainPanel.add(left(createPerfRow()));
         mainPanel.add(vgap(4));
-        mainPanel.add(left(createTournamentsTabRow()));
+        mainPanel.add(left(createNav()));
         mainPanel.add(vgap(6));
 
         // 3. Card-switched view container: one card per tab. It is as tall as
@@ -180,7 +178,7 @@ public class Dashboard extends PluginPanel
         statsBox = left(new JPanel());
         statsBox.setLayout(new BoxLayout(statsBox, Y_AXIS));
 
-        // The search box (its login button lives in the community box).
+        // The search box.
         statsBox.add(loginPanel);
         statsBox.add(vgap(16));
 
@@ -200,10 +198,6 @@ public class Dashboard extends PluginPanel
         refreshButton = colBtn("Refresh", e -> handleRefresh(), 4);
         streaksBtn = colBtn(null, e -> setStreaksShown(!rankProgress.isStreaksShown()), 24);
         streaksBtn.setName("show-streaks-toggle");
-
-        // Additional Stats, built here and added at the end of the column.
-        extraStats = left(new ExtraStats(pvpApi));
-        extraStats.setVisible(false);
 
         rankProgress = left(new RankProgress());
         statsBox.add(rankProgress);
@@ -241,10 +235,6 @@ public class Dashboard extends PluginPanel
 
         statsBox.add(advancedBox);
 
-        // Additional Stats last: directly under the Advanced Stats button while that is closed
-        statsBox.add(vgap(12));
-        statsBox.add(extraStats);
-
         advancedToggle.addActionListener(e -> {
             boolean showing = advancedBox.isVisible();
             advancedToggle.setText(showing ? "Advanced Stats" : "Hide Advanced Stats");
@@ -264,9 +254,8 @@ public class Dashboard extends PluginPanel
         topScroll = altPane(topPanel, "Top Players");
 
         // Player Lookup card holds the stats container plus the rank-tier and
-        // top-players scroll panes. Only one is visible at a time; the two
-        // community-box toggles flip between them and force the active tab to
-        // Player Lookup.
+        // top-players scroll panes. Only one is visible at a time; the Top
+        // Players and Ranks tabs flip between them.
         var lookupCard = new JPanel();
         lookupCard.setLayout(new BoxLayout(lookupCard, Y_AXIS));
         lookupCard.add(statsBox);
@@ -292,22 +281,23 @@ public class Dashboard extends PluginPanel
         tphint.setForeground(new Color(0x999999));
         tourneyStub.add(tphint, BorderLayout.CENTER);
 
+        perfView.setName("performance-view");
+
         viewBox.add(lobbyCard, CARD_LOBBY);
         viewBox.add(lookupCard, CARD_LOOKUP);
         viewBox.add(tourneyStub, CARD_TOURNEY);
+        viewBox.add(perfView, CARD_PERF);
         mainPanel.add(viewBox);
 
-        // "What are the ranks" / "Top players" behave like top-level tabs: each
-        // click reveals its view inside the Player Lookup card AND becomes the
-        // single active underline (deactivating the other four nav buttons).
-        // There's no "Back to stats" — the user returns to stats by clicking
-        // Player Lookup (or any other nav button), exactly like switching tabs.
+        // Ranks / Top Players behave like top-level tabs: each click reveals
+        // its view inside the Player Lookup card AND becomes the single active
+        // underline. The user returns to stats by clicking Player Lookup (or
+        // any other nav button), exactly like switching tabs.
         tierToggle.addActionListener(e -> showAlt(tierScroll, tierToggle, tierPanel::onShown, mainPanel));
         topToggle.addActionListener(e -> showAlt(topScroll, topToggle, topPanel::onShown, mainPanel));
 
-        // Default tab: Matchmaking Lobby; stats keep loading in the
-        // background so switching to Player Lookup is instant.
-        setActiveTab(CARD_LOBBY);
+        // Default tab: Player Lookup.
+        setActiveTab(CARD_LOOKUP);
 
         return mainPanel;
     }
@@ -363,16 +353,28 @@ public class Dashboard extends PluginPanel
     }
 
     /**
-     * Two-tab nav row (Matchmaking + Player Lookup). The Tournaments tab has
-     * its own row below it ({@link #createTournamentsTabRow()}).
+     * The Events | Player Lookup row. Events (the tournaments) is greyed, with
+     * a short "off in settings" flash on click, until
+     * {@link #setTournamentService} wires an available service.
      */
     private JPanel createNav()
     {
-        JPanel nav = navRow("top-tab-nav", 2);
+        JPanel nav = navRow("nav-tabs", 2);
 
-        tabLobbyBtn = makeTab("Matchmaking", true);
-        tabLobbyBtn.addActionListener(e -> setActiveTab(CARD_LOBBY));
-        nav.add(tabLobbyBtn);
+        tabTourneys = makeTab("Events", false);
+        tabTourneys.setName("tournaments-tab");
+        tabTourneys.setEnabled(false);
+        tabTourneys.setToolTipText(OFF_TOOLTIP);
+        onClick(tabTourneys, () -> {
+            if (!tabTourneys.isEnabled() && tabTourneys.getText().equals("Events")) {
+                tabTourneys.setText("<html><center>Off in<br>settings</center></html>");
+                Timer revertTimer = new Timer(15000, ev -> tabTourneys.setText("Events"));
+                revertTimer.setRepeats(false);
+                revertTimer.start();
+            }
+        });
+        tabTourneys.addActionListener(e -> setActiveTab(CARD_TOURNEY));
+        nav.add(tabTourneys);
 
         tabLookupBtn = makeTab("Player Lookup", false);
         tabLookupBtn.addActionListener(e -> setActiveTab(CARD_LOOKUP));
@@ -381,30 +383,63 @@ public class Dashboard extends PluginPanel
         return nav;
     }
 
-    /**
-     * The Tournaments tab, alone on its own row under the two top tabs. It
-     * is greyed (with a short "off in plugin settings" flash on click) until
-     * {@link #setTournamentService} wires an available service.
-     */
-    private JPanel createTournamentsTabRow()
+    /** The rows FAQ shows: Top Players | Ranks, Website, Matchmaking. Hidden until FAQ is pressed. */
+    private JPanel createFaq()
     {
-        JPanel row = navRow("tournaments-tab-nav", 1);
+        faqBox = new JPanel();
+        faqBox.setLayout(new BoxLayout(faqBox, Y_AXIS));
+        faqBox.setName("nav-faq");
+        JPanel ranks = navRow("nav-ranks", 2);
+        topToggle.setToolTipText("Show the Top 100 players for the selected bucket");
+        tierToggle.setToolTipText("Show every rank tier from Bronze 3 to 3rd Age");
+        ranks.add(topToggle);
+        ranks.add(tierToggle);
+        JPanel site = navRow("nav-website", 1);
+        site.add(linkBtn("Website", "Open the website", PvpConsts.SITE_URL));
+        JPanel queue = navRow("nav-matchmaking", 1);
+        tabLobbyBtn = makeTab("Matchmaking", false);
+        tabLobbyBtn.addActionListener(e -> setActiveTab(CARD_LOBBY));
+        queue.add(tabLobbyBtn);
+        for (JPanel row : new JPanel[]{ranks, site, queue})
+        {
+            faqBox.add(vgap(4));
+            faqBox.add(left(row));
+        }
+        faqBox.setVisible(false);
+        return faqBox;
+    }
 
-        tabTourneys = makeTab("Tournaments", false);
-        tabTourneys.setName("tournaments-tab");
-        tabTourneys.setEnabled(false);
-        tabTourneys.setToolTipText(OFF_TOOLTIP);
-        onClick(tabTourneys, () -> {
-            if (!tabTourneys.isEnabled() && tabTourneys.getText().equals("Tournaments")) {
-                tabTourneys.setText("<html><center>Off in plugin<br>settings</center></html>");
-                Timer revertTimer = new Timer(15000, ev -> tabTourneys.setText("Tournaments"));
-                revertTimer.setRepeats(false);
-                revertTimer.start();
-            }
-        });
-        tabTourneys.addActionListener(e -> setActiveTab(CARD_TOURNEY));
-        row.add(tabTourneys);
-        return row;
+    /** The Performance row, under FAQ's rows when they show. */
+    private JPanel createPerfRow()
+    {
+        var perfBox = new JPanel();
+        perfBox.setLayout(new BoxLayout(perfBox, Y_AXIS));
+        perfBox.setName("nav-performance");
+        JPanel row = navRow("nav-performance-row", 1);
+        tabPerf = makeTab("Performance", false);
+        tabPerf.addActionListener(e -> setActiveTab(CARD_PERF));
+        row.add(tabPerf);
+        perfBox.add(vgap(4));
+        perfBox.add(left(row));
+        return perfBox;
+    }
+
+    /** FAQ open: its rows show; closed: they hide. A view whose tab closing hides (Matchmaking, Top Players, Ranks)
+     *  gives way to Player Lookup. */
+    private void setFaq(boolean open)
+    {
+        faqBox.setVisible(open);
+        faqBtn.setText(open ? "Hide FAQ" : "FAQ");
+        if (!open && faqViewShowing()) setActiveTab(CARD_LOOKUP);
+        revalidate();
+        repaint();
+    }
+
+    /** Matchmaking, Top Players or Ranks is the view on screen. */
+    private boolean faqViewShowing()
+    {
+        return CARD_LOBBY.equals(activeCard)
+            || (CARD_LOOKUP.equals(activeCard) && (topScroll.isVisible() || tierScroll.isVisible()));
     }
 
     private static JButton makeTab(String label, boolean active)
@@ -438,21 +473,14 @@ public class Dashboard extends PluginPanel
         b.putClientProperty(TAB_ACTIVE, Boolean.valueOf(active));
     }
 
-    /** Single font size shared by every navigation button — the tabs
-     *  ([Matchmaking] / [Player Lookup] / [Tournaments]) — and by every
-     *  community-box button ([Discord], [Website], [Top players],
-     *  [What are the ranks], [Login with Discord]).
-     *  Matches {@code MatchmakingLobbyPanel.GATE_PT} so the whole
-     *  sidepanel reads as one consistent typographic block.
+    /** Single font size shared by every navigation button: the tabs and the
+     *  Discord, FAQ and Website buttons. Matches
+     *  {@code MatchmakingLobbyPanel.GATE_PT} so the whole sidepanel reads as
+     *  one consistent typographic block.
      *
      *  <p>16pt fits "Player Lookup" in its half-width tab cell on the
      *  default 215px sidepanel with ~6px slack. */
     private static final float NAV_FONT_PT = 16f;
-
-    /** Per-row height the community-box buttons are sized to. Tracks
-     *  {@link #NAV_FONT_PT} — at 16pt BOLD the button needs ~34px to
-     *  show without clipping descenders or wasting whitespace. */
-    private static final int COMMUNITY_H = 34;
 
     /** Switch the visible top-level card only (no nav re-styling). */
     private void showCard(String key)
@@ -510,23 +538,21 @@ public class Dashboard extends PluginPanel
     }
 
     /** Single source of truth for the green active underline: stamps exactly
-     *  one of the five nav buttons (Matchmaking, Player Lookup, Tournaments,
-     *  Top players, What are the ranks) active and the rest inactive — so the
+     *  one of the six nav tabs (Performance, Events, Player Lookup,
+     *  Matchmaking, Top Players, Ranks) active and the rest inactive — so the
      *  accent always tracks whatever the user clicked last. */
     private void setActiveNav(JButton active)
     {
-        styleTab(tabLobbyBtn, active == tabLobbyBtn);
-        styleTab(tabLookupBtn, active == tabLookupBtn);
-        styleTab(tabTourneys, active == tabTourneys);
-        styleTab(tierToggle, active == tierToggle);
-        styleTab(topToggle, active == topToggle);
+        for (JButton b : new JButton[]{tabLobbyBtn, tabLookupBtn, tabTourneys, tabPerf, tierToggle, topToggle})
+        {
+            styleTab(b, active == b);
+        }
     }
 
     /** Switch the visible top-level card and move the active underline to the
-     *  matching tab (Matchmaking, Player Lookup or Tournaments). First folds
-     *  the Player Lookup card back to its stats view, so the lookup card is
-     *  always on stats unless the user explicitly clicked one of the
-     *  alternative views' nav buttons. */
+     *  matching tab. First folds the Player Lookup card back to its stats
+     *  view, so the lookup card is always on stats unless the user explicitly
+     *  clicked one of the alternative views' nav buttons. */
     private void setActiveTab(String key)
     {
         tierScroll.setVisible(false);
@@ -535,6 +561,7 @@ public class Dashboard extends PluginPanel
         showCard(key);
         JButton tab = CARD_LOBBY.equals(key) ? tabLobbyBtn
             : CARD_TOURNEY.equals(key) ? tabTourneys
+            : CARD_PERF.equals(key) ? tabPerf
             : tabLookupBtn;
         setActiveNav(tab);
     }
@@ -574,15 +601,13 @@ public class Dashboard extends PluginPanel
             tourneyPanel.setGameCheck(plugin::isInGame);
             tourneyPanel.setWorldCheck(plugin::loggedInWorld);
             if (combatCheck != null) tourneyPanel.setInCombatProvider(combatCheck);
-            // The Report gate is the same Discord login state onLoginState() reloads on.
-            tourneyPanel.setDiscordLoginProvider(discordLogin::isLoggedIn);
             tourneyPanel.setMatchCountProvider(this::ownCount);
             countsHook = tourneyPanel::onCounts;
             joinGate.addListener(countsHook);
             if (tourneyGear != null) tourneyPanel.setGearCard(tourneyGear);
             viewBox.remove(tourneyStub);
             viewBox.add(tourneyPanel, CARD_TOURNEY);
-            tabTourneys.setText("Tournaments");
+            tabTourneys.setText("Events");
         }
         else if (tourneyStub.getParent() != viewBox)
         {
@@ -593,7 +618,7 @@ public class Dashboard extends PluginPanel
         // Never leave the user on a card that just went away; otherwise re-show
         // the current card: the swap can change the visible card, and a re-wire
         // while the tab is open shows + syncs the new panel.
-        if (!on && CARD_TOURNEY.equals(activeCard)) setActiveTab(CARD_LOBBY);
+        if (!on && CARD_TOURNEY.equals(activeCard)) setActiveTab(CARD_LOOKUP);
         else showCard(activeCard);
         viewBox.repaint();
     }
@@ -654,6 +679,17 @@ public class Dashboard extends PluginPanel
 
     private JComponent tourneyGear;
 
+    /** The Performance card: empty until {@link #setPerformanceView} fills it. */
+    private final JPanel perfView = new JPanel(new BorderLayout());
+
+    /** Puts {@code view} in the Performance card. */
+    public void setPerformanceView(JComponent view)
+    {
+        perfView.removeAll();
+        perfView.add(view, BorderLayout.CENTER);
+        perfView.revalidate();
+    }
+
     public void setTournamentGearCard(JComponent card)
     {
         tourneyGear = card;
@@ -672,55 +708,39 @@ public class Dashboard extends PluginPanel
         panelOpen = provider == null ? () -> false : provider;
     }
 
-    /** A queue match's Confirm card is up: shows the Matchmaking tab when this
-     *  panel is on screen and another tab is showing. Never opens the panel. */
+    /** A queue match's Confirm card is up: shows the Matchmaking tab, with the
+     *  FAQ rows that hold its button, when this panel is on screen and another
+     *  tab is showing. Never opens the panel. */
     private void onMatchShown()
     {
-        if (!CARD_LOBBY.equals(activeCard) && GearKit.safe(panelOpen)) setActiveTab(CARD_LOBBY);
+        if (CARD_LOBBY.equals(activeCard) || !GearKit.safe(panelOpen)) return;
+        setFaq(true);
+        setActiveTab(CARD_LOBBY);
     }
 
     // --- UI Creation Helpers ---
 
+    /** The top row: Discord (Discord blurple) and the FAQ toggle. */
     private JPanel createLinks()
     {
-        var box = new JPanel();
-        box.setLayout(new BoxLayout(box, Y_AXIS));
-        // TitledBorder font matches NAV_FONT_PT (BOLD) so the "Join the
-        // community" header reads at the same weight as the gate's
-        // "Set up matchmaking" header and the nav buttons below it.
-        TitledBorder titled = createTitledBorder("Join the community");
-        titled.setTitleFont(box.getFont().deriveFont(Font.BOLD, NAV_FONT_PT));
-        box.setBorder(titled);
-        // Sized for: title (~28px) + 4 button rows × COMMUNITY_H + small
-        // inter-row gaps + bottom slack.
-        var size = new Dimension(220, 28 + 4 * COMMUNITY_H + 12);
-        box.setMaximumSize(size);
-        box.setPreferredSize(size);
-
-        // Discord + Website share a row via GridLayout(1,2) so each button
-        // gets exactly half the panel width. The row is aligned left like the
-        // buttons below it, which BoxLayout lines up only when every child
-        // shares one alignment.
-        JPanel row = left(maxH(new JPanel(new GridLayout(1, 2, 4, 0)), COMMUNITY_H));
-        row.add(communityBtn("Discord", "Join our Discord", "https://discord.gg/ZuWzyzbtTW"));
-        row.add(communityBtn("Website", "Open the website", PvpConsts.SITE_URL));
-        box.add(row);
-
-        // Then Top players, What are the ranks and Login with Discord, one per
-        // row (reachable from any tab).
-        topToggle.setToolTipText("Show the Top 100 players for the selected bucket");
-        tierToggle.setToolTipText("Show every rank tier from Bronze 3 to 3rd Age");
-        for (JButton b : new JButton[]{topToggle, tierToggle, loginPanel.getLoginButton()})
-        {
-            box.add(maxH(bold(b, NAV_FONT_PT), COMMUNITY_H));
-        }
-        return box;
+        JPanel row = navRow("nav-links", 2);
+        JButton discord = linkBtn("Discord", "Join our Discord", "https://discord.gg/ZuWzyzbtTW");
+        discord.setBackground(BLURPLE);
+        discord.setForeground(Color.WHITE);
+        discord.setOpaque(true);
+        row.add(discord);
+        faqBtn = bold(new JButton("FAQ"), NAV_FONT_PT);
+        faqBtn.setMargin(new Insets(2, 6, 2, 6));
+        faqBtn.setFocusPainted(false);
+        faqBtn.addActionListener(e -> setFaq(!faqBox.isVisible()));
+        row.add(faqBtn);
+        return row;
     }
 
-    /** Community-box link button — uniform NAV_FONT_PT BOLD font (the parent
+    /** A link button — uniform NAV_FONT_PT BOLD font (the parent
      *  {@link GridLayout} controls width), focus painting off to match the
      *  nav buttons. Opens {@code url} (an https constant). */
-    private static JButton communityBtn(String label, String tooltip, String url)
+    private static JButton linkBtn(String label, String tooltip, String url)
     {
         JButton b = bold(new JButton(label), NAV_FONT_PT);
         b.setMargin(new Insets(2, 6, 2, 6));
@@ -736,19 +756,6 @@ public class Dashboard extends PluginPanel
     {
         String id = lookupId != null && !lookupId.isEmpty()
             ? lookupId : plugin.getLocalName();
-        if (id != null) loadMatches(id);
-    }
-
-    /** After a login: reload the searched player, else yourself. After a
-     *  logout: reload whoever is shown. Site auth gates the Additional Stats
-     *  box; the Tournaments cards' Report buttons follow the same login. */
-    private void onLoginState()
-    {
-        boolean loggedIn = discordLogin.isLoggedIn();
-        extraStats.setVisible(loggedIn);
-        if (tourneyPanel != null) tourneyPanel.onDiscordLoginChanged();
-        String search = loginPanel.getPluginSearchText();
-        String id = !loggedIn ? lookupId : !search.isEmpty() ? search : plugin.getLocalName();
         if (id != null) loadMatches(id);
     }
 
@@ -828,6 +835,12 @@ public class Dashboard extends PluginPanel
         }
     }
 
+    /** A login: the open Events tab asks for its events at once. */
+    public void loginReady()
+    {
+        invokeLater(() -> { if (tourneyPanel != null) tourneyPanel.onConnected(); });
+    }
+
     /** Forwards the match-found popup notifier from the plugin lifecycle
      *  layer to the matchmaking panel. */
     public void setMatchFoundNotifier(MatchmakingLobbyPanel.MatchAlert notifier)
@@ -895,7 +908,6 @@ public class Dashboard extends PluginPanel
             streaksBtn.setVisible(true);
             historyBtn.setVisible(false);
             advancedToggle.setVisible(false);
-            extraStats.setPlayerName(lookupId);
             updateBlock(lookupId);
             resetUi();
         };
@@ -913,7 +925,6 @@ public class Dashboard extends PluginPanel
             // client id) when there is one, everyone else's by name.
             boolean isSelf = isSelf(normalizedId);
             String sha = isSelf ? pvpApi.getSelfSha() : null;
-            extraStats.setAcctSha(sha);
             pvpApi.getMatches(sha, normalizedId, null, PAGE_SIZE, false).thenAccept(jsonResponse -> {
                 if (gen != loadGen || jsonResponse == null)
                 {
@@ -935,14 +946,11 @@ public class Dashboard extends PluginPanel
 
     private void updateUi(JsonArray matches) {
         chartPanel.setMatches(matches);
-        extraStats.setMatches(matches);
         allMatches = matches;
 
         boolean hasData = matches != null && matches.size() > 0;
         historyBtn.setVisible(hasData);
         advancedToggle.setVisible(hasData);
-
-        refreshBars();
     }
 
     private void resetUi()
@@ -950,7 +958,6 @@ public class Dashboard extends PluginPanel
         rankProgress.reset();
         perfStats.reset();
         chartPanel.setMatches(new JsonArray());
-        extraStats.setMatches(new JsonArray());
         allMatches = null;
     }
 
@@ -1043,154 +1050,17 @@ public class Dashboard extends PluginPanel
 
         JsonObject cumulative = optObject(stats, "cumulative_stats");
         if (cumulative != null) perfStats.setTotals(cumulative);
-        JsonObject opponents = optObject(stats, "opponent_rank_stats_by_bucket");
-        if (opponents != null) perfStats.setOppRanks(opponents);
+        perfStats.setOppRanks(stats);
     }
 
-    /** Every rating row in screen order: Overall reads the profile's root
-     *  (its streak pair from {@code buckets.overall}), each other bucket its
-     *  object under {@code buckets}. The tournament bucket is null until the
-     *  player's first tournament game; optObject keeps that JSON null from
-     *  throwing and the row stays hidden ("—"). */
+    /** Every rating row in screen order, each from its bucket's v3 card ({@code buckets.<b>.v3}) and the bucket's
+     *  streak pair. A bucket without a card reads "—" (the tournament row stays hidden). */
     private void applyAll(JsonObject stats, String playerName, int gen)
     {
-        for (String bucketKey : RankProgress.BUCKET_KEYS)
+        for (String b : RankProgress.BUCKET_KEYS)
         {
-            applyBucket(playerName, bucketKey, "overall".equals(bucketKey) ? stats
-                : optObject(optObject(stats, "buckets"), bucketKey), gen);
-        }
-    }
-
-    private void applyBucket(String playerName, String bucketKey, JsonObject bucketObj, int gen)
-    {
-        if (bucketObj == null) {
-            // Unplayed bucket: no rank, no streak line (hides the tournament row).
-            rankProgress.updateBucket(bucketKey, "—", 0, 0, -1, null, 0, 0);
-            return;
-        }
-
-        String rankLabel = "—";
-        int division = 0;
-        double pct = 0.0;
-        double mmr = Double.NaN;
-
-        if (bucketObj.has("mmr")) {
-            mmr = bucketObj.get("mmr").getAsDouble();
-            RankInfo ri = RankUtils.toRankInfo(mmr);
-            rankLabel = ri.rank;
-            division = ri.division;
-            pct = ri.progress;
-        }
-        pct = optDouble(optObject(bucketObj, "rank_progress"), "progress_to_next_rank_pct", pct);
-        String r = optString(bucketObj, "rank");
-        if (!r.isEmpty()) rankLabel = r;
-        division = optInt(bucketObj, "division", division);
-
-        // The streak lines under the bar: every row's pair is in its bucket
-        // object, the overall one in buckets.overall. The later rank-number /
-        // Top % refresh uses the 6-arg form so it leaves the lines alone.
-        JsonObject streaks = "overall".equals(bucketKey) ? optObject(optObject(bucketObj, "buckets"), "overall") : bucketObj;
-        int streak = optInt(streaks, "streak", 0);
-        int bestStreak = optInt(streaks, "best_streak", 0);
-        rankProgress.updateBucket(bucketKey, rankLabel, division, pct, -1, null, streak, bestStreak);
-
-        if (!"—".equals(rankLabel)) refreshRankLine(playerName, bucketKey, rankLabel, division, pct, mmr, gen);
-    }
-
-    /** Adds the rank number and the "Top X.XX%" to a bucket's rank line: both
-     *  computed on a background thread so the row updates once with both, and
-     *  dropped when another lookup has started meanwhile. */
-    private void refreshRankLine(String playerName, String bucket, String rank, int division, double pct, double mmr, int gen)
-    {
-        new SwingWorker<Integer, Void>()
-        {
-            String top;
-
-            @Override protected Integer doInBackground() {
-                top = computeTop(bucket, mmr);
-                return getBoardRank(playerName, bucket);
-            }
-
-            @Override protected void done() {
-                try {
-                    if (gen == loadGen) rankProgress.updateBucket(bucket, rank, division, pct, get(), top);
-                } catch (Exception ignore) {
-                }
-            }
-        }.execute();
-    }
-
-    private void refreshBars() {
-        if (allMatches == null || allMatches.size() == 0) return;
-        String playerName = playerLabel.getText();
-        if ("Player Name".equals(playerName)) return;
-
-        final int gen = loadGen;
-        for (String bucket : RankProgress.BUCKET_KEYS)
-        {
-            // The bucket's latest match: the first one, replaced only by a strictly later "when".
-            JsonObject latest = null;
-            for (JsonElement e : allMatches)
-            {
-                JsonObject match = e.getAsJsonObject();
-                if (bucket.equals(optString(match, "bucket").toLowerCase())
-                    && (latest == null || (match.has("when") && latest.has("when")
-                        && match.get("when").getAsLong() > latest.get("when").getAsLong())))
-                {
-                    latest = match;
-                }
-            }
-
-            if (latest != null && latest.has("player_mmr"))
-            {
-                double mmr = latest.get("player_mmr").getAsDouble();
-                RankInfo est = RankUtils.toRankInfo(mmr);
-                refreshRankLine(playerName, bucket,
-                    optString(latest, "player_rank", est.rank),
-                    optInt(latest, "player_division", est.division),
-                    est.progress, mmr, gen);
-            }
-        }
-    }
-
-    // --- Helpers ---
-
-    /**
-     * The player's "Top X.XX%" for a bucket, derived from the cached rank
-     * histogram ({@code rank_hist/<bucket>.json}). Runs on a background
-     * thread (it blocks briefly on the cached future), so it must NOT be
-     * called from the EDT. Reuses {@link PvpApi#getHistogram}
-     * which is backed by the shared 60-minute shard cache — so the histogram
-     * for each bucket is fetched at most once per hour and shared with the
-     * "What are the ranks" view, never re-fetched per lookup. Returns
-     * {@code null} when it can't be determined (a missing histogram counts
-     * nobody) so the caller omits the suffix.
-     */
-    private String computeTop(String bucket, double mmr)
-    {
-        if (!Double.isFinite(mmr)) return null;
-        try {
-            JsonObject hist = pvpApi.getHistogram(bucket).get(5, TimeUnit.SECONDS);
-            return RankUtils.formatTopPercentPrecise(RankUtils.totalAbove(hist, mmr), RankUtils.histTotal(hist));
-        } catch (Exception ignore) {
-            return null;
-        }
-    }
-
-    /** {@code bucket} is one of {@link RankProgress#BUCKET_KEYS}. */
-    public int getBoardRank(String playerName, String bucket)
-    {
-        try {
-            // bypassCache=true: this method runs on a SwingWorker
-            // background thread spawned from openLookup — i.e. a user
-            // gesture — so an explicit "look this player up" picks up
-            // post-match rank changes instead of serving the cached
-            // payload (which could be up to 60 min stale).
-            ShardRank sr = pvpApi.getShardRank(playerName, bucket, true)
-                .get(5, TimeUnit.SECONDS);
-            return sr != null && sr.rank > 0 ? sr.rank : -1;
-        } catch (Exception ex) {
-            return -1;
+            JsonObject bucket = optObject(optObject(stats, "buckets"), b);
+            rankProgress.updateBucket(b, optObject(bucket, "v3"), optInt(bucket, "streak", 0), optInt(bucket, "best_streak", 0));
         }
     }
 

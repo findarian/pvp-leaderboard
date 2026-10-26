@@ -45,8 +45,6 @@ public class TourneyPanel extends JPanel implements TournamentEventListener
     private volatile Supplier<String> selfNameSupplier = () -> null;
     private volatile BooleanSupplier inCombatProvider = () -> false;
     private volatile Consumer<String> linkOpener = TourneyPanel::browse;
-    /** {@code DiscordLogin::isLoggedIn} once the dashboard wires it; unwired = logged out. */
-    private volatile BooleanSupplier discordLoggedIn = () -> false;
     /** Whether the player is logged into the game; unwired = logged in. */
     private volatile BooleanSupplier gameLoggedIn = () -> true;
     /** The world the player is in, 0 when not logged in; unwired = unknown (the match view shows). */
@@ -110,11 +108,11 @@ public class TourneyPanel extends JPanel implements TournamentEventListener
     static final int LIVE_ROWS = 40;
     /** The event, status and round of the live list's rows; {@code null} until its view's next rows. */
     private String drawnFor;
+    /** The live list's rows as drawn. */
+    private List<StandingsRow> shownRows;
     /** Layouts of the page a board's fit may still ask for, for its current rows. */
     private int refits;
     private final JButton withdrawBtn = tabButton("Withdraw");
-    /** The running event's report button — gated like every card's. */
-    private final JButton reportBtn = tabButton(REPORT_LABEL, "tournaments-report", () -> { if (this.activeId != null) onReport(this.activeId); });
     /** The running event's own Rules; enabled once its list entry is known. */
     private final JButton rulesBtn = tabButton("Rules", "tournaments-active-rules", this::openRulesForActive);
     /** The final standings' way back to the list. */
@@ -231,22 +229,6 @@ public class TourneyPanel extends JPanel implements TournamentEventListener
         linkOpener = opener == null ? TourneyPanel::browse : opener;
     }
 
-    /** The dashboard wires {@code DiscordLogin::isLoggedIn} — the
-     *  Report gate: the button follows the plugin's own Discord login
-     *  state. */
-    public void setDiscordLoginProvider(BooleanSupplier provider)
-    {
-        discordLoggedIn = provider;
-    }
-
-    /** The dashboard calls this from its login-state hook: every Report
-     *  button re-evaluates locally — no {@code tournament/list}, no status. */
-    public void onDiscordLoginChanged()
-    {
-        renderList();
-        syncReport();
-    }
-
     /** The player's own match count for an event bucket ({@code "nh"}, ...),
      *  {@code null} when unknown. */
     public void setMatchCountProvider(Function<String, Integer> provider)
@@ -279,13 +261,6 @@ public class TourneyPanel extends JPanel implements TournamentEventListener
     {
         Integer count = matchCounts.apply(t.category.trim());
         return count == null || count < 0 ? null : count;
-    }
-
-    private void syncReport()
-    {
-        boolean in = discordLoggedIn.getAsBoolean();
-        reportBtn.setEnabled(in);
-        reportBtn.setToolTipText(in ? REPORT_TOOLTIP : LOGIN_TIP);
     }
 
     private static void browse(String url)
@@ -368,7 +343,7 @@ public class TourneyPanel extends JPanel implements TournamentEventListener
         var card = new JPanel(new BorderLayout());
         card.setName(CARD_LIST);
         JPanel top = column();
-        top.add(label(null, "Tournaments", BOLD, HEADER_PT, null));
+        top.add(label(null, "Events", BOLD, HEADER_PT, null));
         listStatus.setName("tournaments-list-status");
         plain(listStatus, BODY_PT).setForeground(MUTED);
         top.add(listStatus);
@@ -440,8 +415,11 @@ public class TourneyPanel extends JPanel implements TournamentEventListener
         JPanel buttons = column();
         buttons.setBorder(pad(6, 0, 0, 0));
         rulesBtn.setEnabled(false);
-        syncReport();
-        activePair = pairRow(reportBtn, rulesBtn);
+        rulesBtn.setMargin(TournamentInfoCard.SLIM_MARGIN);
+        var rulesRow = new JPanel(new BorderLayout());
+        rulesRow.setOpaque(false);
+        rulesRow.add(rulesBtn, BorderLayout.CENTER);
+        activePair = pin(left(rulesRow));
         buttons.add(activePair);
         buttons.add(backBtn);
         buttons.add(vgap(4));
@@ -665,21 +643,11 @@ public class TourneyPanel extends JPanel implements TournamentEventListener
         revalidate();
     }
 
-    private String myStatusFor(Tourney t)
-    {
-        if (t.myStatus != null) return t.myStatus;
-        for (Tourney r : myRegs)
-        {
-            if (r.tournamentId.equals(t.tournamentId)) return r.myStatus;
-        }
-        return null;
-    }
-
     /** One {@link TournamentInfoCard} per listed event; its time
      *  lines join the existing 1 Hz refresh. */
     private TournamentInfoCard eventCard(Tourney t)
     {
-        return new TournamentInfoCard(t, myStatusFor(t), discordLoggedIn.getAsBoolean(), zone, nowMs, this,
+        return new TournamentInfoCard(t, Tourney.statusIn(t, myRegs), zone, nowMs, this,
             countFor(t), gamesRefused.contains(t.tournamentId));
     }
 
@@ -806,7 +774,7 @@ public class TourneyPanel extends JPanel implements TournamentEventListener
                 return;
             }
             setWrapped(pastBoardMsg, " ");
-            renderBoard(pastBoard, "past-standings-", s.rows, false);
+            renderBoard(pastBoard, "past-standings-", s.rows, false, HEADER_PT);
         });
     }
 
@@ -827,7 +795,7 @@ public class TourneyPanel extends JPanel implements TournamentEventListener
         rounds = t.rounds;
         setWrapped(activeHeader, header());
         renderBoardTitle();
-        renderBoard(boardPanel, "standings-", Collections.emptyList(), true);
+        renderBoard(boardPanel, "standings-", Collections.emptyList(), true, HEADER_PT);
         renderEta();
         resubscribe();
     }
@@ -882,7 +850,6 @@ public class TourneyPanel extends JPanel implements TournamentEventListener
         renderEta();
         renderStatus();
         syncNoShow();
-        syncReport();
         refreshRules();
         showCard(CARD_ACTIVE);
     }
@@ -949,8 +916,7 @@ public class TourneyPanel extends JPanel implements TournamentEventListener
 
     static String boardScore(StandingsRow r)
     {
-        String score = pointsText(r.points);
-        return r.draws > 0 ? score + " · " + r.draws + (r.draws == 1 ? " draw" : " draws") : score;
+        return pointsText(r.points);
     }
 
     /** A row's right-hand cell: its score, or DNF for a removed player. */
@@ -1051,25 +1017,32 @@ public class TourneyPanel extends JPanel implements TournamentEventListener
         return EnumSet.of(b == null ? BuildType.MAIN : b);
     }
 
-    /** The live leaderboard, every row; a list of more than {@link #LIVE_ROWS} rows stays as drawn until its view opens
-     *  again or the rows are for another event, status or round. */
-    private void renderBoard(String tournamentId, String status, int round, List<StandingsRow> rows)
+    /** The live leaderboard, every row. In the stage on show a running event's standings {@code push} is drawn at once
+     *  at the list's size or under, unless its rows equal the drawn rows; for anything else a list of more than
+     *  {@link #LIVE_ROWS} rows stays as drawn. Rows of another event, status or round, or of a view opened again, are
+     *  drawn now. */
+    private void renderBoard(String tournamentId, String status, int round, List<StandingsRow> rows, boolean push)
     {
         String stage = tournamentId + " " + status + " " + round;
-        if (boardPanel.rows.size() > LIVE_ROWS && stage.equals(drawnFor)) return;
+        boolean same = !boardPanel.rows.isEmpty() && stage.equals(drawnFor), live = same && push && "running".equals(status);
+        if (live ? rows.equals(shownRows) : same && boardPanel.rows.size() > LIVE_ROWS) return;
         drawnFor = stage;
-        renderBoard(boardPanel, "standings-", rows, true);
+        shownRows = rows;
+        renderBoard(boardPanel, "standings-", rows, true, live ? boardPanel.appliedPt : HEADER_PT);
     }
 
     /** Every row of {@code rows}: the name white, green once the player's round is done, red and struck through with
-     *  DNF for a removed player; under it a prize winner's prize and, outside the live leaderboard, the row's record. */
-    private void renderBoard(BoardPanel body, String prefix, List<StandingsRow> rows, boolean live)
+     *  DNF for a removed player; under it a prize winner's prize and, outside the live leaderboard, the row's record;
+     *  the rows at {@code maxPt} or under. */
+    private void renderBoard(BoardPanel body, String prefix, List<StandingsRow> rows, boolean live, float maxPt)
     {
         body.removeAll();
         String self = selfNameSupplier.get();
         String selfKey = self == null ? null : NameUtils.canonicalKey(self);
         body.rows.clear();
         body.appliedPt = -1;
+        body.picked = false;
+        body.maxPt = maxPt;
         if (rows.isEmpty())
         {
             body.add(label(null, live && beforeStart() ? "No players registered yet." : "No standings yet.", PLAIN, BODY_PT, MUTED));
@@ -1125,7 +1098,7 @@ public class TourneyPanel extends JPanel implements TournamentEventListener
             body.add(line);
             body.rows.add(new BoardPanel.Row(line, left, pts, rank, prize, recLine, rec, me, out, r.streamUrl != null));
         }
-        body.applyPt(HEADER_PT, 0);
+        body.applyPt(maxPt, 0);
         body.revalidate();
         body.repaint();
         refits = 1;
@@ -1145,9 +1118,9 @@ public class TourneyPanel extends JPanel implements TournamentEventListener
         });
     }
 
-    /** The live leaderboard's rows, as wide as the scroll pane's viewport,
-     *  all at the largest size from {@link #HEADER_PT} down to 12 pt at
-     *  which every row fits. */
+    /** The live leaderboard's rows, as wide as the scroll pane's viewport, all at the largest size from {@link #maxPt}
+     *  down to 12 pt at which every row fits the board's width with the side panel's scroll bar showing; the size is
+     *  picked at the first layout after the rows are drawn and kept until the next draw. */
     static final class BoardPanel extends RowsPanel
     {
         static final int GAP = 6;
@@ -1180,6 +1153,13 @@ public class TourneyPanel extends JPanel implements TournamentEventListener
         private int appliedHeight;
         /** Run when a fit at the laid-out width changed the rows' height. */
         Runnable onRefit = () -> { };
+        /** The size is picked for the rows on show, at most {@link #maxPt}. */
+        private boolean picked;
+        private float maxPt = HEADER_PT;
+        /** The rows' fonts by size, bold, struck through and underlined. */
+        private final Map<Integer, Font> fonts = new HashMap<>();
+        /** Fonts derived and sizes picked. */
+        int derived, picks;
 
         BoardPanel()
         {
@@ -1189,25 +1169,35 @@ public class TourneyPanel extends JPanel implements TournamentEventListener
         @Override
         public void doLayout()
         {
-            int width = getWidth();
-            if (width > 0 && !rows.isEmpty())
+            if (!picked && getWidth() > 0 && !rows.isEmpty())
             {
-                int usable = width - getInsets().left - getInsets().right;
+                picked = true;
+                picks++;
+                int usable = narrow() - getInsets().left - getInsets().right;
                 int before = appliedHeight;
-                applyPt(fit.largestFitting((int) 12f, (int) HEADER_PT, p -> allFit(p, usable)), usable);
+                applyPt(fit.largestFitting((int) 12f, (int) maxPt, p -> allFit(p, usable)), usable);
                 if (appliedHeight != before) onRefit.run();
             }
             super.doLayout();
         }
 
+        /** The board's width with the side panel's scroll bar showing: less that bar's width while it is hidden. */
+        private int narrow()
+        {
+            var side = (JScrollPane) SwingUtilities.getAncestorOfClass(JScrollPane.class, SwingUtilities.getAncestorOfClass(JScrollPane.class, this));
+            JScrollBar bar = side == null ? null : side.getVerticalScrollBar();
+            return getWidth() - (bar == null || bar.isVisible() ? 0 : bar.getPreferredSize().width);
+        }
+
         private boolean allFit(int pt, int usable)
         {
+            Font plain = font(pt, false, false, false), bold = font(pt, true, false, false);
             for (Row r : rows)
             {
                 Insets in = r.line.getInsets();
-                int needed = in.left + in.right + GAP + fit.textWidth(r.left.getText(), rowFont(pt, r.me)) + fit.textWidth(r.right.getText(), rowFont(pt, false));
-                if (r.rank != null) needed += GAP + fit.textWidth(r.rank.getText(), rowFont(pt, false));
-                if (needed > usable || r.prize != null && in.left + in.right + fit.textWidth(r.prize.getText(), rowFont(pt, false)) > usable) return false;
+                int needed = in.left + in.right + GAP + fit.textWidth(r.left.getText(), r.me ? bold : plain) + fit.textWidth(r.right.getText(), plain);
+                if (r.rank != null) needed += GAP + fit.textWidth(r.rank.getText(), plain);
+                if (needed > usable || r.prize != null && in.left + in.right + fit.textWidth(r.prize.getText(), plain) > usable) return false;
             }
             return true;
         }
@@ -1220,19 +1210,17 @@ public class TourneyPanel extends JPanel implements TournamentEventListener
             appliedPt = pt;
             appliedWidth = usable;
             int total = 0;
+            Font plain = font((int) pt, false, false, false);
             for (Row r : rows)
             {
-                Map<TextAttribute, Object> a = new HashMap<>();
-                if (r.out) a.put(TextAttribute.STRIKETHROUGH, TextAttribute.STRIKETHROUGH_ON);
-                if (r.link) a.put(TextAttribute.UNDERLINE, TextAttribute.UNDERLINE_ON);
-                r.left.setFont(rowFont((int) pt, r.me).deriveFont(a));
-                for (JLabel l : new JLabel[]{r.right, r.rank, r.prize}) if (l != null) l.setFont(rowFont((int) pt, false));
+                r.left.setFont(font((int) pt, r.me, r.out, r.link));
+                for (JLabel l : new JLabel[]{r.right, r.rank, r.prize}) if (l != null) l.setFont(plain);
                 Insets in = r.line.getInsets();
                 int height = Math.max(r.left.getPreferredSize().height, r.right.getPreferredSize().height) + in.top + in.bottom
                     + (r.prize == null ? 0 : r.prize.getPreferredSize().height);
                 if (r.rec != null)
                 {
-                    Font small = rowFont((int) Math.min(pt, BODY_PT), false);
+                    Font small = font((int) Math.min(pt, BODY_PT), false, false, false);
                     r.rec.setFont(small);
                     r.rec.setText(lines(r.recText, small, usable - in.left - in.right));
                     height += r.rec.getPreferredSize().height;
@@ -1256,41 +1244,24 @@ public class TourneyPanel extends JPanel implements TournamentEventListener
             return "<html>" + String.join(",<br>", out) + "</html>";
         }
 
-        private static Font rowFont(int pt, boolean bold)
+        /** The row font at {@code pt}: bold for the player's own row, struck through for a removed player, underlined for
+         *  a stream link; each derived once. */
+        private Font font(int pt, boolean bold, boolean struck, boolean link)
         {
-            return RowTextFit.baseFont().deriveFont(bold ? BOLD : PLAIN, (float) pt);
+            return fonts.computeIfAbsent(pt * 8 + (bold ? 4 : 0) + (struck ? 2 : 0) + (link ? 1 : 0), k ->
+            {
+                derived++;
+                Map<TextAttribute, Object> a = new HashMap<>();
+                if (struck) a.put(TextAttribute.STRIKETHROUGH, TextAttribute.STRIKETHROUGH_ON);
+                if (link) a.put(TextAttribute.UNDERLINE, TextAttribute.UNDERLINE_ON);
+                return RowTextFit.baseFont().deriveFont(bold ? BOLD : PLAIN, (float) pt).deriveFont(a);
+            });
         }
 
         @Override public int getScrollableBlockIncrement(Rectangle r, int orientation, int direction) { return 64; }
     }
 
     // ---------------------------------------------------------------- actions
-    /** The one report dialog, for the active footer and every card's
-     *  button alike: the answer goes out on the existing
-     *  {@code tournament/report_problem}. */
-    void onReport(String tournamentId)
-    {
-        String text = JOptionPane.showInputDialog(this,
-            "Describe the issue (up to 280 characters). It goes straight to this tournament's host on Discord:",
-            "Report an issue", JOptionPane.PLAIN_MESSAGE);
-        reportProblem(tournamentId, text);
-    }
-
-    /** Package-private so tests can skip the dialog: the active event's report. */
-    void reportProblem(String text)
-    {
-        if (activeId == null) return;
-        reportProblem(activeId, text);
-    }
-
-    /** One sender for both surfaces (the transport trims and drops blank text).
-     *  The Discord-login gate lives on the buttons; a refusal becomes a
-     *  banner. */
-    void reportProblem(String tournamentId, String text)
-    {
-        service.reportProblem(tournamentId, text);
-    }
-
     /** A card's Register: remembered until the server answers, for a refusal that names it. */
     void register(Tourney t)
     {
@@ -1482,7 +1453,7 @@ public class TourneyPanel extends JPanel implements TournamentEventListener
         if (state.gearDeadline > 0) gearUntilS = state.gearDeadline;
         roundEndMs = state.etaS >= 0 ? nowMs.getAsLong() + state.etaS * 1000L : 0L;
         renderActive();
-        renderBoard(state.tournamentId, state.status, state.round, state.standings);
+        renderBoard(state.tournamentId, state.status, state.round, state.standings, false);
         resubscribe();
         renderList();
     }
@@ -1504,7 +1475,7 @@ public class TourneyPanel extends JPanel implements TournamentEventListener
         setWrapped(activeHeader, header());
         renderBoardTitle();
         renderEta();
-        renderBoard(standings.tournamentId, standings.status, standings.round, standings.rows);
+        renderBoard(standings.tournamentId, standings.status, standings.round, standings.rows, true);
         if (standings.isFinished() || "cancelled".equals(standings.status))
         {
             // the dedicated finished / cancelled pushes drive the exit; the standings just stop moving
@@ -1717,7 +1688,7 @@ public class TourneyPanel extends JPanel implements TournamentEventListener
         activeMatch.setVisible(false);
         activeWhere.setVisible(false);
         activeStatus.setVisible(false);
-        renderBoard(boardPanel, "standings-", rows, live);
+        renderBoard(boardPanel, "standings-", rows, live, HEADER_PT);
         showCard(CARD_ACTIVE);
     }
 
@@ -1769,12 +1740,6 @@ public class TourneyPanel extends JPanel implements TournamentEventListener
     }
 
     @Override
-    public void onProblemAck()
-    {
-        showBanner("Problem report received — the organizer has been told.");
-    }
-
-    @Override
     public void onTournamentError(String code, String message, String cmd)
     {
         if ("tournament/gear_status".equals(cmd)) return;
@@ -1796,8 +1761,8 @@ public class TourneyPanel extends JPanel implements TournamentEventListener
         showBanner(friendlyError(code, message));
     }
 
-    /** The banner for an {@code error/tournament}: the server's own sentence for the report gate
-     *  ({@code DISCORD_NOT_LINKED}, {@code REPORT_RATE_LIMITED}), a state refusal and an update request. */
+    /** The banner for an {@code error/tournament}: the server's own sentence for a state refusal and an update
+     *  request. */
     static String friendlyError(String code, String message)
     {
         switch (code)
@@ -1808,8 +1773,6 @@ public class TourneyPanel extends JPanel implements TournamentEventListener
             case "TOURNAMENT_ALREADY_REGISTERED": return "You are already registered.";
             case "TOURNAMENT_NOT_REGISTERED": return "You are not registered.";
             case "TOURNAMENT_NOT_FOUND": return "Tournament not found.";
-            case "DISCORD_NOT_LINKED":
-            case "REPORT_RATE_LIMITED":
             case "TOURNAMENT_STATE":
             case "TOURNAMENT_PLUGIN_UPDATE_REQUIRED": return escape(message);
             default: return "Tournaments: " + (message.isEmpty() ? code : escape(message));
@@ -1831,7 +1794,7 @@ public class TourneyPanel extends JPanel implements TournamentEventListener
         renderList();
     }
 
-    /** Leaves the running event; {@code live} = the next view is a live one (Report, Rules and Withdraw), else the final
+    /** Leaves the running event; {@code live} = the next view is a live one (Rules and Withdraw), else the final
      *  standings (Back). */
     private void reset(boolean live)
     {

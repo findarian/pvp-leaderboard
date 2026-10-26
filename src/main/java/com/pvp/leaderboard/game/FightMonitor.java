@@ -8,6 +8,7 @@ import com.pvp.leaderboard.config.PvPLeaderboardConfig.*;
 import com.pvp.leaderboard.lobby.*;
 import com.pvp.leaderboard.overlay.*;
 import com.pvp.leaderboard.service.*;
+import com.pvp.leaderboard.tournament.*;
 import com.pvp.leaderboard.util.*;
 import java.util.*;
 import java.util.concurrent.*;
@@ -17,6 +18,7 @@ import javax.inject.*;
 import net.runelite.api.*;
 import net.runelite.api.coords.*;
 import net.runelite.api.events.*;
+import net.runelite.api.gameval.InterfaceID;
 import net.runelite.api.gameval.VarbitID;
 import net.runelite.client.config.*;
 import static java.lang.System.*;
@@ -254,6 +256,65 @@ public class FightMonitor
     @Setter private volatile BiConsumer<String, String> streakSink;
 
     @Setter private volatile Consumer<String> profileRefreshSink;
+
+    /** A rank read right after a fight: the fight's opponent and end (epoch seconds), whether it is your own, and the
+     *  new rating system's division ("Adamant 2"). */
+    public interface RankSink
+    {
+        void rank(String opponent, long endSec, boolean mine, String rank);
+    }
+
+    @Setter private volatile RankSink rankSink;
+
+    /** A result the server accepted, by its fight's end (epoch seconds), told 5, 15 and 45 s after it was sent. */
+    @Setter private volatile LongConsumer sentSink;
+    private static final long[] SENT_TICKS = {5, 15, 45};
+
+    private void tellSent(long endSec)
+    {
+        if (sentSink == null) return;
+        for (long s : SENT_TICKS) later(() -> sentOf(endSec), s);
+    }
+
+    private void sentOf(long endSec)
+    {
+        LongConsumer sink = sentSink;
+        try
+        {
+            if (sink != null) sink.accept(endSec);
+        }
+        catch (RuntimeException e)
+        {
+        }
+    }
+
+    private void rankOf(String opponent, long endSec, boolean mine, String rank)
+    {
+        RankSink sink = rankSink;
+        try
+        {
+            if (sink != null && rank != null) sink.rank(opponent, endSec, mine, rank);
+        }
+        catch (RuntimeException e)
+        {
+        }
+    }
+
+    /** The fight's performance stats for the match body, by opponent and result; null for none. */
+    @Setter private volatile BiFunction<String, String, Map<String, String>> perfSink;
+
+    private Map<String, String> perfOf(String opponent, String result)
+    {
+        BiFunction<String, String, Map<String, String>> sink = perfSink;
+        try
+        {
+            return sink == null ? null : sink.apply(opponent, result);
+        }
+        catch (RuntimeException e)
+        {
+            return null;
+        }
+    }
 
     Consumer<JsonObject> streakResolver(String guessBucket, String guessResult)
     {
@@ -656,22 +717,31 @@ public class FightMonitor
     {
         boolean died = localDied;
         String killer = deathKiller;
+        WorldPoint gone = gonePoint;
         Set<String> opponents = new LinkedHashSet<>(deadOpponents);
         clearPendingDeaths();
 
         for (String opponent : opponents)
         {
-            endFightFor(opponent, died ? "tie" : "win");
+            endFightFor(opponent, died ? "tie" : "win", null);
         }
 
         if (died)
         {
             if (killer != null && !opponents.contains(killer))
             {
-                endFightFor(killer, "loss");
+                endFightFor(killer, "loss", null);
             }
             resetFight();
         }
+
+        // The match opponent left the scene and no death ended the fight on that tick.
+        String opp = gone == null ? null : forfeitOpp();
+        if (opp == null) return;
+        Player me = client.getLocalPlayer();
+        WorldPoint at = me == null ? null : me.getWorldLocation();
+        if (at != null && at.distanceTo(gone) <= NEAR) endFightFor(opp, "win", "opponent_left");
+        else done();
     }
 
     private void clearPendingDeaths()
@@ -680,15 +750,89 @@ public class FightMonitor
         deadOpponents.clear();
         localDied = false;
         deathKiller = null;
+        gonePoint = null;
     }
 
-    private void endFightFor(String opponentName, String result)
+    // ------------------------------------------------------------------
+    // Tournament forfeits
+    // ------------------------------------------------------------------
+
+    /** The open tournament match; {@code null} when there is none. */
+    @Setter private volatile Supplier<MatchSeries> tourneyMatch = () -> null;
+
+    /** The series whose match has its result: no forfeit is sent for it. */
+    private volatile String doneSeries;
+
+    /** Where the match opponent was when they left the scene; settled with the tick's deaths on the next tick. */
+    private WorldPoint gonePoint;
+
+    /** The most tiles between the player and the opponent's last tile for the opponent's disappearance to be their leave. */
+    static final int NEAR = 10;
+
+    /** The fight with the open match's opponent (any name they are logged in with) while the match has no result;
+     *  {@code null} when there is none. A fight opens on the player's own damage, so it has always traded damage. */
+    private String forfeitOpp()
+    {
+        MatchSeries s = tourneyMatch.get();
+        if (s == null || s.seriesId.equals(doneSeries)) return null;
+        for (String name : activeFights.keySet())
+        {
+            String key = NameUtils.canonicalKey(name);
+            if (s.outlineNames().stream().anyMatch(n -> key.equals(NameUtils.canonicalKey(n)))) return name;
+        }
+        return null;
+    }
+
+    /** Marks the open match as having its result. */
+    private void done()
+    {
+        MatchSeries s = tourneyMatch.get();
+        if (s != null) doneSeries = s.seriesId;
+    }
+
+    /** The match opponent leaving the scene while the player is logged in; settled on the next tick. */
+    public void handleDespawn(Player p)
+    {
+        String opp = forfeitOpp();
+        if (opp == null || !opp.equals(p.getName()) || client.getGameState() != GameState.LOGGED_IN) return;
+        gonePoint = p.getWorldLocation();
+        if (pendingDeathTick < 0) pendingDeathTick = client.getTickCount();
+    }
+
+    /** A dialogue option clicked; the confirmed leave (the chat menu's prompt read at the click) during the open
+     *  match's fight is a forfeit loss. */
+    public void handleOption(MenuOptionClicked e)
+    {
+        if (e.getMenuAction() != MenuAction.WIDGET_CONTINUE) return;
+        var w = e.getWidget();
+        String text = w == null ? null : w.getText();
+        String opp = forfeitOpp();
+        if (opp == null || gonePoint != null) return;
+        var menu = client.getWidget(InterfaceID.Chatmenu.OPTIONS);
+        var title = menu == null ? null : menu.getChild(0);
+        if (title != null && LeaveOption.matches(e.getParam1(), text, title.getText())) endFightFor(opp, "loss", "left");
+    }
+
+    /** A logout, lost connection or client exit during the match's fight: its forfeit loss from the cached values;
+     *  {@code null} when there is none. */
+    public CompletableFuture<Boolean> handleQuit()
+    {
+        String opp = forfeitOpp();
+        if (opp == null) return null;
+        FightEntry fe = activeFights.get(opp);
+        done();
+        fe.finalized = true;
+        return finalizeLms(opp, client.getWorld(), fe, null);
+    }
+
+    private void endFightFor(String opponentName, String result, String forfeit)
     {
         FightEntry fe = activeFights.get(opponentName);
         if (fe == null || fe.finalized) return;
 
+        if (opponentName.equals(forfeitOpp())) done();
         fe.finalized = true;
-        finalizeFight(opponentName, result, fe);
+        finalizeFight(opponentName, result, fe, forfeit);
         clearFight(opponentName);  // Use targeted clear instead of resetFight
 
         // Release the popup-suppression gate the moment the match is
@@ -878,6 +1022,9 @@ public class FightMonitor
      * is set before submission, so a second call (e.g. LOGIN_SCREEN then
      * shutDown) is a no-op.
      *
+     * <p>When no freeze-log applies, a {@code logout} sends the open
+     * tournament match's forfeit instead ({@link #handleQuit}).
+     *
      * @param reason {@code "logout"} or {@code "plugin_disabled"}
      * @return the submission future when a freeze-log was submitted, or
      *         {@code null} when nothing qualified.
@@ -892,7 +1039,7 @@ public class FightMonitor
             String oppName = (lmsWorld && inArea) ? findLmsOpp(now) : null;
             if (!shouldFreeze(lmsWorld, inArea, oppName != null))
             {
-                return null;
+                return "plugin_disabled".equals(reason) ? null : handleQuit();
             }
             FightEntry fe = activeFights.get(oppName);
             if (fe == null || fe.finalized) return null;
@@ -1033,7 +1180,8 @@ public class FightMonitor
 
     /** Build + submit the freeze-log loss using cached values (the live
      *  player object is already gone at logout / shutdown). Spellbook is
-     *  best-effort from the fight's start value. */
+     *  best-effort from the fight's start value. A {@code null} reason is a
+     *  tournament forfeit's logout instead. */
     private CompletableFuture<Boolean> finalizeLms(String opponentName,
                                                               int world,
                                                               FightEntry fe,
@@ -1046,11 +1194,9 @@ public class FightMonitor
         }
         long endTs = currentTimeMillis() / 1000;
         String sb = getBookName(fe.startBook);
-        MatchResult match = matchOf(selfName, opponentName, "loss", world, fe, endTs, sb, sb)
-            .clientUniqueId(identitySvc.getClientUniqueId())
-            .lmsFreezeLogout(true)
-            .lmsFreezeReason(reason)
-            .build();
+        var b = matchOf(selfName, opponentName, "loss", world, fe, endTs, sb, sb)
+            .clientUniqueId(identitySvc.getClientUniqueId());
+        MatchResult match = (reason == null ? b.tournamentForfeit("logout") : b.lmsFreezeLogout(true).lmsFreezeReason(reason)).build();
         // Persist the pending-MMR marker BEFORE the fire-and-forget submit:
         // the player is logging out / disabling the plugin, so this session
         // can't poll for the resulting delta. On the next login we replay
@@ -1065,7 +1211,7 @@ public class FightMonitor
      * client thread; the client id is read and the submit made on the
      * scheduler, so the fetch always follows the server's acknowledgement.
      */
-    private void finalizeFight(String opponentName, String result, FightEntry entry)
+    private void finalizeFight(String opponentName, String result, FightEntry entry, String forfeit)
     {
         int endSb = client.getVarbitValue(VarbitID.SPELLBOOK);
         int world = client.getWorld();
@@ -1077,7 +1223,9 @@ public class FightMonitor
         String endSpellbook = getBookName(endSb);
         MatchResult.MatchResultBuilder match = matchOf(selfName, opponentName, result, world, entry, endTs, startBook, endSpellbook)
             .ffaPortal(ffaPortal)
-            .bountyHunter(entry.wasInBounty);
+            .bountyHunter(entry.wasInBounty)
+            .perf(perfOf(opponentName, result))
+            .tournamentForfeit(forfeit);
 
         // Determine the bucket this fight will be classified as
         RankBucket fb = determineBucket(world, entry.wasInMulti, startBook, endSpellbook, entry.wasInBounty);
@@ -1128,6 +1276,7 @@ public class FightMonitor
             if (Boolean.TRUE.equals(success))
             {
                 scheduleLobbyGateRefresh();
+                tellSent(endTs);
             }
             postFight.run();
         }).exceptionally(ex -> {
@@ -1136,7 +1285,7 @@ public class FightMonitor
         });
 
         // Tier refreshes for overlay (don't depend on match being processed)
-        refreshTiers(opponentName, apiBucket);
+        refreshTiers(opponentName, apiBucket, endTs);
     }
 
     private void fetchLater(String selfName, String opponent, boolean bucketInMmr, long endTs,
@@ -1179,23 +1328,27 @@ public class FightMonitor
     /**
      * Refresh tier/rank display for self and opponent.
      * Runs 5s after fight end — independent of match submission.
+     * After each read, the new rating system's division in that profile goes to the rank sink with the fight's
+     * opponent and end.
      */
-    private void refreshTiers(String opponentName, String displayBucket) {
+    private void refreshTiers(String opponentName, String displayBucket, long endSec) {
         later(() -> {
             try {
                 String selfName = getLocalName();
 
                 if (selfName != null) {
-                    retryTier(selfName, displayBucket, 3);
+                    retryTier(selfName, displayBucket, 3,
+                        () -> rankOf(opponentName, endSec, true, pvpApi.peekV3Rank(selfName, displayBucket)));
                 }
-                retryTier(opponentName, displayBucket, 3);
+                retryTier(opponentName, displayBucket, 3,
+                    () -> rankOf(opponentName, endSec, false, pvpApi.peekV3Rank(opponentName, displayBucket)));
             } catch (Exception e) {
             }
         }, 5L);
     }
 
     /** Find this fight's row in the player's match history (the same opponent,
-     *  within 10 s of the submitted end) and pop its rating change. The row
+     *  within 10 s of the submitted end) and pop its {@code v3_change}. The row
      *  goes to {@code onRow} (the streak hook) first; {@code onDisplayed} runs
      *  after the pop-up. Not found, or a row that cannot be read: retry in 5 s,
      *  at most twice, then settle {@code onRow} with no row. */
@@ -1239,8 +1392,7 @@ public class FightMonitor
                 }
                 settleStreak(onRow, match);
 
-                JsonObject ratingChange = JsonLenient.optObject(match, "rating_change");
-                JsonElement delta = ratingChange == null ? null : val(ratingChange, "mmr_delta");
+                JsonElement delta = val(match, "v3_change");
                 if (delta == null) {
                     return;
                 }
@@ -1248,12 +1400,6 @@ public class FightMonitor
                 JsonElement bucket = val(match, "bucket");
                 String matchBucket = bucket == null ? "nh" : bucket.getAsString();
                 String bucketLabel = withBucket ? getBucketDisplayName(matchBucket) : null;
-                JsonElement res = val(match, "result");
-                String result = res == null ? "win" : res.getAsString();
-                if ("loss".equalsIgnoreCase(result)) {
-                    mmrDelta = -Math.abs(mmrDelta);
-                }
-
                 boolean portalCapped = PortalCap.isCapped(match);
 
                 if (rankOverlay != null) {
@@ -1302,10 +1448,10 @@ public class FightMonitor
         }
     }
 
-    private void retryTier(String playerName, String bucket, int retriesLeft) {
+    private void retryTier(String playerName, String bucket, int retriesLeft, Runnable onRefreshed) {
         Runnable retry = () -> {
             if (retriesLeft > 0) {
-                later(() -> retryTier(playerName, bucket, retriesLeft - 1), 2L);
+                later(() -> retryTier(playerName, bucket, retriesLeft - 1, onRefreshed), 2L);
             } else {
             }
         };
@@ -1317,6 +1463,7 @@ public class FightMonitor
             if (rankOverlay != null) {
                 rankOverlay.setApiRank(playerName, tier);
             }
+            onRefreshed.run();
             reportOwn(playerName);
         }).exceptionally(ex -> {
             retry.run();

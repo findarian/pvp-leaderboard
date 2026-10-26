@@ -1,6 +1,7 @@
 package com.pvp.leaderboard.ui;
 
 import com.pvp.leaderboard.tournament.*;
+import com.pvp.leaderboard.util.*;
 import java.awt.*;
 import java.time.*;
 import java.util.*;
@@ -13,17 +14,13 @@ import static java.awt.Font.*;
 
 final class TournamentInfoCard extends CapPanel
 {
-    static final String REPORT_LABEL = "Report an issue";
-    static final String REPORT_TOOLTIP = "Report an issue with this tournament — the message goes to its host on Discord";
-    static final String LOGIN_TIP = "Log in with Discord to contact the host";
-
     /** The lobby's chip palette: region white, style yellow, build cyan. */
     private static final Color CHIP_FORMAT = Color.WHITE;
     private static final Color CHIP_CATEGORY = new Color(0xffc107);
     private static final Color CHIP_BUILD = new Color(0x4fc3f7);
     private static final float LINE_PT = 15f;
     private static final float CHIP_PT = 14f;
-    /** Card buttons: the full-width one, and the most / least the Report + Rules row may use. */
+    /** Card buttons: the full-width one, and the most / least a pair row may use. */
     static final float BUTTON_PT = 16f;
     /** The width a card's text wraps to (the side panel's card, inside its border). */
     static final int TEXT_WIDTH = 170;
@@ -34,12 +31,11 @@ final class TournamentInfoCard extends CapPanel
     private final JLabel when;
     /** {@code null} when the event has no registration window to show. */
     private final JLabel closes;
-    private final JButton report;
 
     /** {@code myCount} is the player's own match count in the event's bucket
      *  ({@code null} when unknown); {@code refused} marks an event whose
      *  registration was refused for its minimum. */
-    TournamentInfoCard(Tourney t, String myStatus, boolean discordLoggedIn, ZoneId zone, LongSupplier nowMs, TourneyPanel p,
+    TournamentInfoCard(Tourney t, String myStatus, ZoneId zone, LongSupplier nowMs, TourneyPanel p,
                        Integer myCount, boolean refused)
     {
         this.t = t;
@@ -75,26 +71,14 @@ final class TournamentInfoCard extends CapPanel
         }
         tick();
         add(vgap(6));
-        report = tabButton(REPORT_LABEL, "tournament-report-" + t.tournamentId, () -> p.onReport(t.tournamentId));
         add(pairRow(tabButton(t.isRunning() ? "Standings" : "Players", "tournament-standings-" + t.tournamentId, () -> p.openView(t)),
             tabButton("Rules", "tournament-rules-" + t.tournamentId, () -> p.openRules(t))));
-        add(vgap(4));
-        add(report);
         JComponent signUp = signUp(myStatus, p, myCount, refused);
         if (signUp != null)
         {
             add(vgap(4));
             add(signUp);
         }
-        setReportEnabled(discordLoggedIn);
-    }
-
-    /** The Report gate: enabled + the host tooltip while logged in with
-     *  Discord, disabled + the login hint otherwise. */
-    void setReportEnabled(boolean discordLoggedIn)
-    {
-        report.setEnabled(discordLoggedIn);
-        report.setToolTipText(discordLoggedIn ? REPORT_TOOLTIP : LOGIN_TIP);
     }
 
     /** Re-renders the two time lines (the panel's 1 Hz beat); a label is set only when its text moved. */
@@ -314,7 +298,7 @@ final class TournamentInfoCard extends CapPanel
     /** {@code 18} → {@code "Rune 3"}, {@code 24} → {@code "3rd Age"}, out of range → {@code "?"}. */
     static String rankLabel(int idx)
     {
-        return idx < 0 || idx >= PlayerCard.RANK_LABELS.length ? "?" : PlayerCard.RANK_LABELS[idx];
+        return idx < 0 || idx >= RankUtils.SLOTS.length ? "?" : RankUtils.SLOTS[idx];
     }
 
     /** Plain text as {@code <html>} lines joined by {@code <br>}, each no

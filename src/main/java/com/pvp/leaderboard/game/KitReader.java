@@ -296,16 +296,23 @@ public class KitReader
 
     static int[] firstItem(Widget w, int depth)
     {
+        Widget hit = itemWidget(w, depth);
+        return hit == null ? null : new int[]{hit.getItemId(), Math.max(1, hit.getItemQuantity())};
+    }
+
+    /** The first shown widget of {@code w} and its children, {@code depth} levels down, that holds an item; null for none. */
+    public static Widget itemWidget(Widget w, int depth)
+    {
         if (w == null || w.isHidden()) return null;
         int id = w.getItemId();
-        if (id > 0 && id != BLANK_ID) return new int[]{id, Math.max(1, w.getItemQuantity())};
+        if (id > 0 && id != BLANK_ID) return w;
         if (depth <= 0) return null;
         for (Widget[] kids : kids(w))
         {
             if (kids == null) continue;
             for (Widget k : kids)
             {
-                int[] hit = firstItem(k, depth - 1);
+                Widget hit = itemWidget(k, depth - 1);
                 if (hit != null) return hit;
             }
         }

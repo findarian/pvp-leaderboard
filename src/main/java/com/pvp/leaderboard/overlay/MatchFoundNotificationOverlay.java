@@ -39,15 +39,12 @@ public final class MatchFoundNotificationOverlay extends Popup
 
     private volatile String activeOpp;
     private volatile String activeSubtext;
-    /** Rank-tier colour for the opponent name in the caption. Null is
-     *  coerced to {@link Color#WHITE} at intake. */
-    private volatile Color activeColor;
     private volatile long shownSince;
 
     @Inject
     public MatchFoundNotificationOverlay(Client client, PvPLeaderboardConfig config, FightMonitor fightMonitor)
     {
-        super(client, log, "MatchFoundNotificationOverlay", POPUP_W, POPUP_H, TITLE_BAR_H, TOP_OFFSET);
+        super(client, log, "MatchFoundNotificationOverlay", POPUP_W, TOP_OFFSET);
         this.config = config;
         this.fightMonitor = fightMonitor;
     }
@@ -70,8 +67,7 @@ public final class MatchFoundNotificationOverlay extends Popup
      */
     public void showMatch(String fightId,
                           String opponentName,
-                          String subtext,
-                          Color opponentColor)
+                          String subtext)
     {
         if (opponentName == null || opponentName.isEmpty()) return;
         if (fightId != null && fightId.equals(lastShownId))
@@ -88,7 +84,6 @@ public final class MatchFoundNotificationOverlay extends Popup
         }
         activeOpp = opponentName;
         activeSubtext = subtext == null ? "" : subtext;
-        activeColor = (opponentColor != null) ? opponentColor : Color.WHITE;
         shownSince = System.currentTimeMillis();
     }
 
@@ -106,7 +101,6 @@ public final class MatchFoundNotificationOverlay extends Popup
     {
         activeOpp = null;
         activeSubtext = null;
-        activeColor = null;
         shownSince = 0L;
     }
 
@@ -144,7 +138,7 @@ public final class MatchFoundNotificationOverlay extends Popup
             drop();
             return null;
         }
-        return paint(g, alphaAt(elapsed), opponent);
+        return paint(g, alphaAt(elapsed), opponent, POPUP_H, TITLE_BAR_H);
     }
 
     static float alphaAt(long elapsedMs)
@@ -180,8 +174,7 @@ public final class MatchFoundNotificationOverlay extends Popup
         int lineH = bodyFm.getHeight();
         int blockTop = (bodyTop + bodyBottom - 2 * lineH) / 2;
         int captionY = blockTop + bodyFm.getAscent();
-        Color opponentColor = activeColor;
-        g.setColor(opponentColor != null ? opponentColor : BODY_FG);
+        g.setColor(Color.WHITE);
         g.drawString(name, captionX, captionY);
 
         String sub = activeSubtext;

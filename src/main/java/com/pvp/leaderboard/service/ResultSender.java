@@ -110,6 +110,16 @@ public class ResultSender
             body.addProperty("bounty_hunter", true);
         }
 
+        if (match.getTournamentForfeit() != null)
+        {
+            body.addProperty("tournament_forfeit", match.getTournamentForfeit());
+        }
+
+        if (match.getPerf() != null)
+        {
+            match.getPerf().forEach(body::addProperty);
+        }
+
         return gson.toJson(body);
     }
 

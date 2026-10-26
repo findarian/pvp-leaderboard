@@ -18,6 +18,12 @@ public class TourneySvc
     private volatile boolean started = false;
     /** The tournament whose standings the sub-tab is watching (re-subscribed on reconnect). */
     private volatile String subscribedTo;
+    /** Its rows and tier labels from the last full frame and the deltas on it, and their {@code seq} (-1: none). */
+    private List<StandingsRow> rows = Collections.emptyList();
+    private List<String> labels = Collections.emptyList();
+    private long seq = -1;
+    /** A re-subscribe was sent since the last full frame. */
+    private boolean resent;
 
     @Inject
     public TourneySvc(SocketMgr socket, SocketBus bus)
@@ -45,6 +51,7 @@ public class TourneySvc
         bus.register("tournament/withdrawn", this::handleWithdrawn);
         bus.register("tournament/state", this::handleState);
         bus.register("tournament/standings", this::handleStandings);
+        bus.register("tournament/standings_delta", this::handleDelta);
         bus.register("tournament/match_assigned", this::handleMatchAssigned);
         bus.register("tournament/opponent_highlight", this::handleHighlight);
         bus.register("tournament/opponent_highlight_clear", this::handleHighlightClear);
@@ -53,7 +60,6 @@ public class TourneySvc
         bus.register("tournament/removed", this::handleRemoved);
         bus.register("tournament/cancelled", this::handleCancelled);
         bus.register("tournament/finished", this::handleFinished);
-        bus.register("tournament/problem_ack", d -> fire(TournamentEventListener::onProblemAck));
         bus.register("tournament/gear_check", this::handleGearCheck);
         bus.register("tournament/gear_ack", this::handleGearAck);
         bus.register("tournament/no_show_recorded", series(TournamentEventListener::onNoShowRecorded));
@@ -136,8 +142,20 @@ public class TourneySvc
 
     public void subscribe(String tournamentId)
     {
-        subscribedTo = tournamentId;
-        socket.send("tournament/subscribe", withId(tournamentId));
+        synchronized (this)
+        {
+            subscribedTo = tournamentId;
+            seq = -1;
+            resent = false;
+        }
+        sendSubscribe(tournamentId);
+    }
+
+    private void sendSubscribe(String tournamentId)
+    {
+        JsonObject d = withId(tournamentId);
+        d.addProperty("deltas", 1);
+        socket.send("tournament/subscribe", d);
     }
 
     public void unsubscribe(String tournamentId)
@@ -174,18 +192,6 @@ public class TourneySvc
         JsonObject d = inSeries(tournamentId, seriesId);
         d.addProperty("world", world);
         socket.send("tournament/world", d);
-    }
-
-    /** {@code tournament/report_problem}: the text trimmed and cut to 280
-     *  characters; blank text sends nothing. */
-    public void reportProblem(String tournamentId, String text)
-    {
-        if (blank(text)) return;
-        String trimmed = text.trim();
-        if (trimmed.length() > 280) trimmed = trimmed.substring(0, 280);
-        JsonObject d = withId(tournamentId);
-        d.addProperty("text", trimmed);
-        socket.send("tournament/report_problem", d);
     }
 
     private static void putVerdict(JsonObject d, GearDiff diff, boolean ok)
@@ -249,7 +255,61 @@ public class TourneySvc
     {
         TourneyBoard s = TourneyBoard.fromJson(d);
         if (s == null) return;
+        synchronized (this)
+        {
+            if (s.tournamentId.equals(subscribedTo))
+            {
+                rows = s.rows;
+                labels = StandingsRow.tierLabels(d);
+                seq = optLong(d, "seq", -1L);
+                resent = false;
+            }
+        }
         fire(l -> l.onStandings(s));
+    }
+
+    /** A delta on the subscribed event's list: applied when its {@code base_seq} is the list's {@code seq}, else one
+     *  re-subscribe until the next full frame. */
+    private void handleDelta(JsonObject d)
+    {
+        String tid = tid(d);
+        TourneyBoard s;
+        synchronized (this)
+        {
+            if (!tid.equals(subscribedTo)) return;
+            if (seq < 0 || optLong(d, "base_seq", -1L) != seq)
+            {
+                if (resent) return;
+                resent = true;
+                s = null;
+            }
+            else
+            {
+                rows = merge(rows, StandingsRow.fromArray(optArray(d, "rows"), labels), optArray(d, "removed"));
+                seq = optLong(d, "seq", -1L);
+                s = TourneyBoard.of(d, rows);
+            }
+        }
+        if (s != null)
+        {
+            fire(l -> l.onStandings(s));
+            return;
+        }
+        sendSubscribe(tid);
+    }
+
+    /** {@code rows} with {@code changed} put in by key and the {@code removed} keys taken out, in rank order;
+     *  {@code rows} itself when there is neither. */
+    private static List<StandingsRow> merge(List<StandingsRow> rows, List<StandingsRow> changed, JsonArray removed)
+    {
+        if (changed.isEmpty() && removed.size() == 0) return rows;
+        Map<String, StandingsRow> byKey = new LinkedHashMap<>();
+        for (StandingsRow r : rows) byKey.put(r.k, r);
+        for (StandingsRow r : changed) byKey.put(r.k, r);
+        for (JsonElement e : removed) byKey.remove(str(e));
+        List<StandingsRow> out = new ArrayList<>(byKey.values());
+        out.sort(Comparator.comparingInt(r -> r.rank));
+        return out;
     }
 
     private void handleMatchAssigned(JsonObject d)

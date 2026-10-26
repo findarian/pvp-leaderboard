@@ -2,6 +2,7 @@ package com.pvp.leaderboard.overlay;
 
 import java.awt.*;
 import net.runelite.api.*;
+import net.runelite.client.ui.*;
 import net.runelite.client.ui.overlay.*;
 import org.slf4j.*;
 import static java.awt.RenderingHints.*;
@@ -36,24 +37,22 @@ abstract class Popup extends Overlay
     static final Color TITLE_FG = new Color(0xff981f);
     /** Body text. */
     static final Color BODY_FG = Color.WHITE;
+    /** A button's fill. */
+    static final Color BUTTON_FILL = new Color(0x3a342a);
 
     private final Client client;
     private final Logger log;
     private final String name;
     private final int width;
-    private final int height;
-    private final int titleBarHeight;
     private final int top;
 
     /** {@code log} and {@code name} are the pop-up's own, for its render warning. */
-    Popup(Client client, Logger log, String name, int width, int height, int titleBarHeight, int top)
+    Popup(Client client, Logger log, String name, int width, int top)
     {
         this.client = client;
         this.log = log;
         this.name = name;
         this.width = width;
-        this.height = height;
-        this.titleBarHeight = titleBarHeight;
         this.top = top;
         setPosition(OverlayPosition.DYNAMIC);
         setLayer(OverlayLayer.ABOVE_WIDGETS);
@@ -106,10 +105,9 @@ abstract class Popup extends Overlay
         return Math.max(0f, Math.min(1f, share));
     }
 
-    /** Paints the frame at {@code alpha}, centred at the top of the canvas,
-     *  then the body; restores the graphics state it changes. {@code null}
-     *  without a canvas. */
-    Dimension paint(Graphics2D g, float alpha, String text)
+    /** Paints the frame, {@code height} tall with a {@code titleBarHeight} title bar, at {@code alpha}, centred at the
+     *  top of the canvas, then the body; restores the graphics state it changes. {@code null} without a canvas. */
+    Dimension paint(Graphics2D g, float alpha, String text, int height, int titleBarHeight)
     {
         Dimension canvas = client.getRealDimensions();
         if (canvas == null) return null;
@@ -149,5 +147,23 @@ abstract class Popup extends Overlay
             if (prevTAA != null) g.setRenderingHint(KEY_TEXT_ANTIALIASING, prevTAA);
         }
         return new Dimension(width, height);
+    }
+
+    /** A {@code w} x {@code h} button at ({@code x}, {@code y}): the frame's bevel and outline, {@code label} centred
+     *  in RuneScape bold; its bounds. */
+    static Rectangle button(Graphics2D g, int x, int y, int w, int h, String label)
+    {
+        g.setRenderingHint(KEY_ANTIALIASING, VALUE_ANTIALIAS_OFF);
+        g.setColor(BUTTON_FILL);
+        g.fillRect(x, y, w, h);
+        g.setColor(FRAME_BEVEL);
+        g.drawRect(x, y, w - 1, h - 1);
+        g.setColor(OUTER_OUTLINE);
+        g.drawRect(x - 1, y - 1, w + 1, h + 1);
+        g.setFont(FontManager.getRunescapeBoldFont());
+        FontMetrics fm = g.getFontMetrics();
+        g.setColor(TITLE_FG);
+        g.drawString(label, x + (w - fm.stringWidth(label)) / 2, y + (h + fm.getAscent()) / 2 - 2);
+        return new Rectangle(x, y, w, h);
     }
 }

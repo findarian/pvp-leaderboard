@@ -13,9 +13,6 @@ import static javax.swing.SwingUtilities.*;
 
 public class PerfStats extends JPanel
 {
-    /** Opponent tiers, highest first: the rank breakdown's sort order. */
-    private static final List<String> TIERS = Arrays.asList("3rd Age", "Dragon", "Rune", "Adamant", "Mithril", "Black", "Steel", "Iron", "Bronze");
-
     private final JLabel totalsLabel = new JLabel("K: - D: - Winrate -%");
     private final JPanel bucketPicker;
 
@@ -28,7 +25,7 @@ public class PerfStats extends JPanel
      *  row — matches the website's Performance Overview. */
     private Map<String, int[]> bucketTotals;
 
-    // Cumulative opponent rank stats per bucket: bucket -> (rank -> [wins, losses])
+    // Opponent divisions per bucket: bucket -> (division -> [kills, deaths])
     private Map<String, Map<String, int[]>> oppRankStats;
 
     public PerfStats()
@@ -140,64 +137,31 @@ public class PerfStats extends JPanel
     }
 
     /**
-     * Rank -> [wins, losses] from a JsonObject of rank -> {wins, losses}
-     * entries; only ranks with a win or a loss are kept.
+     * The rank breakdown from a /user profile: each bucket's v3 card {@code opp} rows
+     * ({@code division}, {@code kills}, {@code deaths}); a row without a division, or with neither a kill nor a
+     * death, is skipped.
      */
-    private static Map<String, int[]> parseRanks(JsonObject rankData)
-    {
-        Map<String, int[]> result = new HashMap<>();
-        for (String key : rankData.keySet())
-        {
-            JsonObject rs = optObject(rankData, key);
-            int wins = optInt(rs, "wins", 0);
-            int losses = optInt(rs, "losses", 0);
-            if (wins > 0 || losses > 0)
-            {
-                result.put(key, new int[]{wins, losses});
-            }
-        }
-        return result;
-    }
-
-    /**
-     * Receive opponent rank stats from the /user API response.
-     * Called from Dashboard.loadStats() after getProfile.
-     * Updates the rank breakdown table with all-time stats per opponent tier+division.
-     *
-     * Handles two formats:
-     * - New format: nested by bucket {"overall": {...}, "nh": {...}, ...}
-     * - Old format: flat {rank -> stats} (wrapped in "overall" for all buckets)
-     */
-    public void setOppRanks(JsonObject opponentStats)
+    public void setOppRanks(JsonObject profile)
     {
         oppRankStats = new HashMap<>();
-        if (opponentStats != null)
+        for (String label : BUCKETS)
         {
-            if (optObject(opponentStats, "overall") != null)
+            String bucket = label.toLowerCase(Locale.ROOT);
+            Map<String, int[]> rows = new HashMap<>();
+            for (JsonElement e : optArray(RankUtils.card(profile, bucket), "opp"))
             {
-                for (String bucket : opponentStats.keySet())
-                {
-                    JsonObject bucketData = optObject(opponentStats, bucket);
-                    if (bucketData != null) oppRankStats.put(bucket, parseRanks(bucketData));
-                }
+                JsonObject o = e.isJsonObject() ? e.getAsJsonObject() : null;
+                String division = RankUtils.division(o);
+                int kills = optInt(o, "kills", 0);
+                int deaths = optInt(o, "deaths", 0);
+                if (division != null && (kills > 0 || deaths > 0)) rows.put(division, new int[]{kills, deaths});
             }
-            else
-            {
-                Map<String, int[]> overall = parseRanks(opponentStats);
-                for (String b : ExtraStats.bucketKeys())
-                {
-                    oppRankStats.put(b, overall);
-                }
-            }
+            oppRankStats.put(bucket, rows);
         }
         updateRanks();
     }
 
-    /**
-     * Update the rank breakdown table from cumulative opponent rank stats for current bucket.
-     * Sorts by rank tier (highest first, unknown tiers last) then by division
-     * (1, 2, 3); the division is read only to break a tie.
-     */
+    /** The rank breakdown table for the current bucket, highest division first (unknown ones last). */
     private void updateRanks()
     {
         invokeLater(() ->
@@ -206,7 +170,8 @@ public class PerfStats extends JPanel
             Map<String, int[]> stats = oppRankStats == null ? Collections.emptyMap()
                 : oppRankStats.getOrDefault(currentBucket, Collections.emptyMap());
             List<String> keys = new ArrayList<>(stats.keySet());
-            keys.sort(Comparator.comparingInt(PerfStats::tierIndex).thenComparingInt(PerfStats::division));
+            List<String> order = Arrays.asList(RankUtils.SLOTS);
+            keys.sort(Comparator.comparingInt(k -> -order.indexOf(k)));
             for (String key : keys)
             {
                 int[] s = stats.get(key);
@@ -214,19 +179,6 @@ public class PerfStats extends JPanel
                 rankModel.addRow(new Object[]{key, s[0], s[1], kd});
             }
         });
-    }
-
-    private static int tierIndex(String key)
-    {
-        String family = key.split(" ")[0];
-        int i = TIERS.indexOf(family.equals("3rd") ? "3rd Age" : family);
-        return i < 0 ? 999 : i;
-    }
-
-    private static int division(String key)
-    {
-        String[] parts = key.split(" ");
-        return parts.length > 1 ? Integer.parseInt(parts[parts.length - 1]) : 0;
     }
 
     public void reset()

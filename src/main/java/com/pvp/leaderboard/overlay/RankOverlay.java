@@ -4,6 +4,7 @@ import com.pvp.leaderboard.cache.*;
 import com.pvp.leaderboard.config.*;
 import com.pvp.leaderboard.config.PvPLeaderboardConfig.*;
 import com.pvp.leaderboard.game.*;
+import com.pvp.leaderboard.perf.FightsPanel;
 import com.pvp.leaderboard.service.*;
 import com.pvp.leaderboard.util.*;
 import java.awt.*;
@@ -96,9 +97,6 @@ public class RankOverlay extends Overlay
     private volatile long noticeAtMs = 0L;
     private volatile int noticeTick = -1; // Track tick for 1-per-tick display
 
-    // Legacy fields kept for backwards compatibility
-    private volatile Double previousMmr = null;
-
     /**
      * Represents a single MMR change notification.
      */
@@ -160,14 +158,6 @@ public class RankOverlay extends Overlay
         selfTried = false;
         selfRankDue = 0L;
         // Note: Don't clear whitelist cache on world hop - it's fetched from API and valid for 1 hour
-    }
-
-    /**
-     * Get cached rank for a player.
-     */
-    public String getCachedRankFor(String playerName)
-    {
-        return shownRanks.get(NameUtils.canonicalKey(playerName));
     }
 
     /**
@@ -807,11 +797,11 @@ public class RankOverlay extends Overlay
         g.drawString(text, centerX, drawY);
     }
 
-    /** "+14.0 MMR" (a zero change reads as a gain), or the portal cap's
+    /** The change as the Performance tab shows it ("+7.9 MMR", "-9.7 MMR", "0.0 MMR"), or the cap's
      *  label; " (label)" appended when a bucket label is given. */
     static String noticeText(double mmrDelta, String bucketLabel, boolean portalCapped)
     {
-        return (portalCapped ? PortalCap.LABEL : String.format("%s%.1f MMR", mmrDelta >= 0 ? "+" : "", mmrDelta))
+        return (portalCapped ? PortalCap.LABEL : FightsPanel.change(mmrDelta) + " MMR")
             + (bucketLabel != null && !bucketLabel.isEmpty() ? " (" + bucketLabel + ")" : "");
     }
 

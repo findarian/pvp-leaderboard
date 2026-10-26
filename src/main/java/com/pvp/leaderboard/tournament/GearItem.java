@@ -7,11 +7,13 @@ import java.util.*;
 import lombok.*;
 import static com.pvp.leaderboard.util.JsonLenient.*;
 
-/** One item: a row of a gear set, or an item read from a kit ({@code noted} only there; {@code variants} and
- *  {@code altIds} only on set rows). */
+/** One item: a row of a gear set, or an item read from a kit ({@code noted} only there; {@code variants},
+ *  {@code altIds} and {@code inv} only on set rows). */
 @EqualsAndHashCode
 public final class GearItem
 {
+    public static final int INVENTORY_SLOTS = 28;
+
     public final int id;
     public final int qty;
     public final String name;
@@ -20,8 +22,16 @@ public final class GearItem
     public final boolean noted;
     public final String variants;
     public final List<Integer> altIds;
+    /** The inventory slots (0-27) a carried set row takes in the set's picture, sorted; empty when it has none. */
+    public final List<Integer> inv;
 
     public GearItem(int id, int qty, String name, String slot, boolean stackable, boolean noted, String variants, Collection<Integer> altIds)
+    {
+        this(id, qty, name, slot, stackable, noted, variants, altIds, Collections.<Integer>emptyList());
+    }
+
+    public GearItem(int id, int qty, String name, String slot, boolean stackable, boolean noted, String variants, Collection<Integer> altIds,
+                    List<Integer> inv)
     {
         this.id = id;
         this.qty = qty;
@@ -31,6 +41,7 @@ public final class GearItem
         this.noted = noted;
         this.variants = variants;
         this.altIds = alternatives(id, altIds);
+        this.inv = inv;
     }
 
     public static GearItem fromJson(JsonElement e)
@@ -41,8 +52,24 @@ public final class GearItem
         Integer qty = optInteger(o, "qty");
         if (id == null || id < 1 || qty == null || qty < 1) return null;
         String name = optString(o, "name").trim();
-        return new GearItem(id, qty, name.isEmpty() ? "Item " + id : name, wornSlot(optString(o, "slot", null)),
-            optBool(o, "stackable", false), false, variantsMode(optString(o, "variants", null)), altIdsOf(o));
+        String slot = wornSlot(optString(o, "slot", null));
+        boolean stackable = optBool(o, "stackable", false);
+        return new GearItem(id, qty, name.isEmpty() ? "Item " + id : name, slot, stackable, false,
+            variantsMode(optString(o, "variants", null)), altIdsOf(o), slot != null ? Collections.<Integer>emptyList() : invOf(o, stackable ? 1 : qty));
+    }
+
+    /** {@code inv}: exactly {@code need} distinct whole slots 0-27, sorted; empty for anything else. */
+    static List<Integer> invOf(JsonObject o, int need)
+    {
+        JsonElement e = o.get("inv");
+        if (e == null || !e.isJsonArray() || e.getAsJsonArray().size() != need) return Collections.emptyList();
+        Set<Integer> out = new TreeSet<>();
+        for (JsonElement a : e.getAsJsonArray())
+        {
+            Integer v = wholeNumber(a);
+            if (v == null || v < 0 || v >= INVENTORY_SLOTS || !out.add(v)) return Collections.emptyList();
+        }
+        return Collections.unmodifiableList(new ArrayList<>(out));
     }
 
     public List<Integer> ids()

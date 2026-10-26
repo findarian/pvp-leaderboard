@@ -35,24 +35,13 @@ public final class WinLossPeak
 			}
 		}
 		Map<String, String> peaks = new HashMap<>();
-		JsonObject peakMap = optObject(profile, "peaks");
-		if (peakMap != null)
+		JsonObject buckets = optObject(profile, "buckets");
+		for (String b : buckets == null ? Collections.<String>emptySet() : buckets.keySet())
 		{
-			for (Map.Entry<String, JsonElement> e : peakMap.entrySet())
-			{
-				String text = peakText(optObject(peakMap, e.getKey()));
-				if (text != null) peaks.put(e.getKey(), text);
-			}
+			String peak = RankUtils.division(optObject(RankUtils.card(profile, b), "peak"));
+			if (peak != null) peaks.put(b, peak);
 		}
 		return records.isEmpty() && peaks.isEmpty() ? EMPTY : new WinLossPeak(records, peaks);
-	}
-
-	private static String peakText(JsonObject peak)
-	{
-		String rank = optString(peak, "rank").trim();
-		if (rank.isEmpty()) return null;
-		int division = optInt(peak, "division", 0);
-		return division > 0 ? rank + " " + division : rank;
 	}
 
 	public int wins(String bucketKey)

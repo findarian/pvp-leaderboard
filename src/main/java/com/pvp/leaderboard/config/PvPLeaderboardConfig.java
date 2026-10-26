@@ -299,6 +299,56 @@ public interface PvPLeaderboardConfig extends Config
 		return true;
 	}
 
+	@ConfigItem(
+		keyName = "showPairingPopups",
+		name = "Show pairing pop-ups",
+		description = "A box at the top of the game view with the round, your opponent and the world when a tournament round is paired; it waits until a fight ends. The chat message is always sent",
+		section = notificationSection,
+		position = 8
+	)
+	default boolean showPairingPopups()
+	{
+		return true;
+	}
+
+	@ConfigItem(
+		keyName = "pairingPopupSeconds",
+		name = "Pairing pop-up seconds",
+		description = "How long the pairing box stays on screen (1-30)",
+		section = notificationSection,
+		position = 9
+	)
+	@Range(min = 1, max = 30)
+	default int pairingPopupSeconds()
+	{
+		return 20;
+	}
+
+	@ConfigItem(
+		keyName = "showTournamentReminders",
+		name = "Show tournament reminders",
+		description = "A box 15 and 5 minutes before each listed tournament starts, saying whether you are registered; it waits until a fight ends. The chat message is always sent",
+		section = notificationSection,
+		position = 10
+	)
+	default boolean showTournamentReminders()
+	{
+		return true;
+	}
+
+	@ConfigItem(
+		keyName = "reminderPopupSeconds",
+		name = "Reminder pop-up seconds",
+		description = "How long a reminder box stays on screen (1-30)",
+		section = notificationSection,
+		position = 11
+	)
+	@Range(min = 1, max = 30)
+	default int reminderPopupSeconds()
+	{
+		return 5;
+	}
+
 	// ==================== Other Settings ====================
 
 	@ConfigItem(
@@ -451,7 +501,7 @@ public interface PvPLeaderboardConfig extends Config
 	@ConfigItem(
 		keyName = "killStreakBoxAutoSwitch",
 		name = "Auto-switch style",
-		description = "Follow the style of your last fight (NH, Veng, Multi or DMM) and Event while you are in a running tournament. Off: always show the style picked below.",
+		description = "Follow the style of your last fight (NH, Veng, Multi or DMM), and Tournament while you are in a running tournament. Off: always show the style picked below.",
 		section = killStreakSection,
 		position = 4
 	)
@@ -463,7 +513,7 @@ public interface PvPLeaderboardConfig extends Config
 	@ConfigItem(
 		keyName = "killStreakBoxBucket",
 		name = "Style",
-		description = "The style the box shows while auto-switch is off (Event = tournaments)",
+		description = "The style the box shows while auto-switch is off",
 		section = killStreakSection,
 		position = 5
 	)
@@ -504,6 +554,159 @@ public interface PvPLeaderboardConfig extends Config
 		position = 8
 	)
 	default boolean killStreakBoxShowPeak()
+	{
+		return false;
+	}
+
+	// ==================== Fight Box ====================
+
+	@ConfigSection(
+		name = "Fight Box",
+		description = "A movable box with each live fight's stats, below the kill streak box",
+		position = 6
+	)
+	String fightBoxSection = "fightBox";
+
+	@ConfigItem(
+		keyName = "showFightBox",
+		name = "Show fight box",
+		description = "Show each live fight's stats in a movable box (Alt+drag to move it)",
+		section = fightBoxSection
+	)
+	default boolean showFightBox()
+	{
+		return true;
+	}
+
+	@ConfigItem(
+		keyName = "fightBoxMax",
+		name = "Max fight boxes",
+		description = "How many fights show at once, the most recent ones (1-10)",
+		section = fightBoxSection,
+		position = 1
+	)
+	@Range(min = 1, max = 10)
+	default int fightBoxMax()
+	{
+		return 2;
+	}
+
+	@ConfigItem(
+		keyName = "fightBoxOffPray",
+		name = "Off-pray",
+		description = "Attacks your target was not praying against",
+		section = fightBoxSection,
+		position = 2
+	)
+	default boolean fightBoxOffPray()
+	{
+		return true;
+	}
+
+	@ConfigItem(
+		keyName = "fightBoxExpectedDamage",
+		name = "Expected damage",
+		description = "Average damage of the attacks, from gear and prayers",
+		section = fightBoxSection,
+		position = 3
+	)
+	default boolean fightBoxExpectedDamage()
+	{
+		return true;
+	}
+
+	@ConfigItem(
+		keyName = "fightBoxDamage",
+		name = "Damage",
+		description = "Damage dealt",
+		section = fightBoxSection,
+		position = 4
+	)
+	default boolean fightBoxDamage()
+	{
+		return true;
+	}
+
+	@ConfigItem(
+		keyName = "fightBoxMagicLuck",
+		name = "Magic luck",
+		description = "Magic attacks that hit, against the expected number",
+		section = fightBoxSection,
+		position = 5
+	)
+	default boolean fightBoxMagicLuck()
+	{
+		return false;
+	}
+
+	@ConfigItem(
+		keyName = "fightBoxOffensivePrayer",
+		name = "Offensive prayer",
+		description = "Your attacks with the right offensive prayer on",
+		section = fightBoxSection,
+		position = 6
+	)
+	default boolean fightBoxOffensivePrayer()
+	{
+		return false;
+	}
+
+	@ConfigItem(
+		keyName = "fightBoxHpHealed",
+		name = "HP healed",
+		description = "Your hitpoints healed",
+		section = fightBoxSection,
+		position = 7
+	)
+	default boolean fightBoxHpHealed()
+	{
+		return false;
+	}
+
+	@ConfigItem(
+		keyName = "fightBoxRobeHits",
+		name = "Hits on robes",
+		description = "Melee and ranged attacks taken while wearing robes",
+		section = fightBoxSection,
+		position = 8
+	)
+	default boolean fightBoxRobeHits()
+	{
+		return false;
+	}
+
+	@ConfigItem(
+		keyName = "fightBoxKoChances",
+		name = "KO chances",
+		description = "Attacks that could have ended the fight, with the total chance",
+		section = fightBoxSection,
+		position = 9
+	)
+	default boolean fightBoxKoChances()
+	{
+		return false;
+	}
+
+	@ConfigItem(
+		keyName = "fightBoxGhostBarrages",
+		name = "Ghost barrages",
+		description = "Your barrages cast without an animation",
+		section = fightBoxSection,
+		position = 10
+	)
+	default boolean fightBoxGhostBarrages()
+	{
+		return false;
+	}
+
+	@ConfigItem(
+		keyName = "alwaysShowPvpLeaderboard",
+		name = "Always show PvP Leaderboard",
+		description = "Keep the PvP Leaderboard line under the kill streak box and the fight box. Off: it shows for each box's first minute on screen after the client starts",
+		section = fightBoxSection,
+		position = 11
+	)
+	default boolean alwaysShowPvpLeaderboard()
 	{
 		return false;
 	}

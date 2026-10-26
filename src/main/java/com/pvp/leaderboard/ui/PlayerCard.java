@@ -145,8 +145,8 @@ class PlayerCard extends CapPanel
      *  right end on the card's background; an unknown rank leaves the name alone. */
     private JComponent buildHeader()
     {
-        boolean rankKnown = p.peakRankIdx >= 0 && p.peakRankIdx < RANK_LABELS.length;
-        String rankLabel = rankKnown ? RANK_LABELS[p.peakRankIdx] : "";
+        boolean rankKnown = p.peakRankIdx >= 0 && p.peakRankIdx < RankUtils.SLOTS.length;
+        String rankLabel = rankKnown ? RankUtils.SLOTS[p.peakRankIdx] : "";
         Color rankColor = rankKnown ? RankUtils.getRankColor(rankLabel) : Color.WHITE;
         String displayName = nameOf(p);
         var name = new FullLabel(displayName);
@@ -189,9 +189,6 @@ class PlayerCard extends CapPanel
         return chip;
     }
 
-    /** The lobby's rank labels ("Bronze 3" ... "3rd Age"), indexed like {@link RankUtils#THRESHOLDS}. */
-    static final String[] RANK_LABELS = buildLabels();
-
     /** A member's name for the card: the display name, else the id, else "Unknown". */
     static String nameOf(LobbyMember m)
     {
@@ -201,20 +198,6 @@ class PlayerCard extends CapPanel
         String pid = m.playerId;
         if (pid != null && !pid.isEmpty()) return pid;
         return "Unknown";
-    }
-
-    /** Builds the human-readable rank labels (e.g. "Bronze 3", "3rd Age") in
-     *  the same index order as {@link RankUtils#THRESHOLDS}. */
-    private static String[] buildLabels()
-    {
-        var out = new String[RankUtils.THRESHOLDS.length];
-        for (int i = 0; i < RankUtils.THRESHOLDS.length; i++)
-        {
-            String name = RankUtils.THRESHOLDS[i][0];
-            String div = RankUtils.THRESHOLDS[i][1];
-            out[i] = "0".equals(div) ? name : name + " " + div;
-        }
-        return out;
     }
 
     /** JLabel subclass whose {@link #paintComponent} bypasses the L&F UI

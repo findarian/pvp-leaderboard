@@ -17,3 +17,5 @@ IP Warning:
 This plugin requires an IP in order to submit who won/lost to the live leaderboard. Any information that traverses the internet requires an IP, just like visiting a website does.
 
 Made by -> Toyco / Ryan McCusker
+
+Performance stats adapted from PvP Performance Tracker by Matsyir (BSD 2-Clause)

@@ -37,7 +37,7 @@ public final class SocketProtocol
         "queue/join", "queue/leave", "queue/expand_range", "queue/set_prefs", "queue/status", "queue/recent",
         "tournament/list", "tournament/register", "tournament/withdraw", "tournament/status",
         "tournament/subscribe", "tournament/unsubscribe", "tournament/in_combat",
-        "tournament/round_end_reply", "tournament/report_problem", "tournament/gear_status", "tournament/world",
+        "tournament/round_end_reply", "tournament/gear_status", "tournament/world",
         "tournament/no_show", "tournament/here");
 
     /**

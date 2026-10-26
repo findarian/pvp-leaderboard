@@ -16,6 +16,7 @@ import net.runelite.client.ui.overlay.*;
 import net.runelite.client.ui.overlay.tooltip.*;
 import net.runelite.client.util.*;
 import net.runelite.api.Point;
+import java.util.List;
 import static com.pvp.leaderboard.game.ArenaWidgets.*;
 
 @Singleton
@@ -24,6 +25,7 @@ public class ArenaGearOverlay extends Overlay
     static final int GREY_TEXT = 0x808080;
     static final Color GREY_COVER = new Color(0x96505050, true);
     static final Color OUTLINE = new Color(0xE6FFD700, true);
+    static final Color EXTRA_OUTLINE = new Color(0xE6FF3B3B, true);
     static final int OUTLINE_PX = 2;
     static final String UNREAD_TOOLTIP = "The plugin hasn't read your kit yet — open your kit tab (see the PvP Leaderboard panel)";
     static final String STALE_TOOLTIP = "Your kit changed since the plugin last read it — open your kit tab (see the PvP Leaderboard panel)";
@@ -77,8 +79,8 @@ public class ArenaGearOverlay extends Overlay
     private void renderInner(Graphics2D g)
     {
         GearReporter.View v = view.get();
-        boolean gearEvent = v != null && v.event != null && v.event.arena;
-        if (!gearEvent)
+        boolean live = v != null && v.event != null && v.event.arena && v.event.running;
+        if (!live)
         {
             if (greyed || !originalColors.isEmpty()) applyGrey(false);
             greyed = false;
@@ -94,18 +96,25 @@ public class ArenaGearOverlay extends Overlay
             drawCovers(g);
             maybeTooltip(v);
         }
+        int chest = reader.suppliesPanel();
+        boolean ownChest = chest >= 0 && GearSet.BUILDS.get(chest).equals(v.event.set.build);
         if (v.event.set.spellbook != null)
         {
             String want = v.event.set.spellbook;
             if (againstOpponent && s.ownPanel >= 0 && s.ownKit != null && !want.equals(s.ownKit.spellbook))
             {
-                outline(g, spellbookBox(DUEL_PANELS[s.ownPanel]));
+                outline(g, spellbookBox(DUEL_PANELS[s.ownPanel]), OUTLINE);
             }
-            int chest = reader.suppliesPanel();
-            if (chest >= 0 && GearSet.BUILDS.get(chest).equals(v.event.set.build) && !want.equals(reader.suppliesBook()))
+            if (ownChest && !want.equals(reader.suppliesBook()))
             {
-                outline(g, spellbookBox(SUPPLIES_PANELS[chest]));
+                outline(g, spellbookBox(SUPPLIES_PANELS[chest]), OUTLINE);
             }
+        }
+        if (v.diff != null && !v.diff.extra.isEmpty())
+        {
+            ArenaWidgets.KitPanel own = againstOpponent && s.ownPanel >= 0 && GearSet.BUILDS.get(s.ownPanel).equals(v.event.set.build)
+                ? DUEL_PANELS[s.ownPanel] : ownChest ? SUPPLIES_PANELS[chest] : null;
+            if (own != null) outlineExtras(g, own, v.diff.extra);
         }
         GearSearch.Highlight h = search.highlight();
         if (h != null)
@@ -238,14 +247,42 @@ public class ArenaGearOverlay extends Overlay
         {
             if (!h.matches(row, ItemVariationMapping::map)) continue;
             Rectangle b = row.getBounds();
-            if (b != null && (visibleArea == null || visibleArea.intersects(b))) outline(g, b);
+            if (b != null && (visibleArea == null || visibleArea.intersects(b))) outline(g, b, OUTLINE);
         }
     }
 
-    private static void outline(Graphics2D g, Rectangle r)
+    /** Outlines the kit's extra items in red: every copy of an item the set does not list, the last ones of a surplus. */
+    private void outlineExtras(Graphics2D g, ArenaWidgets.KitPanel panel, List<GearDiff.Row> extras)
+    {
+        List<Widget> held = new ArrayList<>();
+        for (int id : panel.slots)
+        {
+            Widget w = KitReader.itemWidget(client.getWidget(id), 3);
+            if (w != null) held.add(w);
+        }
+        for (Widget slot : KitReader.slotsOf(client.getWidget(panel.inventory)))
+        {
+            Widget w = KitReader.itemWidget(slot, 2);
+            if (w != null) held.add(w);
+        }
+        for (GearDiff.Row r : extras)
+        {
+            var h = new GearSearch.Highlight(r.itemId, r.altIds, null, 0L);
+            int left = r.need == 0 ? r.have : r.overBy();
+            for (int i = held.size() - 1; i >= 0 && left > 0; i--)
+            {
+                Widget w = held.get(i);
+                if (!h.matches(w, ItemVariationMapping::map)) continue;
+                outline(g, w.getBounds(), EXTRA_OUTLINE);
+                left -= Math.max(1, w.getItemQuantity());
+            }
+        }
+    }
+
+    private static void outline(Graphics2D g, Rectangle r, Color color)
     {
         if (r == null) return;
-        g.setColor(OUTLINE);
+        g.setColor(color);
         g.fillRect(r.x, r.y, r.width, OUTLINE_PX);
         g.fillRect(r.x, r.y + r.height - OUTLINE_PX, r.width, OUTLINE_PX);
         g.fillRect(r.x, r.y, OUTLINE_PX, r.height);

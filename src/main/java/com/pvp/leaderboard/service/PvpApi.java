@@ -22,9 +22,6 @@ import static java.lang.System.*;
 public class PvpApi
 {
     private static final String SHARD_URL = PvpConsts.SITE_URL + "/rank_idx";
-    /** Per-bucket MMR→rank histogram ({@code rank_hist/<bucket>.json}).
-     *  Powers the "What are the ranks" Top-X%-per-tier view. */
-    private static final String HIST_URL = PvpConsts.SITE_URL + "/rank_hist";
 
     /** The cache and backoff clocks. One minute: the {@code /user} and
      *  {@code /matches} caches, the CDN failure backoff and the {@code /user}
@@ -265,52 +262,6 @@ public class PvpApi
         }
     }
 
-    /**
-     * Fetch ALL match pages (by account SHA when {@code acctSha} is set — use it
-     * for self-lookups to capture every match across name changes — else by
-     * name), paginating through every next_token. Returns a single JsonArray
-     * containing every match across all pages; caps at 5 pages of 1,000.
-     */
-    public CompletableFuture<JsonArray> getAllMatches(String acctSha, String playerName)
-    {
-        CompletableFuture<JsonArray> future = new CompletableFuture<>();
-        fetchPages(acctSha, playerName, null, new JsonArray(), future, 0);
-        return future;
-    }
-
-    private void fetchPages(String acctSha, String playerName, String nextToken,
-                               JsonArray accumulator, CompletableFuture<JsonArray> future, int page)
-    {
-        if (page >= 5)
-        {
-            future.complete(accumulator);
-            return;
-        }
-
-        getMatches(acctSha, playerName, nextToken, 1000, true).thenAccept(response -> {
-            if (response == null)
-            {
-                future.complete(accumulator);
-                return;
-            }
-            JsonArray matches = optArray(response, "matches");
-            accumulator.addAll(matches);
-            String next = optString(response, "next_token", null);
-            if (next != null && !next.isEmpty())
-            {
-                fetchPages(acctSha, playerName, next, accumulator, future, page + 1);
-            }
-            else
-            {
-                future.complete(accumulator);
-            }
-        }).exceptionally(ex -> {
-            log.warn("[TierGraph] fetchAllPages: error on page {}, stopping with {} matches", page, accumulator.size(), ex);
-            future.complete(accumulator);
-            return null;
-        });
-    }
-
     /** {@code GET /tournament/history?limit=}: finished events, newest first ({@code tournaments[]}, {@code next_before}). */
     public CompletableFuture<JsonObject> getTournamentHistory(int limit)
     {
@@ -361,8 +312,8 @@ public class PvpApi
         return future;
     }
 
-    /** A player card's rank: the tournament shard, then the nh shard, then the
-     *  {@code /user} profile's tournament rank; {@code null} when none knows the player. */
+    /** A player card's rank: the tournament shard's v3 division, then the nh shard's, then the
+     *  {@code /user} profile's tournament card, else its Overall card; {@code null} when none knows the player. */
     public CompletableFuture<String> getCardTier(String playerName)
     {
         if (playerName == null || playerName.trim().isEmpty())
@@ -389,6 +340,14 @@ public class PvpApi
     public UserStats peekProfile(String playerName)
     {
         return playerName == null ? null : statsCache.get(NameUtils.canonicalKey(playerName));
+    }
+
+    /** The new rating system's division of {@code bucket} ("Adamant 2", "3rd Age"; a blank bucket is Overall) in the
+     *  cached {@code /user} profile, never fetched; null without one. */
+    public String peekV3Rank(String playerName, String bucket)
+    {
+        UserStats cached = peekProfile(playerName);
+        return RankUtils.division(RankUtils.card(cached == null ? null : cached.getStats(), bucketPath(bucket)));
     }
 
     /**
@@ -495,7 +454,7 @@ public class PvpApi
 
     /**
      * Post-fight rank refresh from the {@code /user} endpoint (fresh data, bypassing
-     * the shards): the bucket's rank, else the profile's top-level rank, e.g.
+     * the shards): the bucket's v3 division, else the Overall card's, e.g.
      * "Dragon 3" (see {@link #tier}). When the player is not found, the profile
      * cached before this call answers instead.
      */
@@ -540,29 +499,12 @@ public class PvpApi
         return raced != null ? raced : future;
     }
 
-    /** The rank of {@code bucket} in a {@code /user} profile: the bucket
-     *  object's rank when it has one, else the top-level rank; null without a
-     *  profile or a rank. */
+    /** The rank of {@code bucket} in a {@code /user} profile: the division of its v3 card, else of the Overall
+     *  card; null without either. */
     private static String tier(JsonObject profile, String bucket)
     {
-        if (profile == null)
-        {
-            return null;
-        }
-        JsonObject b = optObject(optObject(profile, "buckets"), bucket);
-        String t = b != null ? rankText(b) : null;
-        return t != null ? t : rankText(profile);
-    }
-
-    /** A {@code /user} rank object's label: "rank" is the tier name ("Dragon",
-     *  "3rd Age"), "division" 1-3 — combined as "Dragon 3", the name alone for
-     *  division 0; null without a rank. (No "tier" field: that is only in the
-     *  shards.) */
-    private static String rankText(JsonObject o)
-    {
-        String rank = optString(o, "rank", null);
-        int division = optInt(o, "division", 0);
-        return rank == null || rank.isEmpty() ? null : division > 0 ? rank + " " + division : rank;
+        String t = RankUtils.division(RankUtils.card(profile, bucket));
+        return t != null ? t : RankUtils.division(RankUtils.card(profile, "overall"));
     }
 
     /** A bucket's key in URLs and profiles: trimmed and lower case; null or blank is "overall". */
@@ -727,18 +669,13 @@ public class PvpApi
             });
     }
 
-    /** A shard entry's rank: its "tier" (formatted) or else its "rank", with
-     *  its world rank (0 when absent or not positive); null when unranked. */
-    private ShardRank parseRank(JsonObject o)
+    /** A shard entry's rank: its {@code v3} division, with its board position ({@code index}; 0 when absent or
+     *  not positive); null without a division. */
+    private static ShardRank parseRank(JsonObject o)
     {
-        if (RankUtils.isUnranked(o))
-        {
-            return null;
-        }
-        int idx = o.has("world_rank") && !o.get("world_rank").isJsonNull() ? o.get("world_rank").getAsInt() : -1;
-        String tier = optString(o, "tier", null);
-        tier = tier != null ? RankUtils.formatTier(tier) : optString(o, "rank", null);
-        return tier == null ? null : new ShardRank(tier, Math.max(idx, 0));
+        JsonObject v3 = optObject(o, "v3");
+        String division = RankUtils.division(v3);
+        return division == null ? null : new ShardRank(division, Math.max(optInt(v3, "index", 0), 0));
     }
 
     /**
@@ -868,47 +805,29 @@ public class PvpApi
     }
 
     /**
-     * Fetch the per-bucket MMR→rank histogram used by the "What are the
-     * ranks" view to derive a live "Top X%" for each tier.
+     * The board's division counts for the ranks tab: {@code distribution_v3_<bucket>.json}
+     * ({@code {"total_players", "distribution":[{"rank", "count", ...}]}}, only divisions with players), through
+     * the shared {@link #getShard(String, boolean)} fetch and its cache and failure backoff.
      *
-     * <p>Reads {@code rank_hist/<bucket>.json} from the static site (the
-     * same CDN origin as {@code /rank_idx} shards) via the shared
-     * {@link #getShard(String, boolean)} fetch, so it inherits the positive
-     * cache and the 60-second failure backoff. The payload shape is
-     * {@code {"bin_width", "total", "bins":[[floor,count,count_above],...]}}.
-     *
-     * @param bucket one of {@code overall|nh|veng|multi|dmm}; null/blank
-     *               defaults to {@code overall}.
-     * @return the parsed histogram, or {@code null} if it could not be
-     *         fetched/parsed (callers render "No one yet").
+     * @param bucket one of {@code overall|nh|veng|multi|dmm}; null/blank is {@code overall}.
+     * @return the parsed file, or {@code null} when it could not be fetched or parsed.
      */
-    public CompletableFuture<JsonObject> getHistogram(String bucket)
+    public CompletableFuture<JsonObject> getDistribution(String bucket)
     {
-        return getShard(HIST_URL + "/" + bucketPath(bucket) + ".json", false).exceptionally(ex -> null);
+        return getShard(PvpConsts.SITE_URL + "/distribution_v3_" + bucketPath(bucket) + ".json", false).exceptionally(ex -> null);
     }
 
     /**
-     * Fetch the cached Top Players leaderboard for a bucket — the same
-     * static file the website reads, cached ~1 hour.
+     * The Top Players board of a bucket: {@code leaderboard_v3_<bucket>.json}, the file the website reads, on its
+     * own {@link #topCache} with a 60-minute positive cache (the file's hourly refresh) and a 60-second failure
+     * backoff. Payload: {@code {"players":[{"position","player_names":[..],"division","label",...}],"bucket"}}.
      *
-     * <p>The pregenerated top-550 list: overall at {@code /leaderboard.json},
-     * per-bucket at {@code /leaderboard_<bucket>.json}.
-     * It is fetched on its OWN {@link #topCache} (NOT the rank_idx
-     * shard cache — a leaderboard is a ranked list, not a name→rank shard),
-     * with a 60-minute positive cache that mirrors the file's hourly refresh
-     * and a 60-second failure backoff. The caller (TopPlayers) parses,
-     * de-dupes by account, sorts by MMR and displays only the top 100 — same
-     * pipeline as the site. Payload shape:
-     * {@code {"players":[{"account","player_names":[..],"mmr","rank","division","icon"}],"bucket"}}.
-     *
-     * @param bucket one of {@code overall|nh|veng|multi|dmm}; null/blank → {@code overall}.
-     * @return the parsed leaderboard, or {@code null} if it couldn't be fetched/parsed.
+     * @param bucket one of {@code overall|nh|veng|multi|dmm|tournament}; null/blank is {@code overall}.
+     * @return the parsed board, or {@code null} if it couldn't be fetched/parsed.
      */
     public CompletableFuture<JsonObject> getLeaderboard(String bucket)
     {
-        String b = bucketPath(bucket);
-        String url = PvpConsts.SITE_URL + ("overall".equals(b) ? "/leaderboard.json" : "/leaderboard_" + b + ".json");
-        return fetchCached(url, topCache, topFailUntil, HOUR_MS, false)
+        return fetchCached(PvpConsts.SITE_URL + "/leaderboard_v3_" + bucketPath(bucket) + ".json", topCache, topFailUntil, HOUR_MS, false)
             .exceptionally(ex -> null);
     }
 

@@ -54,9 +54,6 @@ public interface TournamentEventListener
     /** {@code tournament/finished} — winners {@code {top[], random[], seed}} + the final standings rows. */
     default void onFinished(String tournamentId, JsonObject winners, List<StandingsRow> standings) {}
 
-    /** {@code tournament/problem_ack}. */
-    default void onProblemAck() {}
-
     /** {@code error/tournament} — stable code + message; {@code cmd} echoes the rejected cmd. */
     default void onTournamentError(String code, String message, String cmd) {}
 

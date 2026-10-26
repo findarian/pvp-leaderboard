@@ -165,9 +165,9 @@ public class QueueGateSection extends JPanel
                 prefs.setRangeOn(incoming.rangeEnabled);
                 if (incoming.rangeEnabled)
                 {
-                    prefs.setMinRank(incoming.minRankIdx);
-                    prefs.setMaxRank(incoming.maxRankIdx);
                     range.setRange(incoming.minRankIdx, incoming.maxRankIdx);
+                    prefs.setMinRank(range.low());
+                    prefs.setMaxRank(range.high());
                 }
                 else
                 {

@@ -46,9 +46,6 @@ import static javax.swing.BoxLayout.*;
 @Slf4j
 public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
 {
-    /** Human-readable rank labels derived once from {@link RankUtils#THRESHOLDS}. */
-    private static final String[] RANK_LABELS = PlayerCard.RANK_LABELS;
-
     /** Root card keys: the gate — the <b>queue view</b> every player
      *  rests on: region / style / build picks and the
      *  {@link QueueGateSection} with the one <b>Queue for Matchmaking</b>
@@ -729,12 +726,6 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
             minIdx, maxIdx, queueSection.waitPrefS());
     }
 
-    /** Every rank label, lowest first — the queue's rank-range slider reads them. */
-    static String[] rankLabels()
-    {
-        return RANK_LABELS.clone();
-    }
-
     /** Walks {@link #rootCardHost}'s children for the visible card and asks
      *  whether its name is {@code cardName}. CardLayout updates visibility
      *  synchronously on the EDT, so this read sees the live state. */
@@ -861,9 +852,7 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
      *  has previously completed the gate. An invalid persisted set
      *  (zero styles or zero builds — possible if an older plugin version
      *  stored those) falls back to the field defaults so the gate stays
-     *  usable. Out-of-range rank indices are clamped against
-     *  {@link #RANK_LABELS}.length so a future RANK_LABELS shrink can't
-     *  leave the slider pointing past the end. */
+     *  usable. */
     private void loadPrefs()
     {
         selfRegion = prefs.getRegion(DEFAULT_REGION);
@@ -937,19 +926,13 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
      *  an incoming card. The overlay flips its caption tail
      *  accordingly ({@code "<opp> accepted your invite"} vs just
      *  {@code "<opp>"}).
-     *
-     *  <p>{@code opponentNameColor} follows the same rank-tint rule
-     *  as {@link LobbyInviteNotifier#showInvite}'s
-     *  {@code senderNameColor} so the popup feels of-a-piece with the
-     *  rest of the matchmaking UI.
      */
     @FunctionalInterface
     public interface MatchAlert
     {
         void showMatch(String fightId,
                        String opponentName,
-                       String subtext,
-                       Color opponentNameColor);
+                       String subtext);
     }
 
     /** Public re-entry point for {@link #applyGate()} so the
@@ -1306,25 +1289,6 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         if (queueCard != null && isOnCard(CARD_QUEUE)) queueCard.tick();
     }
 
-    /** Resolves the sender's name colour for the in-game popup using
-     *  the same rule the lobby row applies (see {@code addLobbyRow}'s
-     *  {@code rankColor} branch): if {@code peakRankIdx} is a known
-     *  index, tint by {@link RankUtils#getRankColor(String)} keyed on
-     *  the rank label; otherwise default to {@link Color#WHITE} so a
-     *  freshly-joined player whose shard hasn't published yet still
-     *  reads cleanly. Package-private + static for testability.
-     *
-     *  <p>Note: {@code blocked} doesn't apply here — an invite from a
-     *  blocked sender never arrives. The lobby row's grey-blocked path is
-     *  intentionally NOT mirrored. */
-    static Color senderColor(LobbyMember sender)
-    {
-        if (sender == null) return Color.WHITE;
-        boolean rankKnown = sender.peakRankIdx >= 0 && sender.peakRankIdx < RANK_LABELS.length;
-        if (!rankKnown) return Color.WHITE;
-        return RankUtils.getRankColor(RANK_LABELS[sender.peakRankIdx]);
-    }
-
     /** {@inheritDoc}
      *
      *  <p>Fired for both flows: (a) sender — opponent accepted our invite,
@@ -1367,8 +1331,7 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         {
             String opponentDisplay = nameOf(session.opponent);
             String sub = buildSubtext(session);
-            Color opponentColor = senderColor(session.opponent);
-            mfn.showMatch(session.fightId, opponentDisplay, sub, opponentColor);
+            mfn.showMatch(session.fightId, opponentDisplay, sub);
         }
     }
 
@@ -1784,39 +1747,6 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
         sp.setBorder(createEmptyBorder());
         sp.getVerticalScrollBar().setUnitIncrement(16);
         return sp;
-    }
-
-    /** Live "current value" label for a rank-range endpoint — bold,
-     *  painted in the rank's own colour so the user can spot which
-     *  tier they're on without reading the text. 15pt matches the
-     *  lobby's body-text scale (style toggles + presence label).
-     *
-     *  <p>Backed by {@link ChipLabel} (not vanilla JLabel) because
-     *  Substance L&F's LabelUI was reporting an undersized preferred
-     *  width for the slider's min / max value labels — visible to
-     *  users as "Bronz\u2026" / "3rd A\u2026" ellipsis truncation
-     *  even though there's plenty of horizontal slack inside the
-     *  225px sidepanel. ChipLabel paints the text directly in
-     *  paintComponent so the L&F's clip-and-ellipsify path is
-     *  bypassed entirely; the alignment-aware draw inside
-     *  ChipLabel honours the LEFT / RIGHT setHorizontalAlignment
-     *  set on the min / max labels respectively. Shared with
-     *  {@link QueueRangeSlider}. */
-    static JLabel newRankLabel(int idx)
-    {
-        var l = new ChipLabel(RANK_LABELS[idx]);
-        bold(l, 15f);
-        l.setHorizontalAlignment(SwingConstants.RIGHT);
-        l.setForeground(RankUtils.getRankColor(RANK_LABELS[idx]));
-        l.setBorder(pad(0, 0, 0, 0));
-        return l;
-    }
-
-    static void setRankLabel(JLabel l, int idx)
-    {
-        String label = RANK_LABELS[idx];
-        l.setText(label);
-        l.setForeground(RankUtils.getRankColor(label));
     }
 
 }
