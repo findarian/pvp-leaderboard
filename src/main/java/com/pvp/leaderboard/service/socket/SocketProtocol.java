@@ -12,7 +12,7 @@ import java.util.*;
  * {@link #ALLOWED_OUTGOING} guard fires before bytes leave the process.
  *
  * <p>Keepalive is RFC 6455 native ping/pong (handled by
- * {@code OkHttpClient.Builder.pingInterval(8 min)} in
+ * {@code OkHttpClient.Builder.pingInterval(30 s)} in
  * {@link SocketMgr}); there is no {@code system/ping} cmd.
  */
 public final class SocketProtocol

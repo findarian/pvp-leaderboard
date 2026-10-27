@@ -568,8 +568,7 @@ public class Dashboard extends PluginPanel
 
     // -------------------- Queue + tournaments wiring --------------------
 
-    /** Hands the queue transport to the lobby gate (the plugin
-     *  passes the inert service while {@code enableQuickMatch} is off). */
+    /** Hands the queue transport to the lobby gate. */
     public void setQueue(QueueService svc)
     {
         lobbyCard.setQueue(svc);
@@ -577,7 +576,7 @@ public class Dashboard extends PluginPanel
 
     /** A service replaces the greyed placeholder with the live
      *  {@link TourneyPanel} and enables the Tournaments tab; {@code null}
-     *  ({@code enableTournaments} off) restores the greyed placeholder.
+     *  restores the greyed placeholder.
      *  Re-entrant: a previous live panel is shut down first. */
     public void setTournamentService(TourneySvc svc)
     {
@@ -699,6 +698,12 @@ public class Dashboard extends PluginPanel
     public void showTourneys()
     {
         if (tourneyPanel != null) setActiveTab(CARD_TOURNEY);
+    }
+
+    /** The tournament box's Register: the Events tab's own sign-up for {@code t}. */
+    public void register(Tourney t)
+    {
+        if (tourneyPanel != null) tourneyPanel.register(t);
     }
 
     /** Replaces the on-screen check made before a queue match shows the

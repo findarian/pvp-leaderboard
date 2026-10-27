@@ -27,7 +27,7 @@ public final class PvpConsts
      */
     public static final String SOCKET_URL = "wss://api.pvp-leaderboard.com/prod";
 
-    public static final String VERSION = "2.1.0";
+    public static final String VERSION = "2.1.1";
 
     /** The {@code User-Agent} of the plugin's own requests (the socket's
      *  $connect, the heartbeat, the membership feed). */

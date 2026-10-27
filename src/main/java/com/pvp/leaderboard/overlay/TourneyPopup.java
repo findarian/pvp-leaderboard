@@ -1,6 +1,7 @@
 package com.pvp.leaderboard.overlay;
 
 import com.pvp.leaderboard.config.*;
+import com.pvp.leaderboard.tournament.TourneyAlerts;
 import java.awt.*;
 import java.awt.event.*;
 import java.util.*;
@@ -16,27 +17,34 @@ import static java.awt.RenderingHints.*;
 /**
  * The tournament box centred at the top of the game view: a round's pairing or a start reminder, one at a time, its
  * first line the title. The frame is 80% opaque and the text solid. A box waits while a fight is in progress, and its
- * time starts once it shows. Don't show this again (bottom left) turns that kind's setting off; Dismiss (bottom right)
- * closes the box.
+ * time starts once it shows. Don't show this again turns that kind's setting off and Dismiss closes the box, side by
+ * side at the bottom right. A reminder offered with Register has it at the bottom left: one press runs it once, drops
+ * the button and starts the time again; the answer then gives the box its new lines, or closes it.
  */
 @Slf4j
-public final class TourneyPopup extends Popup
+public final class TourneyPopup extends Popup implements TourneyAlerts.Boxes
 {
-    static final int W = 310, PAD = 8, TOP = 22, BTN_H = 22;
-    static final String DONT = "Don't show this again", DISMISS = "Dismiss";
+    static final int W = 330, PAD = 8, TOP = 22, BTN_H = 22;
+    static final String DONT = "Don't show this again", DISMISS = "Dismiss", REGISTER = "Register";
 
-    /** A pairing or a reminder and its lines; once shown, when it showed, its wrapped lines and its size. */
+    /** A pairing or a reminder and its lines; a reminder's event, its Register while not pressed, and whether it was
+     *  pressed; once shown, when it showed, its wrapped lines and its size. */
     static final class Box
     {
         final boolean pairing;
+        final String event;
         final String[] lines;
+        Runnable register;
+        boolean pressed;
         long since;
         List<String> title, body;
         int titleH, h;
 
-        Box(boolean pairing, String[] lines)
+        Box(boolean pairing, String event, Runnable register, String[] lines)
         {
             this.pairing = pairing;
+            this.event = event;
+            this.register = register;
             this.lines = lines;
         }
     }
@@ -46,9 +54,9 @@ public final class TourneyPopup extends Popup
     private final ConfigManager configManager;
     private final BooleanSupplier inCombat;
     private final LongSupplier now;
-    /** The box on screen and its two buttons, from the last frame; {@code null} while none shows. */
+    /** The box on screen and its buttons, from the last frame; {@code null} while none shows. */
     volatile Box shown;
-    volatile Rectangle dontAt, dismissAt;
+    volatile Rectangle dontAt, dismissAt, registerAt;
 
     public TourneyPopup(Client client, PvPLeaderboardConfig config, ConfigManager configManager, BooleanSupplier inCombat, LongSupplier now)
     {
@@ -60,9 +68,38 @@ public final class TourneyPopup extends Popup
     }
 
     /** Queues a box: a round's pairing ({@code pairing}) or a start reminder. */
+    @Override
     public synchronized void show(boolean pairing, String... lines)
     {
-        queue.add(new Box(pairing, lines));
+        queue.add(new Box(pairing, null, null, lines));
+    }
+
+    /** Queues a reminder with Register for {@code tournamentId}. */
+    @Override
+    public synchronized void offer(String tournamentId, Runnable register, String... lines)
+    {
+        queue.add(new Box(false, tournamentId, register, lines));
+    }
+
+    /** The box whose Register was pressed for {@code tournamentId} gives way to one with {@code lines}, its time from
+     *  when it shows; with no lines it closes. */
+    @Override
+    public synchronized void answer(String tournamentId, String... lines)
+    {
+        Deque<Box> next = new ArrayDeque<>();
+        boolean found = false;
+        for (Box b : queue)
+        {
+            if (!found && b.pressed && tournamentId.equals(b.event))
+            {
+                found = true;
+                if (b == shown) hide();
+                if (lines.length > 0) next.add(new Box(false, null, null, lines));
+            }
+            else next.add(b);
+        }
+        queue.clear();
+        queue.addAll(next);
     }
 
     /** Drops every box. */
@@ -75,7 +112,7 @@ public final class TourneyPopup extends Popup
     private void hide()
     {
         shown = null;
-        dontAt = dismissAt = null;
+        dontAt = dismissAt = registerAt = null;
     }
 
     /** The first box whose setting is on and whose 1-30 s have not run out; the boxes before it are dropped. */
@@ -111,10 +148,21 @@ public final class TourneyPopup extends Popup
         return paint(g, 0.8f, null, b.h, b.titleH);
     }
 
-    /** A press on Don't show this again or Dismiss closes the box and is consumed; any other press passes through. */
+    /** A press on Register runs it; one on Don't show this again or Dismiss closes the box. Each is consumed; any other
+     *  press passes through. */
     public MouseEvent press(MouseEvent e)
     {
-        Rectangle dont = dontAt, dismiss = dismissAt;
+        Rectangle reg = registerAt, dont = dontAt, dismiss = dismissAt;
+        if (reg != null && reg.contains(e.getPoint()))
+        {
+            Runnable r = takeRegister();
+            if (r != null)
+            {
+                r.run();
+                e.consume();
+            }
+            return e;
+        }
         boolean off = dont != null && dont.contains(e.getPoint());
         if (off || dismiss != null && dismiss.contains(e.getPoint()))
         {
@@ -123,6 +171,20 @@ public final class TourneyPopup extends Popup
             e.consume();
         }
         return e;
+    }
+
+    /** The Register of the box on screen, once: the button goes and the box's time starts again; {@code null} when the box
+     *  or its Register is gone. */
+    private synchronized Runnable takeRegister()
+    {
+        Box b = shown;
+        if (b == null || queue.peek() != b || b.register == null) return null;
+        Runnable r = b.register;
+        b.register = null;
+        b.pressed = true;
+        b.since = now.getAsLong();
+        registerAt = null;
+        return r;
     }
 
     /** The box on screen leaves the queue; {@code null} when it already left. */
@@ -165,7 +227,8 @@ public final class TourneyPopup extends Popup
         return out;
     }
 
-    /** The title, the lines and the two buttons, solid over the frame. */
+    /** The title, the lines and the buttons, solid over the frame: Register at the bottom left while offered, Don't show
+     *  this again and Dismiss at the bottom right. */
     @Override
     void paintBody(Graphics2D g, int x, int y, String text)
     {
@@ -176,9 +239,11 @@ public final class TourneyPopup extends Popup
         lines(g, b.title, FontManager.getRunescapeBoldFont(), TITLE_FG, x, y + PAD / 2);
         lines(g, b.body, FontManager.getRunescapeFont(), BODY_FG, x, y + b.titleH + PAD / 2);
         FontMetrics fm = g.getFontMetrics(FontManager.getRunescapeBoldFont());
-        int by = y + b.h - PAD - BTN_H, dw = fm.stringWidth(DONT) + 2 * PAD, sw = fm.stringWidth(DISMISS) + 2 * PAD;
-        dontAt = button(g, x + PAD, by, dw, BTN_H, DONT);
+        int by = y + b.h - PAD - BTN_H, sw = fm.stringWidth(DISMISS) + 2 * PAD, dw = fm.stringWidth(DONT) + 2 * PAD;
         dismissAt = button(g, x + W - PAD - sw, by, sw, BTN_H, DISMISS);
+        dontAt = button(g, x + W - 2 * PAD - sw - dw, by, dw, BTN_H, DONT);
+        Runnable reg = b.register;
+        registerAt = reg == null ? null : button(g, x + PAD, by, fm.stringWidth(REGISTER) + 2 * PAD, BTN_H, REGISTER);
     }
 
     /** {@code lines} centred across the box from {@code top}, at {@code f} in {@code c}. */

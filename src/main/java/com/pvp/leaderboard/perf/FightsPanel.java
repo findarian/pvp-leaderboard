@@ -2,6 +2,7 @@ package com.pvp.leaderboard.perf;
 
 import com.google.gson.JsonObject;
 import com.pvp.leaderboard.config.*;
+import com.pvp.leaderboard.game.*;
 import com.pvp.leaderboard.ui.*;
 import com.pvp.leaderboard.util.*;
 import java.awt.*;
@@ -12,15 +13,18 @@ import java.util.*;
 import java.util.List;
 import javax.swing.*;
 import javax.swing.Timer;
+import net.runelite.client.config.*;
 
 /** The Performance tab: every stored fight, merged and filtered in memory, as cards 50 at a time (Individual fights)
  *  or as the Overall stats box; and the sync. A new fight adds one card; a filter change rebuilds once, after a short
- *  wait. */
+ *  wait. The filter controls show and hide behind one button; that choice is kept in RuneLite's settings. */
 public class FightsPanel extends JPanel
 {
     static final String INDIVIDUAL = "individual fights", EST = "100% est.", MMR = "MMR Change";
     static final int PAGE = 50;
     private static final String SYNCED = "  Synced";
+    /** The settings key holding whether the filter controls are shown; absent means hidden. */
+    private static final String GROUP = FightMonitor.CONFIG_GROUP, FILTERS = "perfFilters";
     // SYNC: private static final String CAPTION = "Allowed once per day, don't click unless there are missing matches locally";
     static final String[] LABELS = {"Off-pray", "Expected damage", "Damage", "Magic luck", "Offensive prayer",
         "HP healed", "Hits on robes", "KO chances", "Ghost barrages"};
@@ -37,9 +41,11 @@ public class FightsPanel extends JPanel
     private static final int PANEL = 205;
 
     private final FightStore store;
+    private final ConfigManager config;
     // SYNC: private final Grab grab;
-    private final JPanel bar, view = new JPanel(new BorderLayout()), cards = Ui.column(), list = Ui.column(), box = Ui.column();
-    private final JButton more = new JButton("Show 50 more");
+    private final JPanel bar, view = new JPanel(new BorderLayout()), cards = Ui.column(), list = Ui.column(), box = Ui.column(),
+        filters = Ui.column();
+    private final JButton more = new JButton("Show 50 more"), toggle = new JButton("Show filters");
     // SYNC: private final JButton grabButton = new JButton("Sync from PvP Leaderboard");
     // SYNC: private final JLabel caption = text("", Font.PLAIN, Ui.MUTED), grabLine = text("", Font.PLAIN, null);
     private final JComboBox<String> names = new JComboBox<>(), styles = new JComboBox<>(), rank = new JComboBox<>(),
@@ -49,18 +55,29 @@ public class FightsPanel extends JPanel
     Timer debounce;
     private List<FightLog.Fight> merged = new ArrayList<>(), shown = new ArrayList<>();
     private OverallStats totals = new OverallStats();
+    /** Each shown fight as the totals counted it: its result, change and both sides' values at the time. */
+    private final Map<FightLog.Fight, FightLog.Fight> counted = new IdentityHashMap<>();
+    /** The Played as names, by canonical name, A-Z. */
+    private final TreeMap<String, String> known = new TreeMap<>();
     private boolean quiet;
     private int built, limit = PAGE;
 
-    // SYNC: public FightsPanel(FightStore store, Grab grab)
-    public FightsPanel(FightStore store)
+    // SYNC: public FightsPanel(FightStore store, Grab grab, ConfigManager config)
+    public FightsPanel(FightStore store, ConfigManager config)
     {
         super(new BorderLayout(0, 6));
         this.store = store;
+        this.config = config;
         // SYNC: this.grab = grab;
         bar = Ui.bucketBar("perf-views", "perf-view", 1, 2, new String[]{"Individual fights", "Overall stats"}, this::show);
         JPanel top = Ui.column();
         top.add(Ui.left(bar));
+        toggle.setName("perf-filters");
+        toggle.setFont(Ui.smallFont());
+        toggle.setMargin(new Insets(2, 2, 2, 2));
+        toggle.setFocusPainted(false);
+        toggle.addActionListener(e -> toggled());
+        top.add(Ui.left(Ui.pin(toggle)));
         // SYNC: grabButton.setName("perf-grab");
         // SYNC: grabButton.setMargin(new Insets(2, 2, 2, 2));
         // SYNC: grabButton.addActionListener(e -> grab.click());
@@ -83,12 +100,14 @@ public class FightsPanel extends JPanel
         recent.setEditable(true);
         for (ItemSelectable c : new ItemSelectable[]{names, styles, rank, show, partials}) c.addItemListener(e -> filtered());
         recent.addActionListener(e -> recent());
-        top.add(field("Played as", names));
-        top.add(field("Style", styles));
-        top.add(field("Minimum opponent rank", rank));
-        top.add(field("Show", show));
+        filters.add(field("Played as", names));
+        filters.add(field("Style", styles));
+        filters.add(field("Minimum opponent rank", rank));
+        filters.add(field("Show", show));
+        filters.add(field("Most recent fights", recent));
+        top.add(Ui.left(filters));
         top.add(Ui.left(Ui.pin(partials)));
-        top.add(field("Most recent fights", recent));
+        filters("true".equals(config.getConfiguration(GROUP, FILTERS)));
         add(top, BorderLayout.NORTH);
         add(view, BorderLayout.CENTER);
         list.setName("perf-fights");
@@ -105,6 +124,23 @@ public class FightsPanel extends JPanel
         // SYNC: });
         show(INDIVIDUAL);
         refresh();
+    }
+
+    /** The button: the filter controls the other way, the choice kept in RuneLite's settings. */
+    private void toggled()
+    {
+        boolean shown = !filters.isVisible();
+        config.setConfiguration(GROUP, FILTERS, String.valueOf(shown));
+        filters(shown);
+    }
+
+    /** The filter controls shown or hidden, the button reading the other way; the filters apply either way. */
+    private void filters(boolean shown)
+    {
+        filters.setVisible(shown);
+        toggle.setText(shown ? "Hide filters" : "Show filters");
+        revalidate();
+        repaint();
     }
 
     /** A filter's label and its control: on one row when both fit at their preferred widths, the control taking the
@@ -133,8 +169,8 @@ public class FightsPanel extends JPanel
         // SYNC: grabLine();
     }
 
-    /** A store change: a new fight adds one card, a fight's own change redraws its card and the totals, anything else
-     *  rebuilds. */
+    /** A store change: a new fight adds one card and its name if new; a fight's own change counts, draws, adds or
+     *  removes that fight alone; anything else rebuilds. */
     private void changed(FightLog.Fight f)
     {
         int at = f == null ? -1 : index(merged, f);
@@ -145,35 +181,130 @@ public class FightsPanel extends JPanel
         }
         if (at >= 0)
         {
-            int i = index(shown, f);
-            if (filter.min >= 0) filtered();
-            else if (i >= 0)
-            {
-                if (i < built)
-                {
-                    list.remove(i);
-                    list.add(card(f), i);
-                    list.revalidate();
-                }
-                totals = OverallStats.of(shown);
-                box();
-            }
+            updated(f);
             return;
         }
         merged.add(0, f);
-        names();
+        name(f);
         if (!filter.keeps(f)) return;
         if (shown.isEmpty()) list.removeAll();
         shown.add(0, f);
-        totals.add(f, 1);
+        count(f);
         list.add(card(f), 0);
         built++;
-        if (filter.recent > 0 && shown.size() > filter.recent) totals.add(shown.remove(shown.size() - 1), -1);
+        if (filter.recent > 0 && shown.size() > filter.recent) uncount(shown.remove(shown.size() - 1));
         while (built > Math.min(limit, shown.size())) list.remove(--built);
         more.setVisible(shown.size() > built);
         box();
         list.revalidate();
         list.repaint();
+    }
+
+    /** A stored fight changed: shown and still kept, counted again and its card redrawn; no longer kept, it leaves;
+     *  newly kept, it joins; else nothing. */
+    private void updated(FightLog.Fight f)
+    {
+        int i = index(shown, f);
+        boolean keep = filter.keeps(f);
+        if (i >= 0 && keep)
+        {
+            uncount(f);
+            count(f);
+            if (i < built)
+            {
+                list.remove(i);
+                list.add(card(f), i);
+            }
+        }
+        else if (i >= 0) leave(i);
+        else if (keep) join(f);
+        else return;
+        more.setVisible(shown.size() > built);
+        box();
+        list.revalidate();
+        list.repaint();
+    }
+
+    /** {@code f} goes in at its place by end, unless Most recent N keeps only newer fights; a list then over N lets its
+     *  oldest go. */
+    private void join(FightLog.Fight f)
+    {
+        int p = place(f);
+        if (filter.recent > 0 && p >= filter.recent) return;
+        if (shown.isEmpty()) list.removeAll();
+        shown.add(p, f);
+        count(f);
+        if (p <= built && p < limit)
+        {
+            list.add(card(f), p);
+            built++;
+        }
+        if (filter.recent > 0 && shown.size() > filter.recent)
+        {
+            int last = shown.size() - 1;
+            uncount(shown.remove(last));
+            if (last < built) list.remove(--built);
+        }
+        while (built > Math.min(limit, shown.size())) list.remove(--built);
+    }
+
+    /** The shown fight at {@code i} goes; with Most recent N the next kept fight comes in at the end. */
+    private void leave(int i)
+    {
+        uncount(shown.remove(i));
+        if (i < built)
+        {
+            list.remove(i);
+            built--;
+        }
+        FightLog.Fight next = filter.recent > 0 ? nextKept() : null;
+        if (next != null)
+        {
+            shown.add(next);
+            count(next);
+        }
+        if (shown.isEmpty()) note();
+        while (built < Math.min(limit, shown.size())) list.add(card(shown.get(built++)));
+    }
+
+    /** {@code f}'s index among the shown fights: after each shown fight that comes before it in the merged list. */
+    private int place(FightLog.Fight f)
+    {
+        Set<FightLog.Fight> in = Collections.newSetFromMap(new IdentityHashMap<>());
+        in.addAll(shown);
+        int p = 0;
+        for (FightLog.Fight g : merged)
+        {
+            if (g == f) break;
+            if (in.contains(g)) p++;
+        }
+        return p;
+    }
+
+    /** The first kept fight after the last shown one in the merged list; null for none. */
+    private FightLog.Fight nextKept()
+    {
+        for (int k = shown.isEmpty() ? 0 : index(merged, shown.get(shown.size() - 1)) + 1; k < merged.size(); k++)
+        {
+            if (filter.keeps(merged.get(k))) return merged.get(k);
+        }
+        return null;
+    }
+
+    /** {@code f} into the totals as it is now, remembered as counted. */
+    private void count(FightLog.Fight f)
+    {
+        FightLog.Fight c = new FightLog.Fight(f.endSec, f.opponent, f.result, f.world, f.mine.clone(), f.theirs.clone());
+        c.change = f.change;
+        counted.put(f, c);
+        totals.add(c, 1);
+    }
+
+    /** {@code f} out of the totals, as it was counted. */
+    private void uncount(FightLog.Fight f)
+    {
+        FightLog.Fight c = counted.remove(f);
+        if (c != null) totals.add(c, -1);
     }
 
     private static int index(List<FightLog.Fight> fights, FightLog.Fight f)
@@ -185,14 +316,25 @@ public class FightsPanel extends JPanel
     /** The Played as names: every name in the store, A-Z. */
     private void names()
     {
-        TreeMap<String, String> all = new TreeMap<>();
-        for (FightLog.Fight f : merged) if (!f.self.isEmpty()) all.putIfAbsent(NameUtils.canonicalKey(f.self), f.self);
+        known.clear();
+        for (FightLog.Fight f : merged) if (!f.self.isEmpty()) known.putIfAbsent(NameUtils.canonicalKey(f.self), f.self);
         Object chosen = names.getSelectedItem();
         quiet = true;
         names.removeAllItems();
         names.addItem("All names");
-        all.values().forEach(names::addItem);
-        names.setSelectedItem(all.containsValue(chosen) ? chosen : "All names");
+        known.values().forEach(names::addItem);
+        names.setSelectedItem(known.containsValue(chosen) ? chosen : "All names");
+        quiet = false;
+    }
+
+    /** A new fight's name into Played as at its place, when it is not there yet; the choice stays. */
+    private void name(FightLog.Fight f)
+    {
+        String key = f.self.isEmpty() ? null : NameUtils.canonicalKey(f.self);
+        if (key == null || known.containsKey(key)) return;
+        known.put(key, f.self);
+        quiet = true;
+        names.insertItemAt(f.self, known.headMap(key).size() + 1);
         quiet = false;
     }
 
@@ -228,16 +370,23 @@ public class FightsPanel extends JPanel
         filter.result = FightFilter.RESULTS[show.getSelectedIndex()];
         filter.partials = partials.isSelected();
         shown = filter.apply(merged);
-        totals = OverallStats.of(shown);
+        totals = new OverallStats();
+        counted.clear();
+        for (FightLog.Fight f : shown) count(f);
         list.removeAll();
         built = 0;
-        if (shown.isEmpty())
-        {
-            list.add(Ui.label("perf-note", merged.isEmpty() ? "No fights tracked yet" : "No fights match the filters",
-                Font.ITALIC, Ui.smallFont().getSize2D(), Ui.MUTED));
-        }
+        if (shown.isEmpty()) note();
         page(limit = PAGE);
         box();
+    }
+
+    /** The list's note in place of every card: nothing stored, or nothing the filters keep. */
+    private void note()
+    {
+        list.removeAll();
+        built = 0;
+        list.add(Ui.label("perf-note", merged.isEmpty() ? "No fights tracked yet" : "No fights match the filters",
+            Font.ITALIC, Ui.smallFont().getSize2D(), Ui.MUTED));
     }
 
     /** The cards up to {@code to}, after those built. */

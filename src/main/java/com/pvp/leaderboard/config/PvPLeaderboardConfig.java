@@ -362,28 +362,6 @@ public interface PvPLeaderboardConfig extends Config
 		return true;
 	}
 
-	@ConfigItem(
-		keyName = "enableQuickMatch",
-		name = "Matchmaking queue",
-		description = "Show the matchmaking queue on the Matchmaking tab: NH, an optional rank range and a wait time shared with Discord",
-		section = otherSection
-	)
-	default boolean enableQuickMatch()
-	{
-		return true;
-	}
-
-	@ConfigItem(
-		keyName = "enableTournaments",
-		name = "Tournaments tab",
-		description = "Show the Tournaments tab (register, live standings, round clock). With it off, the opponent outline and Auto-switch to Tournament still work",
-		section = otherSection
-	)
-	default boolean enableTournaments()
-	{
-		return true;
-	}
-
 	@ConfigSection(
 		name = "Tournament Gear",
 		description = "The required-kit check of tournaments that set one (PvP Arena Unranked Duels)",

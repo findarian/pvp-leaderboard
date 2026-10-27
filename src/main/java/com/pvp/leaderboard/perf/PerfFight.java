@@ -47,6 +47,7 @@ final class PerfFight
     private static final int[] STAFF_SPECS = {SpotanimID.SOTD_SPECIAL_START, SpotanimID.SOTD_SPECIAL_EXTRA,
         SpotanimID.STAFF_OF_LIGHT_SPECIAL_START, SpotanimID.STAFF_OF_LIGHT_SPECIAL_EXTRA,
         SpotanimID.STAFF_OF_BALANCE_SPECIAL_START, SpotanimID.STAFF_OF_BALANCE_SPECIAL_EXTRA};
+    private static final String[] BUILDS = {"max_med", "zerker", "pure"};
 
     final String opponent;
     final int world;
@@ -55,6 +56,8 @@ final class PerfFight
     int lastTick;
     /** Held whole at some point (a running tournament match's fight in the arena). */
     boolean held;
+    /** The build the fight opened with ({@link #build(boolean, int, boolean, int)}), or null. */
+    String build;
     private final boolean arena;
     private final int[] table;
     private final IntFunction<int[]> stats;
@@ -112,6 +115,15 @@ final class PerfFight
             if (ids[i] > PlayerComposition.ITEM_OFFSET) out[i] = ids[i] - PlayerComposition.ITEM_OFFSET;
         }
         return out;
+    }
+
+    /** The build a match result names: in Last Man Standing the game's active build {@code lmsBuild} (0 max_med,
+     *  1 zerker, 2 pure); in the PvP Arena the loadout the real Defence level {@code def} sets (over 50 max_med, over 1
+     *  zerker, else pure); null elsewhere, and for another {@code lmsBuild}. */
+    static String build(boolean lms, int lmsBuild, boolean arena, int def)
+    {
+        if (lms) return lmsBuild >= 0 && lmsBuild < BUILDS.length ? BUILDS[lmsBuild] : null;
+        return arena ? BUILDS[def > 50 ? 0 : def > 1 ? 1 : 2] : null;
     }
 
     /** The local player as measured; the build's or the loadout's levels in Last Man Standing and the arena. */
@@ -359,14 +371,15 @@ final class PerfFight
         log.endTick();
     }
 
-    /** The stats sent with the match, in the body's order: the version, the eight, and the log, packed, when its
-     *  text kept its bounds; null when no attack was seen. */
+    /** The stats sent with the match, in the body's order: the version, the build when the fight has one, the eight,
+     *  and the log, packed, when its text kept its bounds; null when no attack was seen. */
     Map<String, String> values()
     {
         if (me.attacks + them.attacks == 0) return null;
         String[] s = stats(true);
         Map<String, String> v = new LinkedHashMap<>();
         v.put("pf_v", "2");
+        if (build != null) v.put("fight_build", build);
         String[] keys = {"pf_op", "pf_ed", null, "pf_mh", "pf_pr", "pf_hp", "pf_rh", "pf_ko", "pf_gb"};
         for (int i = 0; i < keys.length; i++)
         {

@@ -186,7 +186,7 @@ public class PvPLeaderboardPlugin extends Plugin
 	private TourneyPopup tourneyPopup;
 	private TourneyAlerts alerts;
 
-	/** The pop-ups' buttons: the ban warning's OK, then the tournament box's two. */
+	/** The pop-ups' buttons: the ban warning's OK, then the tournament box's. */
 	private final MouseAdapter popupMouse = new MouseAdapter()
 	{
 		@Override
@@ -318,9 +318,9 @@ public class PvPLeaderboardPlugin extends Plugin
 		profileGate.configure(this::getLocalName);
 		dashPanel = new Dashboard(this, pvpApi,
 			lobbySvc, profileGate, lobbyPrefs);
-		// Queue section + Tournaments sub-tab, per the two
-		// config flags; the in-combat probe drives tournament/in_combat.
-		applyPlan10Services();
+		// The queue section and the Events tab; the in-combat probe drives tournament/in_combat.
+		dashPanel.setQueue(queueSvc);
+		dashPanel.setTournamentService(tourneySvc);
 		dashPanel.setTournamentInCombatProvider(fightMonitor::isInCombat);
 
 		navButton = NavigationButton.builder()
@@ -351,10 +351,11 @@ public class PvPLeaderboardPlugin extends Plugin
 		overlayManager.add(warnOverlay);
 		warnOverlay.setOnDismiss(() -> configManager.unsetConfiguration(
 			FightMonitor.CONFIG_GROUP, FightMonitor.LMS_WARN_KEY));
-		// The tournament box: never shown during a fight; every pairing and reminder is also a chat line.
+		// The tournament box: never shown during a fight; every pairing and reminder is also a chat line. A reminder's
+		// Register signs up as the Events tab does and opens the side panel on Events.
 		tourneyPopup = new TourneyPopup(client, config, configManager, fightMonitor::isInCombat, System::currentTimeMillis);
 		overlayManager.add(tourneyPopup);
-		alerts = new TourneyAlerts(tourneySvc, tourneyPopup::show, this::chat, System::currentTimeMillis);
+		alerts = new TourneyAlerts(tourneySvc, tourneyPopup, this::chat, System::currentTimeMillis, this::registerFromBox);
 		tourneySvc.addListener(alerts);
 		mouseManager.registerMouseListener(popupMouse);
 
@@ -436,8 +437,8 @@ public class PvPLeaderboardPlugin extends Plugin
 		}
 
 		startCheck();
-		// SYNC: perfPanel = new FightsPanel(fightStore, grab);
-		perfPanel = new FightsPanel(fightStore);
+		// SYNC: perfPanel = new FightsPanel(fightStore, grab, configManager);
+		perfPanel = new FightsPanel(fightStore, configManager);
 		dashPanel.setPerformanceView(perfPanel);
 	}
 
@@ -562,17 +563,6 @@ public class PvPLeaderboardPlugin extends Plugin
 		}
 	}
 
-	/** Hands the queue + tournament transports to the
-	 *  dashboard according to the two config flags — the inert queue service
-	 *  and no tournament service ({@code null}) when a flag is off (the gate
-	 *  hides the queue block, the Tournaments sub-tab greys). EDT-only: the
-	 *  dashboard mutates Swing. */
-	private void applyPlan10Services()
-	{
-		dashPanel.setQueue(config.enableQuickMatch() ? queueSvc : new NoOpQueue());
-		dashPanel.setTournamentService(config.enableTournaments() ? tourneySvc : null);
-	}
-
 	/** The auto-switch's action — pins the side panel + overlay
 	 *  to the Tournament bucket when a round opens with an opponent. The
 	 *  switch back happens at the next ordinary fight through
@@ -615,13 +605,6 @@ public class PvPLeaderboardPlugin extends Plugin
 				// promptly instead of waiting for the next natural reconnect.
 				case "showRankToOthers":
 					socketMgr.reconnectNow();
-					break;
-				// The queue / tournaments flags re-wire the
-				// dashboard (inert services when off). Marshalled to the EDT —
-				// config events arrive off it and the setters touch Swing.
-				case "enableQuickMatch":
-				case "enableTournaments":
-					SwingUtilities.invokeLater(this::applyPlan10Services);
 					break;
 				// "Display other players ranks" toggled: start/stop the
 				// membership feed sync (it self-gates, but stop releases the
@@ -997,7 +980,6 @@ public class PvPLeaderboardPlugin extends Plugin
 	 *  button and the panel, which are never nulled. */
 	private void openTourneys()
 	{
-		if (!config.enableTournaments()) return;
 		try
 		{
 			clientToolbar.openPanel(navButton);
@@ -1006,5 +988,12 @@ public class PvPLeaderboardPlugin extends Plugin
 		{
 		}
 		dashPanel.showTourneys();
+	}
+
+	/** The tournament box's Register: the Events tab's sign-up for {@code t}, then the side panel on Events. */
+	private void registerFromBox(Tourney t)
+	{
+		dashPanel.register(t);
+		openTourneys();
 	}
 }

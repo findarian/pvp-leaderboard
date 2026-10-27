@@ -114,8 +114,10 @@ final class OverallStats
         return s.endsWith(".0") ? s.substring(0, s.length() - 2) : s;
     }
 
+    /** A number; NaN for none or one that does not read. */
     private static double value(String s)
     {
+        if (s == null || s.isEmpty()) return Double.NaN;
         try
         {
             return Double.parseDouble(s);

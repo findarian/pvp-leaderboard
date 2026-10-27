@@ -316,9 +316,11 @@ public class PerfTracker
         {
             int world = client.getWorld();
             boolean lms = client.getVarbitValue(VarbitID.BR_INGAME) != 0;
-            f = new PerfFight(name, world, lms, KitRouter.ARENA_WORLDS.contains(world), lms
-                ? client.getBoostedSkillLevel(Skill.DEFENCE) : client.getRealSkillLevel(Skill.DEFENCE),
-                client.getBoostedSkillLevel(Skill.HITPOINTS), tick, this::stats);
+            boolean arena = KitRouter.ARENA_WORLDS.contains(world);
+            int def = lms ? client.getBoostedSkillLevel(Skill.DEFENCE) : client.getRealSkillLevel(Skill.DEFENCE);
+            f = new PerfFight(name, world, lms, arena, def, client.getBoostedSkillLevel(Skill.HITPOINTS), tick,
+                this::stats);
+            f.build = PerfFight.build(lms, client.getVarbitValue(VarbitID.BR_ACTIVE_BUILD_PLAYER), arena, def);
             fights.put(name, f);
             shown.removeIf(x -> x.opponent.equals(name) && endedAt.remove(x) != null);
             prune();

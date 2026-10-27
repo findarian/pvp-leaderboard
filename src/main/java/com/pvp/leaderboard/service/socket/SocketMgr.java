@@ -56,9 +56,9 @@ import okhttp3.*;
  * {@link #MAX_HOLD_MS}: the named {@code cmd}, or every frame
  * when none is named.
  *
- * <p><b>Keepalive</b>: RFC 6455 native ping every 8 min
- * ({@link OkHttpClient.Builder#pingInterval}), inside the server's 10-min
- * idle timeout. There is no application-layer ping cmd.
+ * <p><b>Keepalive</b>: RFC 6455 native ping every 30 s
+ * ({@link OkHttpClient.Builder#pingInterval}). There is no application-layer
+ * ping cmd.
  *
  * <p><b>Send model</b>: fire-and-forget. {@link #send(String, JsonObject)}
  * routes through {@link SocketProtocol#encode} (allowlist guard) and
@@ -391,14 +391,14 @@ public final class SocketMgr
 
     /** Lazily builds (and caches) the OkHttpClient used specifically for
      *  the WebSocket. Derived from the injected shared client so we
-     *  keep its connection pool / SSL config but tack on the 8-min
+     *  keep its connection pool / SSL config but set the 30 s
      *  RFC 6455 ping interval. */
     private OkHttpClient pingingClient()
     {
         if (pingingClient == null)
         {
             pingingClient = sharedHttp.newBuilder()
-                .pingInterval(8, TimeUnit.MINUTES)
+                .pingInterval(30, TimeUnit.SECONDS)
                 .build();
         }
         return pingingClient;

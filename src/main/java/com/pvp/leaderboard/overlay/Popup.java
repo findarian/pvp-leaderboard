@@ -10,8 +10,9 @@ import static java.awt.RenderingHints.*;
 /**
  * The OSRS Collection-Log pop-up frame the Match found and plugin-disable
  * warning pop-ups share: the palette, the fade, the frame with its title
- * separator centred at the top of the canvas, and a render that never lets a
- * throwable reach RuneLite's overlay renderer. Each pop-up paints its own body.
+ * separator centred at the top of the client (in fixed mode, of the game
+ * view), and a render that never lets a throwable reach RuneLite's overlay
+ * renderer. Each pop-up paints its own body.
  */
 abstract class Popup extends Overlay
 {
@@ -106,12 +107,14 @@ abstract class Popup extends Overlay
     }
 
     /** Paints the frame, {@code height} tall with a {@code titleBarHeight} title bar, at {@code alpha}, centred at the
-     *  top of the canvas, then the body; restores the graphics state it changes. {@code null} without a canvas. */
+     *  top of the client (in fixed mode, of the game view), then the body; restores the graphics state it changes.
+     *  {@code null} without a canvas. */
     Dimension paint(Graphics2D g, float alpha, String text, int height, int titleBarHeight)
     {
         Dimension canvas = client.getRealDimensions();
         if (canvas == null) return null;
-        int x = Math.max(0, (canvas.width - width) / 2);
+        int x = client.isResized() ? Math.max(0, (canvas.width - width) / 2)
+            : client.getViewportXOffset() + Math.max(0, (client.getViewportWidth() - width) / 2);
 
         Composite prevComposite = g.getComposite();
         Stroke prevStroke = g.getStroke();

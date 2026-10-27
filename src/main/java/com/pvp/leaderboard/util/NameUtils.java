@@ -1,9 +1,12 @@
 package com.pvp.leaderboard.util;
 
 import java.util.*;
+import java.util.regex.*;
 
 public final class NameUtils
 {
+	/** Runs of blanks, compiled once. */
+	private static final Pattern BLANKS = Pattern.compile("\\s+");
 
 	public static String normalizeDisplayName(String name)
 	{
@@ -17,7 +20,7 @@ public final class NameUtils
 		// does not strip it, so it must be unified to a regular space FIRST —
 		// otherwise every multi-word in-scene name fails membership checks
 		// and shard lookups against canonical names.
-		return name.replace('\u00A0', ' ').trim().replaceAll("\\s+", " ");
+		return BLANKS.matcher(name.replace('\u00A0', ' ').trim()).replaceAll(" ");
 	}
 
 	public static String canonicalKey(String name)

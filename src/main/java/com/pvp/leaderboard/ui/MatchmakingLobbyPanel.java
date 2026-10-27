@@ -648,13 +648,10 @@ public class MatchmakingLobbyPanel extends JPanel implements LobbyEventListener
 
     // -------------------- Matchmaking queue --------------------
 
-    /** Wires the queue transport. The plugin passes
-     *  {@code WebSocketQueueService} while the {@code enableQuickMatch}
-     *  config is on and {@link NoOpQueue} otherwise; either way the
+    /** Wires the queue transport ({@code null} is {@link NoOpQueue}): the
      *  panel becomes the listener, starts the service and shows / hides the
-     *  gate's queue block. Safe to call again on a config flip — a user
-     *  left on the Searching card by an inert service is returned to the
-     *  gate. */
+     *  gate's queue block. Safe to call again - a user left on the Searching
+     *  card by an inert service is returned to the gate. */
     public void setQueue(QueueService svc)
     {
         QueueService previous = queueService;

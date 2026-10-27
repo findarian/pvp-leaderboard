@@ -111,9 +111,16 @@ final class FightMerge
         return i < 0 ? last : raw.substring(0, i + 1) + last;
     }
 
+    /** One to sixteen digits, dots and slashes. */
     static boolean number(String v)
     {
-        return v != null && v.matches("[0-9./]{1,16}");
+        if (v == null || v.isEmpty() || v.length() > 16) return false;
+        for (int i = 0; i < v.length(); i++)
+        {
+            char c = v.charAt(i);
+            if ((c < '0' || c > '9') && c != '.' && c != '/') return false;
+        }
+        return true;
     }
 
     private static String or(String a, String b)
