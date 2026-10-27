@@ -797,7 +797,7 @@ public class RankOverlay extends Overlay
         g.drawString(text, centerX, drawY);
     }
 
-    /** The change as the Performance tab shows it ("+7.9 MMR", "-9.7 MMR", "0.0 MMR"), or the cap's
+    /** The change to two decimals ("+7.93 MMR", "-9.71 MMR", "0.00 MMR"), or the cap's
      *  label; " (label)" appended when a bucket label is given. */
     static String noticeText(double mmrDelta, String bucketLabel, boolean portalCapped)
     {

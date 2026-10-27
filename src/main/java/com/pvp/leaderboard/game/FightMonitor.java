@@ -266,28 +266,6 @@ public class FightMonitor
 
     @Setter private volatile RankSink rankSink;
 
-    /** A result the server accepted, by its fight's end (epoch seconds), told 5, 15 and 45 s after it was sent. */
-    @Setter private volatile LongConsumer sentSink;
-    private static final long[] SENT_TICKS = {5, 15, 45};
-
-    private void tellSent(long endSec)
-    {
-        if (sentSink == null) return;
-        for (long s : SENT_TICKS) later(() -> sentOf(endSec), s);
-    }
-
-    private void sentOf(long endSec)
-    {
-        LongConsumer sink = sentSink;
-        try
-        {
-            if (sink != null) sink.accept(endSec);
-        }
-        catch (RuntimeException e)
-        {
-        }
-    }
-
     private void rankOf(String opponent, long endSec, boolean mine, String rank)
     {
         RankSink sink = rankSink;
@@ -300,15 +278,33 @@ public class FightMonitor
         }
     }
 
-    /** The fight's performance stats for the match body, by opponent and result; null for none. */
-    @Setter private volatile BiFunction<String, String, Map<String, String>> perfSink;
-
-    private Map<String, String> perfOf(String opponent, String result)
+    /** The fight's performance stats for the match body, by opponent, result and style; null for none. */
+    public interface PerfSink
     {
-        BiFunction<String, String, Map<String, String>> sink = perfSink;
+        Map<String, String> finish(String opponent, String result, String style);
+    }
+
+    @Setter private volatile PerfSink perfSink;
+    /** Told each fight's row the post-fight lookup found. */
+    @Setter private volatile Consumer<JsonObject> rowSink;
+
+    private static <T> void tell(Consumer<T> sink, T value)
+    {
         try
         {
-            return sink == null ? null : sink.apply(opponent, result);
+            if (sink != null) sink.accept(value);
+        }
+        catch (RuntimeException e)
+        {
+        }
+    }
+
+    private Map<String, String> perfOf(String opponent, String result, String style)
+    {
+        PerfSink sink = perfSink;
+        try
+        {
+            return sink == null ? null : sink.finish(opponent, result, style);
         }
         catch (RuntimeException e)
         {
@@ -777,10 +773,25 @@ public class FightMonitor
         if (s == null || s.seriesId.equals(doneSeries)) return null;
         for (String name : activeFights.keySet())
         {
-            String key = NameUtils.canonicalKey(name);
-            if (s.outlineNames().stream().anyMatch(n -> key.equals(NameUtils.canonicalKey(n)))) return name;
+            if (listed(s, name)) return name;
         }
         return null;
+    }
+
+    /** Whether {@code name} is one of the match opponent's names. */
+    private static boolean listed(MatchSeries s, String name)
+    {
+        String key = NameUtils.canonicalKey(name);
+        return s.outlineNames().stream().anyMatch(n -> key.equals(NameUtils.canonicalKey(n)));
+    }
+
+    /** True while the open match has no result, lists {@code name} as its opponent and the player is on a PvP Arena
+     *  world: the Performance tracker keeps that fight whole. */
+    public boolean holds(String name)
+    {
+        MatchSeries s = tourneyMatch.get();
+        return name != null && s != null && !s.seriesId.equals(doneSeries)
+            && KitRouter.ARENA_WORLDS.contains(client.getWorld()) && listed(s, name);
     }
 
     /** Marks the open match as having its result. */
@@ -822,7 +833,8 @@ public class FightMonitor
         FightEntry fe = activeFights.get(opp);
         done();
         fe.finalized = true;
-        return finalizeLms(opp, client.getWorld(), fe, null);
+        Map<String, String> stats = perfOf(opp, "loss", tournamentBucketPin.getAsBoolean() ? "tournament" : null);
+        return finalizeLms(opp, client.getWorld(), fe, null, stats);
     }
 
     private void endFightFor(String opponentName, String result, String forfeit)
@@ -1048,7 +1060,7 @@ public class FightMonitor
 
             String normReason = cleanReason(reason);
             CompletableFuture<Boolean> future =
-                finalizeLms(oppName, lastLmsWorld, fe, normReason);
+                finalizeLms(oppName, lastLmsWorld, fe, normReason, null);
             if ("plugin_disabled".equals(normReason))
             {
                 markWarning();
@@ -1181,11 +1193,12 @@ public class FightMonitor
     /** Build + submit the freeze-log loss using cached values (the live
      *  player object is already gone at logout / shutdown). Spellbook is
      *  best-effort from the fight's start value. A {@code null} reason is a
-     *  tournament forfeit's logout instead. */
+     *  tournament forfeit's logout instead, with the fight's {@code stats}. */
     private CompletableFuture<Boolean> finalizeLms(String opponentName,
                                                               int world,
                                                               FightEntry fe,
-                                                              String reason)
+                                                              String reason,
+                                                              Map<String, String> stats)
     {
         String selfName = lastSelfName;
         if (selfName == null)
@@ -1196,7 +1209,7 @@ public class FightMonitor
         String sb = getBookName(fe.startBook);
         var b = matchOf(selfName, opponentName, "loss", world, fe, endTs, sb, sb)
             .clientUniqueId(identitySvc.getClientUniqueId());
-        MatchResult match = (reason == null ? b.tournamentForfeit("logout") : b.lmsFreezeLogout(true).lmsFreezeReason(reason)).build();
+        MatchResult match = (reason == null ? b.tournamentForfeit("logout").perf(stats) : b.lmsFreezeLogout(true).lmsFreezeReason(reason)).build();
         // Persist the pending-MMR marker BEFORE the fire-and-forget submit:
         // the player is logging out / disabling the plugin, so this session
         // can't poll for the resulting delta. On the next login we replay
@@ -1221,18 +1234,18 @@ public class FightMonitor
         boolean ffaPortal = entry.wasInFfa;
         String startBook = getBookName(entry.startBook);
         String endSpellbook = getBookName(endSb);
-        MatchResult.MatchResultBuilder match = matchOf(selfName, opponentName, result, world, entry, endTs, startBook, endSpellbook)
-            .ffaPortal(ffaPortal)
-            .bountyHunter(entry.wasInBounty)
-            .perf(perfOf(opponentName, result))
-            .tournamentForfeit(forfeit);
-
         // Determine the bucket this fight will be classified as
         RankBucket fb = determineBucket(world, entry.wasInMulti, startBook, endSpellbook, entry.wasInBounty);
         String fightBucket = RankBucket.key(fb);
+        String style = tournamentBucketPin.getAsBoolean() ? "tournament" : fightBucket;
+        MatchResult.MatchResultBuilder match = matchOf(selfName, opponentName, result, world, entry, endTs, startBook, endSpellbook)
+            .ffaPortal(ffaPortal)
+            .bountyHunter(entry.wasInBounty)
+            .perf(perfOf(opponentName, result, style))
+            .tournamentForfeit(forfeit);
+
         lastBucket = fb;
-        Consumer<JsonObject> streakOutcome =
-            streakResolver(tournamentBucketPin.getAsBoolean() ? "tournament" : fightBucket, result);
+        Consumer<JsonObject> streakOutcome = streakResolver(style, result);
 
         // Show the bucket label on the rating pop-up when the fight's bucket is
         // not the one the leaderboard shows; with auto-switch on, switch to it.
@@ -1276,7 +1289,6 @@ public class FightMonitor
             if (Boolean.TRUE.equals(success))
             {
                 scheduleLobbyGateRefresh();
-                tellSent(endTs);
             }
             postFight.run();
         }).exceptionally(ex -> {
@@ -1285,7 +1297,7 @@ public class FightMonitor
         });
 
         // Tier refreshes for overlay (don't depend on match being processed)
-        refreshTiers(opponentName, apiBucket, endTs);
+        refreshTiers(opponentName, apiBucket, endTs, style);
     }
 
     private void fetchLater(String selfName, String opponent, boolean bucketInMmr, long endTs,
@@ -1328,20 +1340,20 @@ public class FightMonitor
     /**
      * Refresh tier/rank display for self and opponent.
      * Runs 5s after fight end — independent of match submission.
-     * After each read, the new rating system's division in that profile goes to the rank sink with the fight's
-     * opponent and end.
+     * After each read, the new rating system's division of the fight's style in that profile goes to the rank sink
+     * with the fight's opponent and end.
      */
-    private void refreshTiers(String opponentName, String displayBucket, long endSec) {
+    private void refreshTiers(String opponentName, String displayBucket, long endSec, String style) {
         later(() -> {
             try {
                 String selfName = getLocalName();
 
                 if (selfName != null) {
                     retryTier(selfName, displayBucket, 3,
-                        () -> rankOf(opponentName, endSec, true, pvpApi.peekV3Rank(selfName, displayBucket)));
+                        () -> rankOf(opponentName, endSec, true, pvpApi.peekV3Rank(selfName, style)));
                 }
                 retryTier(opponentName, displayBucket, 3,
-                    () -> rankOf(opponentName, endSec, false, pvpApi.peekV3Rank(opponentName, displayBucket)));
+                    () -> rankOf(opponentName, endSec, false, pvpApi.peekV3Rank(opponentName, style)));
             } catch (Exception e) {
             }
         }, 5L);
@@ -1391,6 +1403,7 @@ public class FightMonitor
                     continue;
                 }
                 settleStreak(onRow, match);
+                tell(rowSink, match);
 
                 JsonElement delta = val(match, "v3_change");
                 if (delta == null) {

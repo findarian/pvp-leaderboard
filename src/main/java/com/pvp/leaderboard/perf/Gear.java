@@ -199,11 +199,8 @@ enum Gear
         ItemID.BH_ABYSSAL_DAGGER_IMBUE, ItemID.BH_ABYSSAL_DAGGER_P_IMBUE, ItemID.BH_ABYSSAL_DAGGER_P__IMBUE,
         ItemID.BH_ABYSSAL_DAGGER_P___IMBUE);
 
-    /** The ring both players are assumed to wear, unless the local player wears one of {@link #RINGS}. */
+    /** The ring an assumed player wears. */
     static final int DEFAULT_RING = ItemID.NZONE_BERZERKER_RING;
-    private static final int[] RINGS = {ItemID.NZONE_SEER_RING, ItemID.NZONE_RANGER_RING, DEFAULT_RING,
-        ItemID.NZONE_ZENYTE_RING_ENCHANTED, ItemID.BRIMSTONE_RING, ItemID.MAGUS_RING, ItemID.VENATOR_RING,
-        ItemID.BELLATOR_RING, ItemID.ULTOR_RING, ItemID.RING_OF_SHADOWS, ItemID.LIGHTBEARER};
     private static final Map<Integer, Gear> BY_ID = new HashMap<>();
 
     static
@@ -227,16 +224,6 @@ enum Gear
     static Gear of(int itemId)
     {
         return BY_ID.get(itemId);
-    }
-
-    /** The ring whose stats count: a listed worn ring, else the default. */
-    static int ring(int worn)
-    {
-        for (int r : RINGS)
-        {
-            if (r == worn) return worn;
-        }
-        return DEFAULT_RING;
     }
 
     /** The ammo a weapon fires: the worn ammo when it suits the weapon, else the weapon's usual ammo; null for none. */

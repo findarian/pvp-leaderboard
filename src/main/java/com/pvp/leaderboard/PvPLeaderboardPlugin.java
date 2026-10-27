@@ -168,7 +168,16 @@ public class PvPLeaderboardPlugin extends Plugin
 	@Inject
 	private FightLog fightLog;
 
-	private FightsPanel fightsPanel;
+	@Inject
+	private FightStore fightStore;
+
+	// SYNC: @Inject
+	// SYNC: private Grab grab;
+
+	@Inject
+	private ScheduledExecutorService executor;
+
+	private FightsPanel perfPanel;
 
 	@Inject
 	private ChatMessageManager chatMessageManager;
@@ -385,11 +394,12 @@ public class PvPLeaderboardPlugin extends Plugin
 		// Each finished fight's performance stats ride with its result; the Performance tab lists them, with the ranks
 		// read right after it.
 		fightMonitor.setPerfSink(perfTracker::finish);
+		perfTracker.setHold(fightMonitor::holds);
 		fightMonitor.setRankSink(fightLog::rank);
-		// Completed fights loads again once a result is sent.
-		fightsPanel = new FightsPanel(pvpApi, fightLog, this::getLocalName);
-		fightMonitor.setSentSink(fightsPanel::sent);
-		dashPanel.setPerformanceView(fightsPanel);
+		// The stored fights, read once off the client thread; the post-fight lookup's row adds the rating change.
+		executor.execute(fightStore::load);
+		fightMonitor.setRowSink(fightLog::row);
+		// SYNC: grab.setName(this::getLocalName);
 
 		// Init menu handler with RankOverlay
 		menuHandler.init(dashPanel, navButton);
@@ -426,6 +436,9 @@ public class PvPLeaderboardPlugin extends Plugin
 		}
 
 		startCheck();
+		// SYNC: perfPanel = new FightsPanel(fightStore, grab);
+		perfPanel = new FightsPanel(fightStore);
+		dashPanel.setPerformanceView(perfPanel);
 	}
 
 	@Override
@@ -483,8 +496,11 @@ public class PvPLeaderboardPlugin extends Plugin
 		fightMonitor.setStreakSink(null);
 		fightMonitor.setProfileRefreshSink(null);
 		fightMonitor.setPerfSink(null);
+		perfTracker.setHold(null);
 		fightMonitor.setRankSink(null);
-		fightMonitor.setSentSink(null);
+		fightMonitor.setRowSink(null);
+		// SYNC: grab.stop();
+		fightStore.setListener(null);
 		perfTracker.reset();
 		fightMonitor.cancelPending();
 		winStreakTracker.clear();
@@ -619,6 +635,13 @@ public class PvPLeaderboardPlugin extends Plugin
 		{
 			log.error("Uncaught exception in onConfigChanged", e);
 		}
+	}
+
+	/** RuneLite's settings profile changed: the fights are read again. */
+	@Subscribe
+	public void onProfileChanged(ProfileChanged event)
+	{
+		fightStore.reload();
 	}
 
 	@Subscribe
@@ -777,8 +800,9 @@ public class PvPLeaderboardPlugin extends Plugin
 					{
 						// Load dashboard data
 						dashPanel.loadIfIdle(self);
-						// The Performance tab builds itself again for this character.
-						fightsPanel.characterReady();
+						// The Performance tab once more, now the character is known.
+						SwingUtilities.invokeLater(perfPanel::refresh);
+						// SYNC: grab.loggedIn();
 						// The open Events tab asks for its events at once.
 						dashPanel.loginReady();
 

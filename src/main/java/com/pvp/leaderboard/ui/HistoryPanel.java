@@ -58,7 +58,7 @@ public class HistoryPanel extends JPanel
         return d == null || d.trim().isEmpty() ? "-" : d;
     }
 
-    /** The capped label, else the row's {@code v3_change} ("+7.9 MMR", "0.0 MMR"), else "-". */
+    /** The capped label, else the row's {@code v3_change} ("+7.93 MMR", "0.00 MMR"), else "-". */
     private static String computeRatingChangePlain(JsonObject match)
     {
         if (PortalCap.isCapped(match))

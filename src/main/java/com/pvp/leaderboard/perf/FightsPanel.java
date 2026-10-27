@@ -1,30 +1,30 @@
 package com.pvp.leaderboard.perf;
 
-import com.google.gson.*;
-import com.pvp.leaderboard.config.StreakBucket;
-import com.pvp.leaderboard.service.*;
+import com.google.gson.JsonObject;
+import com.pvp.leaderboard.config.*;
 import com.pvp.leaderboard.ui.*;
-import com.pvp.leaderboard.util.NameUtils;
-import com.pvp.leaderboard.util.RankUtils;
+import com.pvp.leaderboard.util.*;
 import java.awt.*;
 import java.awt.event.*;
 import java.time.*;
 import java.time.format.*;
 import java.util.*;
 import java.util.List;
-import java.util.function.*;
 import javax.swing.*;
-import static com.pvp.leaderboard.util.JsonLenient.*;
+import javax.swing.Timer;
 
-/** The Performance tab: your fights with the stats PvP Leaderboard stored (Completed fights), or every fight this
- *  computer tracked, finished or not (All fights). */
+/** The Performance tab: every stored fight, merged and filtered in memory, as cards 50 at a time (Individual fights)
+ *  or as the Overall stats box; and the sync. A new fight adds one card; a filter change rebuilds once, after a short
+ *  wait. */
 public class FightsPanel extends JPanel
 {
-    static final String COMPLETED = "completed fights", ALL = "all fights";
+    static final String INDIVIDUAL = "individual fights", EST = "100% est.", MMR = "MMR Change";
+    static final int PAGE = 50;
+    private static final String SYNCED = "  Synced";
+    // SYNC: private static final String CAPTION = "Allowed once per day, don't click unless there are missing matches locally";
     static final String[] LABELS = {"Off-pray", "Expected damage", "Damage", "Magic luck", "Offensive prayer",
         "HP healed", "Hits on robes", "KO chances", "Ghost barrages"};
     static final String[] SHORT = {"OP", "eD", "D", "M", "P", "HP", "rH", "KO", "GB"};
-    private static final String[] KEYS = {"op", "ed", "d", "mh", "pr", "hp", "rh", "ko", "gb"};
     /** Per row: 1 when the higher value is better, -1 when the lower is, 0 when the row is not compared. */
     private static final int[] BETTER = {0, 1, 1, 1, 0, 0, -1, 1, 0};
     private static final DateTimeFormatter WHEN = DateTimeFormatter.ofPattern("MMM d HH:mm", Locale.ROOT);
@@ -33,230 +33,311 @@ public class FightsPanel extends JPanel
     static final int WIDTH = 190;
     /** The least space between a value and its row's label. */
     private static final int GAP = 3;
-    /** How far apart, in seconds, a completed fight and this computer's record of it may end. */
-    private static final long SAME_FIGHT = 60;
+    /** The side panel's width with its scrollbar, where a filter's label and control share a row only if both fit. */
+    private static final int PANEL = 205;
 
-    private final PvpApi pvpApi;
-    private final FightLog fightLog;
-    private final Supplier<String> selfName;
-    private final JPanel bar;
-    private final JPanel list = Ui.column();
-    private String view = COMPLETED;
-    private int gen;
-    /** The name and character the kept cards were built for; others build both views again. */
-    private String builtFor;
-    /** Each view's built cards; null to build (or load) them again. */
-    private List<JComponent> allCards, completedCards;
-    /** The end of the newest sent result Completed fights has not shown yet (0 for none), and of the newest that has. */
-    private long awaiting, shown;
-    /** A sent result's tick asked for one more load that has not run yet. */
-    private boolean due;
+    private final FightStore store;
+    // SYNC: private final Grab grab;
+    private final JPanel bar, view = new JPanel(new BorderLayout()), cards = Ui.column(), list = Ui.column(), box = Ui.column();
+    private final JButton more = new JButton("Show 50 more");
+    // SYNC: private final JButton grabButton = new JButton("Sync from PvP Leaderboard");
+    // SYNC: private final JLabel caption = text("", Font.PLAIN, Ui.MUTED), grabLine = text("", Font.PLAIN, null);
+    private final JComboBox<String> names = new JComboBox<>(), styles = new JComboBox<>(), rank = new JComboBox<>(),
+        recent = new JComboBox<>(FightFilter.RECENT), show = new JComboBox<>(FightFilter.SHOW);
+    private final JCheckBox partials = new JCheckBox("Include partial fights", true);
+    private final FightFilter filter = new FightFilter();
+    Timer debounce;
+    private List<FightLog.Fight> merged = new ArrayList<>(), shown = new ArrayList<>();
+    private OverallStats totals = new OverallStats();
+    private boolean quiet;
+    private int built, limit = PAGE;
 
-    public FightsPanel(PvpApi pvpApi, FightLog fightLog, Supplier<String> selfName)
+    // SYNC: public FightsPanel(FightStore store, Grab grab)
+    public FightsPanel(FightStore store)
     {
         super(new BorderLayout(0, 6));
-        this.pvpApi = pvpApi;
-        this.fightLog = fightLog;
-        this.selfName = selfName;
-        bar = Ui.bucketBar("perf-views", "perf-view", 1, 2, new String[]{"Completed fights", "All fights"}, this::show);
-        Ui.styleBucketBar(bar, view);
+        this.store = store;
+        // SYNC: this.grab = grab;
+        bar = Ui.bucketBar("perf-views", "perf-view", 1, 2, new String[]{"Individual fights", "Overall stats"}, this::show);
+        JPanel top = Ui.column();
+        top.add(Ui.left(bar));
+        // SYNC: grabButton.setName("perf-grab");
+        // SYNC: grabButton.setMargin(new Insets(2, 2, 2, 2));
+        // SYNC: grabButton.addActionListener(e -> grab.click());
+        // SYNC: caption.setName("perf-grab-caption");
+        // SYNC: Ui.wrap(caption, CAPTION);
+        // SYNC: grabLine.setName("perf-grab-line");
+        // SYNC: top.add(Ui.left(Ui.pin(grabButton)));
+        // SYNC: top.add(Ui.left(caption));
+        // SYNC: top.add(Ui.left(grabLine));
+        names.setName("perf-as");
+        styles.setName("perf-style");
+        styles.addItem("All styles");
+        for (StreakBucket b : StreakBucket.values()) styles.addItem(b.label);
+        rank.setName("perf-rank");
+        rank.addItem("Any");
+        for (int i = 0; i < 7; i++) rank.addItem(FightFilter.TIERS[i]);
+        show.setName("perf-show");
+        partials.setName("perf-partials");
+        recent.setName("perf-recent");
+        recent.setEditable(true);
+        for (ItemSelectable c : new ItemSelectable[]{names, styles, rank, show, partials}) c.addItemListener(e -> filtered());
+        recent.addActionListener(e -> recent());
+        top.add(field("Played as", names));
+        top.add(field("Style", styles));
+        top.add(field("Minimum opponent rank", rank));
+        top.add(field("Show", show));
+        top.add(Ui.left(Ui.pin(partials)));
+        top.add(field("Most recent fights", recent));
+        add(top, BorderLayout.NORTH);
+        add(view, BorderLayout.CENTER);
         list.setName("perf-fights");
-        add(bar, BorderLayout.NORTH);
-        add(list, BorderLayout.CENTER);
-        fightLog.setListener(() -> SwingUtilities.invokeLater(() -> {
-            allCards = null;
-            if (ALL.equals(view)) refresh();
-        }));
-        addHierarchyListener(e -> {
-            if ((e.getChangeFlags() & HierarchyEvent.SHOWING_CHANGED) != 0 && isShowing()) refresh();
-        });
+        box.setName("perf-overall");
+        Ui.cardStyle(box);
+        more.setName("perf-more");
+        more.addActionListener(e -> page(limit += PAGE));
+        cards.add(Ui.left(list));
+        cards.add(Ui.left(more));
+        store.setListener(f -> SwingUtilities.invokeLater(() -> changed(f)));
+        // SYNC: grab.setListener(() -> SwingUtilities.invokeLater(this::grabLine));
+        // SYNC: addHierarchyListener(e -> {
+            // SYNC: if ((e.getChangeFlags() & HierarchyEvent.SHOWING_CHANGED) != 0 && isShowing()) grab.opened();
+        // SYNC: });
+        show(INDIVIDUAL);
+        refresh();
     }
 
-    /** A tick of a sent result (5, 15 and 45 s after it): Completed fights loads once more, skipping the cache, at once
-     *  when the tab is open, else when Completed next shows; nothing for a fight that already shows. */
-    public void sent(long endSec)
+    /** A filter's label and its control: on one row when both fit at their preferred widths, the control taking the
+     *  rest; else the label on its own line above the control. */
+    private static JComponent field(String label, JComponent control)
     {
-        SwingUtilities.invokeLater(() -> {
-            if (endSec <= shown) return;
-            awaiting = Math.max(awaiting, endSec);
-            due = true;
-            if (COMPLETED.equals(view) && isShowing()) refresh();
-        });
+        JPanel p = new JPanel(new Field())
+        {
+            @Override
+            public Dimension getMaximumSize()
+            {
+                return new Dimension(Integer.MAX_VALUE, getPreferredSize().height);
+            }
+        };
+        p.add(text(label, Font.PLAIN, null));
+        p.add(control);
+        return Ui.left(p);
     }
 
-    /** A login: the open tab is built again when the character or the name changed. */
-    public void characterReady()
+    /** Everything again from the store. */
+    public void refresh()
     {
-        SwingUtilities.invokeLater(() -> {
-            if (isShowing()) refresh();
-        });
+        merged = FightMerge.merge(store.local(), store.grabbed());
+        names();
+        apply();
+        // SYNC: grabLine();
+    }
+
+    /** A store change: a new fight adds one card, a fight's own change redraws its card and the totals, anything else
+     *  rebuilds. */
+    private void changed(FightLog.Fight f)
+    {
+        int at = f == null ? -1 : index(merged, f);
+        if (f == null || at < 0 && store.grabbed().stream().anyMatch(g -> FightMerge.same(f, g)))
+        {
+            refresh();
+            return;
+        }
+        if (at >= 0)
+        {
+            int i = index(shown, f);
+            if (filter.min >= 0) filtered();
+            else if (i >= 0)
+            {
+                if (i < built)
+                {
+                    list.remove(i);
+                    list.add(card(f), i);
+                    list.revalidate();
+                }
+                totals = OverallStats.of(shown);
+                box();
+            }
+            return;
+        }
+        merged.add(0, f);
+        names();
+        if (!filter.keeps(f)) return;
+        if (shown.isEmpty()) list.removeAll();
+        shown.add(0, f);
+        totals.add(f, 1);
+        list.add(card(f), 0);
+        built++;
+        if (filter.recent > 0 && shown.size() > filter.recent) totals.add(shown.remove(shown.size() - 1), -1);
+        while (built > Math.min(limit, shown.size())) list.remove(--built);
+        more.setVisible(shown.size() > built);
+        box();
+        list.revalidate();
+        list.repaint();
+    }
+
+    private static int index(List<FightLog.Fight> fights, FightLog.Fight f)
+    {
+        for (int i = 0; i < fights.size(); i++) if (fights.get(i) == f) return i;
+        return -1;
+    }
+
+    /** The Played as names: every name in the store, A-Z. */
+    private void names()
+    {
+        TreeMap<String, String> all = new TreeMap<>();
+        for (FightLog.Fight f : merged) if (!f.self.isEmpty()) all.putIfAbsent(NameUtils.canonicalKey(f.self), f.self);
+        Object chosen = names.getSelectedItem();
+        quiet = true;
+        names.removeAllItems();
+        names.addItem("All names");
+        all.values().forEach(names::addItem);
+        names.setSelectedItem(all.containsValue(chosen) ? chosen : "All names");
+        quiet = false;
+    }
+
+    /** A filter changed: one rebuild after a short wait. */
+    private void filtered()
+    {
+        if (quiet) return;
+        if (debounce == null)
+        {
+            debounce = new Timer(0, e -> apply());
+            debounce.setRepeats(false);
+        }
+        debounce.setInitialDelay(45 + merged.size() * 3 / 100);
+        debounce.restart();
+    }
+
+    /** Most recent fights: a choice or a typed entry; one refused shows the last valid choice again. */
+    private void recent()
+    {
+        if (quiet) return;
+        if (filter.recent(String.valueOf(recent.getSelectedItem()))) filtered();
+        quiet = true;
+        recent.setSelectedItem(filter.recentText());
+        quiet = false;
+    }
+
+    /** The filters on the merged list: both views from scratch. */
+    private void apply()
+    {
+        filter.self = names.getSelectedIndex() > 0 ? (String) names.getSelectedItem() : null;
+        filter.style = styles.getSelectedIndex() > 0 ? StreakBucket.values()[styles.getSelectedIndex() - 1].bucketKey : null;
+        filter.min = rank.getSelectedIndex() - 1;
+        filter.result = FightFilter.RESULTS[show.getSelectedIndex()];
+        filter.partials = partials.isSelected();
+        shown = filter.apply(merged);
+        totals = OverallStats.of(shown);
+        list.removeAll();
+        built = 0;
+        if (shown.isEmpty())
+        {
+            list.add(Ui.label("perf-note", merged.isEmpty() ? "No fights tracked yet" : "No fights match the filters",
+                Font.ITALIC, Ui.smallFont().getSize2D(), Ui.MUTED));
+        }
+        page(limit = PAGE);
+        box();
+    }
+
+    /** The cards up to {@code to}, after those built. */
+    private void page(int to)
+    {
+        while (built < Math.min(to, shown.size())) list.add(card(shown.get(built++)));
+        more.setVisible(shown.size() > built);
+        list.revalidate();
+        list.repaint();
     }
 
     private void show(String key)
     {
-        view = key;
         Ui.styleBucketBar(bar, key);
-        refresh();
+        view.removeAll();
+        view.add(INDIVIDUAL.equals(key) ? cards : box, BorderLayout.NORTH);
+        view.revalidate();
+        view.repaint();
     }
 
-    /** Shows the chosen view's kept cards, building them first when there are none; Completed fights come from the
-     *  server. */
-    public void refresh()
+    /** The Overall stats box from the running totals: its heading, the name played as and "Opponents" once, the wins,
+     *  losses and ties, your net MMR Change, then the nine rows as on a card, in the card's colours. */
+    private void box()
     {
-        String name = selfName.get(), key = name + "|" + fightLog.character();
-        if (!key.equals(builtFor))
+        box.removeAll();
+        box.add(vs(text("Overall stats", Font.BOLD, null), null,
+            text(count(totals.fights) + (totals.fights == 1 ? " fight" : " fights"), Font.PLAIN, Ui.MUTED)));
+        box.add(vs(text(filter.self == null ? "All names" : filter.self, Font.BOLD, null), null, text("Opponents", Font.BOLD, null)));
+        box.add(vs(text("Wins: " + count(totals.wins), Font.PLAIN, null), text("Losses: " + count(totals.losses), Font.PLAIN, null),
+            text("Ties: " + count(totals.ties), Font.PLAIN, null)));
+        String net = totals.mmr();
+        box.add(vs(text(net, Font.PLAIN, gain(net)), text(MMR, Font.PLAIN, Ui.MUTED), text("-", Font.PLAIN, null)));
+        String[] mine = totals.mine(), theirs = totals.theirs(), a = totals.compared(0), b = totals.compared(1);
+        for (int i = 0; i < 9; i++)
         {
-            builtFor = key;
-            allCards = null;
-            completedCards = null;
+            Color[] tone = tones(i, a[i], b[i]);
+            JLabel left = text(mine[i], Font.PLAIN, tone[0]), right = text(theirs[i], Font.PLAIN, tone[1]);
+            box.add(vs(left, rowLabel(i, left, right), right));
         }
-        if (ALL.equals(view))
-        {
-            if (allCards == null) allCards = buildAll(name);
-            fill(allCards, "No fights tracked yet");
-            return;
-        }
-        if (completedCards != null)
-        {
-            fill(completedCards, "No fights with stats yet");
-            if (!due) return;
-        }
-        load(name);
+        box.revalidate();
+        box.repaint();
     }
 
-    private List<JComponent> buildAll(String name)
+    private static String count(int n)
     {
-        List<JComponent> cards = new ArrayList<>();
-        for (FightLog.Fight f : fightLog.all())
-        {
-            cards.add(card(f.result, when(f.endSec), "W" + f.world, null, f.who == null ? name : f.who, f.myRank, f.opponent,
-                f.theirRank, f.mine, f.theirs, null));
-        }
-        return cards;
+        return String.format(Locale.US, "%,d", n);
     }
 
-    /** Completed fights from the server, skipping its cache for a sent result's tick. */
-    private void load(String name)
+    // SYNC: private void grabLine()
+    // SYNC: {
+        // SYNC: String t = Objects.toString(grab.text(), "");
+        // SYNC: grabButton.setEnabled(grab.ready());
+        // SYNC: Ui.wrap(grabLine, t);
+        // SYNC: grabLine.setVisible(!t.isEmpty());
+    // SYNC: }
+
+    private static JComponent card(FightLog.Fight f)
     {
-        int g = ++gen;
-        String sha = pvpApi.getSelfSha(), key = builtFor;
-        if (sha == null && name == null)
-        {
-            fill(Collections.emptyList(), "Log in to see your fights");
-            return;
-        }
-        boolean fresh = due;
-        due = false;
-        if (completedCards == null) fill(Collections.emptyList(), "Loading...");
-        pvpApi.getMatches(sha, name, null, 100, fresh).whenComplete((json, ex) -> SwingUtilities.invokeLater(() -> {
-            if (g != gen || !key.equals(builtFor)) return;
-            JsonArray rows = json == null ? null : optArray(json, "matches");
-            if (rows != null)
-            {
-                completedCards = completed(rows, name);
-                if (awaiting != 0 && holds(rows, awaiting))
-                {
-                    shown = awaiting;
-                    awaiting = 0;
-                }
-            }
-            if (COMPLETED.equals(view)) fill(completedCards, "No fights with stats yet");
-        }));
+        StreakBucket b = StreakBucket.forKey(f.style);
+        return card(f.result, when(f.endSec) + (f.marks.contains("s") ? SYNCED : ""), f.world > 0 ? "W" + f.world : null,
+            b == null ? null : b.label, or(f.self), or(f.rank), f.opponent, or(f.oppRank), f.mine, f.theirs, mmr(f.change));
     }
 
-    /** Whether {@code rows} hold the fight that ended at {@code end} (within 60 s). */
-    private static boolean holds(JsonArray rows, long end)
+    private static String or(String s)
     {
-        for (JsonElement e : rows)
-        {
-            if (e.isJsonObject() && optDouble(e.getAsJsonObject(), "when", 0) >= end - SAME_FIGHT) return true;
-        }
-        return false;
+        return s == null || s.isEmpty() ? null : s;
     }
 
-    private List<JComponent> completed(JsonArray matches, String name)
+    /** A rating change as shown: signed to one decimal ("+7.9", "-9.7"), "0.0" for none, "-" when not known. */
+    static String mmr(String change)
     {
-        List<JComponent> cards = new ArrayList<>();
-        List<FightLog.Fight> tracked = fightLog.all();
-        String[] none = new String[9];
-        Arrays.fill(none, "-");
-        for (JsonElement e : matches == null ? new JsonArray() : matches)
+        try
         {
-            JsonObject m = e.isJsonObject() ? e.getAsJsonObject() : null;
-            JsonObject p = m == null ? null : optObject(m, "perf");
-            if (p == null) continue;
-            String[] mine = new String[9];
-            for (int i = 0; i < 9; i++) mine[i] = optString(p, KEYS[i], "-");
-            String as = optString(m, "participant_id", ""), opponent = optString(m, "opponent_id", "?");
-            long end = (long) optDouble(m, "when", 0);
-            FightLog.Fight local = tracked(tracked, opponent, end);
-            cards.add(card(optString(m, "result", ""), when(end), local == null ? null : "W" + local.world, style(m),
-                as.isEmpty() ? name : as, rank(m, "v3_to"), opponent, rank(m, "v3_opponent_to"), mine,
-                local == null ? none : local.theirs, change(m)));
+            double v = Math.round(Double.parseDouble(change) * 10) / 10.0;
+            return v == 0 ? "0.0" : String.format(Locale.ROOT, "%+.1f", v);
         }
-        return cards;
+        catch (RuntimeException e)
+        {
+            return "-";
+        }
     }
 
-    /** A match row's style as players see it (NH, Veng, Multi, DMM, Tournament); null for none. */
-    private static String style(JsonObject m)
+    /** A rating change's colour: green for a gain, red for a loss, none for "0.0" or "-". */
+    static Color gain(String mmr)
     {
-        StreakBucket b = StreakBucket.forKey(optString(m, "bucket", ""));
-        return b == null ? null : b.label;
+        return mmr.startsWith("+") ? Ui.GREEN : mmr.length() > 1 && mmr.startsWith("-") ? WORSE : null;
     }
 
-    /** A match row's rating change in the new system as shown: "+7.9", "-9.7", "0.0"; "-" for none. */
+    /** A match row's rating change in the new system as {@link #change(double)} shows it; "-" for none. */
     public static String change(JsonObject m)
     {
-        return change(optDouble(m, "v3_change", Double.NaN));
+        return change(JsonLenient.optDouble(m, "v3_change", Double.NaN));
     }
 
-    /** A rating change as shown: "+7.9", "-9.7", "0.0"; "-" for none (NaN). */
+    /** A rating change as the popup and the match history show it: "+7.93", "-9.71", "0.00"; "-" for none (NaN). */
     public static String change(double v)
     {
         if (Double.isNaN(v)) return "-";
-        double r = Math.round(v * 10) / 10.0;
-        return r == 0 ? "0.0" : String.format(Locale.ROOT, "%+.1f", r);
-    }
-
-    /** A match row's division in the new rating system ("Adamant 2"); null for none. */
-    private static String rank(JsonObject m, String key)
-    {
-        String r = optString(m, key, "");
-        return r.isEmpty() ? null : r;
-    }
-
-    /** This computer's record of the fight against {@code opponent} that ended at {@code end}: the nearest one within
-     *  60 s; null for none. */
-    static FightLog.Fight tracked(List<FightLog.Fight> fights, String opponent, long end)
-    {
-        String key = NameUtils.canonicalKey(opponent);
-        FightLog.Fight best = null;
-        for (FightLog.Fight f : fights)
-        {
-            long apart = Math.abs(f.endSec - end);
-            if (apart <= SAME_FIGHT && key.equals(NameUtils.canonicalKey(f.opponent))
-                && (best == null || apart < Math.abs(best.endSec - end)))
-            {
-                best = f;
-            }
-        }
-        return best;
-    }
-
-    /** The cards, or {@code empty} when there are none; null cards means the load failed. */
-    private void fill(List<JComponent> cards, String empty)
-    {
-        list.removeAll();
-        if (cards == null || cards.isEmpty())
-        {
-            list.add(Ui.label("perf-note", cards == null ? "Could not load fights" : empty, Font.ITALIC, 11f, Ui.MUTED));
-        }
-        else
-        {
-            for (JComponent c : cards) list.add(c);
-        }
-        list.revalidate();
-        list.repaint();
+        double r = Math.round(v * 100) / 100.0;
+        return r == 0 ? "0.00" : String.format(Locale.ROOT, "%+.2f", r);
     }
 
     static String when(long sec)
@@ -265,8 +346,8 @@ public class FightsPanel extends JPanel
     }
 
     /** One fight: its date, world (when known) and result on the top line, each player's rank above their name in
-     *  the rank's colour (yours left, theirs right) with the style between them, the nine rows, then your rating
-     *  change ({@code mmr}, no row for null); tinted for a win or a loss. */
+     *  the rank's colour (yours left, theirs right; a name not known is left blank) with the style between them, the
+     *  nine rows, then your rating change ({@code mmr}, no row for null); tinted for a win or a loss. */
     static JComponent card(String result, String date, String world, String style, String myName, String myRank,
         String theirName, String theirRank, String[] mine, String[] theirs, String mmr)
     {
@@ -283,20 +364,30 @@ public class FightsPanel extends JPanel
             c.add(vs(text(myRank, Font.PLAIN, tint(myRank)), style == null ? null : text(style, Font.PLAIN, null),
                 text(theirRank, Font.PLAIN, tint(theirRank))));
         }
-        c.add(vs(text(myName == null ? "You" : myName, Font.BOLD, tint(myRank)), null,
-            text(theirName, Font.BOLD, tint(theirRank))));
+        JLabel them = text(theirName, Font.BOLD, tint(theirRank));
+        them.setName("perf-opponent");
+        c.add(vs(text(myName, Font.BOLD, tint(myRank)), null, them));
         for (int i = 0; i < 9; i++)
         {
             Color[] tone = tones(i, mine[i], theirs[i]);
-            c.add(vs(text(shown(i, mine[i]), Font.PLAIN, tone[0]), text(LABELS[i], Font.PLAIN, Ui.MUTED),
-                text(shown(i, theirs[i]), Font.PLAIN, tone[1])));
+            JLabel left = text(shown(i, mine[i]), Font.PLAIN, tone[0]),
+                right = text(shownTheirs(i, theirs[i]), Font.PLAIN, tone[1]);
+            c.add(vs(left, rowLabel(i, left, right), right));
         }
-        if (mmr != null)
-        {
-            Color tone = mmr.startsWith("+") ? Ui.GREEN : mmr.length() > 1 && mmr.startsWith("-") ? WORSE : null;
-            c.add(vs(text(mmr, Font.PLAIN, tone), text("MMR", Font.PLAIN, Ui.MUTED), text("-", Font.PLAIN, null)));
-        }
+        if (mmr != null) c.add(vs(text(mmr, Font.PLAIN, gain(mmr)), text(MMR, Font.PLAIN, Ui.MUTED), text("-", Font.PLAIN, null)));
         return Ui.pin(c);
+    }
+
+    /** Row {@code i}'s name between {@code left} and {@code right}: in full when the three fit one line, else short
+     *  with the full name on hover. */
+    private static JLabel rowLabel(int i, JLabel left, JLabel right)
+    {
+        JLabel full = text(LABELS[i], Font.PLAIN, Ui.MUTED);
+        int w = left.getPreferredSize().width + full.getPreferredSize().width + right.getPreferredSize().width;
+        if (w + 2 * GAP <= WIDTH) return full;
+        JLabel brief = text(SHORT[i], Font.PLAIN, Ui.MUTED);
+        brief.setToolTipText(LABELS[i]);
+        return brief;
     }
 
     private static JLabel text(String s, int style, Color fg)
@@ -387,6 +478,59 @@ public class FightsPanel extends JPanel
         }
     }
 
+    /** A filter's row: the label at its own width and the control taking the rest, or, when the two do not fit side
+     *  by side, the label above the control. */
+    private static final class Field implements LayoutManager
+    {
+        @Override
+        public void addLayoutComponent(String name, Component c)
+        {
+        }
+
+        @Override
+        public void removeLayoutComponent(Component c)
+        {
+        }
+
+        /** Decided at the panel's narrowest width, never the row's current one, so a layout pass cannot flip it. */
+        private static boolean stacked(Container p)
+        {
+            return p.getComponent(0).getPreferredSize().width + 6 + p.getComponent(1).getPreferredSize().width > PANEL;
+        }
+
+        @Override
+        public Dimension preferredLayoutSize(Container p)
+        {
+            Dimension l = p.getComponent(0).getPreferredSize(), c = p.getComponent(1).getPreferredSize();
+            return stacked(p) ? new Dimension(Math.min(PANEL, Math.max(l.width, c.width)), l.height + 2 + c.height)
+                : new Dimension(l.width + 6 + c.width, Math.max(l.height, c.height));
+        }
+
+        @Override
+        public Dimension minimumLayoutSize(Container p)
+        {
+            return preferredLayoutSize(p);
+        }
+
+        @Override
+        public void layoutContainer(Container p)
+        {
+            Component label = p.getComponent(0), control = p.getComponent(1);
+            Dimension l = label.getPreferredSize(), c = control.getPreferredSize();
+            int w = p.getWidth(), h = Math.max(l.height, c.height);
+            if (stacked(p))
+            {
+                label.setBounds(0, 0, l.width, l.height);
+                control.setBounds(0, l.height + 2, w, c.height);
+            }
+            else
+            {
+                label.setBounds(0, (h - l.height) / 2, l.width, l.height);
+                control.setBounds(l.width + 6, (h - c.height) / 2, w - l.width - 6, c.height);
+            }
+        }
+    }
+
     /** Row {@code i}'s two value colours: green for the better side, red for the worse; none when the row is not
      *  compared, the two are equal or either cannot be read. */
     static Color[] tones(int i, String mine, String theirs)
@@ -419,6 +563,13 @@ public class FightsPanel extends JPanel
             return Double.NaN;
         }
         return Double.NaN;
+    }
+
+    /** The opponent's stored value as shown: as {@link #shown}, the offensive prayer the client cannot see as the
+     *  estimate. */
+    static String shownTheirs(int i, String raw)
+    {
+        return i == 4 && "-".equals(raw) ? EST : shown(i, raw);
     }
 
     /** A stored value as shown: magic hits with their luck, KO chances and ghost barrages with their total. */

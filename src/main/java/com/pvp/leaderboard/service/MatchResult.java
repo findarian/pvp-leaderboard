@@ -41,8 +41,8 @@ public class MatchResult
 
     private final boolean bountyHunter;
 
-    /** The fight's eight performance stats ({@code pf_op} .. {@code pf_gb}, in order), or {@code null} when none were
-     *  tracked; appended last. */
+    /** The fight's performance stats ({@code pf_v}, {@code pf_op} .. {@code pf_gb}, {@code pf_log}, in order), or
+     *  {@code null} when none were tracked; appended last. */
     private final java.util.Map<String, String> perf;
 
     /** {@code left}, {@code logout} or {@code opponent_left} for a tournament match ended without a death; {@code null}

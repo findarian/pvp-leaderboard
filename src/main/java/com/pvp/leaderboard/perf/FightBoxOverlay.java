@@ -93,7 +93,7 @@ public class FightBoxOverlay extends OverlayPanel
                 {
                     if (!on[i]) continue;
                     String label = wide(fm, f, i, FightsPanel.LABELS[i]) <= w ? FightsPanel.LABELS[i] : FightsPanel.SHORT[i];
-                    box.getChildren().add(new Row(FightsPanel.shown(i, f.mine[i]), label, FightsPanel.shown(i, f.theirs[i]),
+                    box.getChildren().add(new Row(FightsPanel.shown(i, f.mine[i]), label, FightsPanel.shownTheirs(i, f.theirs[i]),
                         FightsPanel.tones(i, f.mine[i], f.theirs[i])));
                 }
                 panelComponent.getChildren().add(box);
@@ -113,7 +113,7 @@ public class FightBoxOverlay extends OverlayPanel
     private static int wide(FontMetrics fm, FightLog.Fight f, int i, String label)
     {
         return fm.stringWidth(FightsPanel.shown(i, f.mine[i])) + fm.stringWidth(label)
-            + fm.stringWidth(FightsPanel.shown(i, f.theirs[i])) + 2 * GAP;
+            + fm.stringWidth(FightsPanel.shownTheirs(i, f.theirs[i])) + 2 * GAP;
     }
 
     /** One line: a value at each edge in its colour, the label between them in grey, centred or moved just enough to

@@ -262,6 +262,65 @@ public class PvpApi
         }
     }
 
+    // SYNC: /** {@code GET /performance/grab?name=}: whether today's grab is available for {@code name}. */
+    // SYNC: public CompletableFuture<JsonObject> grabStatus(String name)
+    // SYNC: {
+        // SYNC: return grab(req(api("/performance/grab").addQueryParameter("name", name).build(), true));
+    // SYNC: }
+
+    // SYNC: /** {@code POST /performance/grab}: claims today's grab for {@code name}; the fights come as one gzip body. */
+    // SYNC: public CompletableFuture<JsonObject> grab(String name)
+    // SYNC: {
+        // SYNC: JsonObject body = new JsonObject();
+        // SYNC: body.addProperty("name", name);
+        // SYNC: return grab(req(api("/performance/grab").build(), true).newBuilder().header("Accept", "application/gzip")
+            // SYNC: .post(RequestBody.create(MediaType.parse("application/json"), body.toString())).build());
+    // SYNC: }
+
+    // SYNC: /** One grab call: its JSON object, unpacked when it is gzip, whatever its status; an IOException when the network
+     // SYNC: *  failed, any other failure when the answer is not a JSON object. */
+    // SYNC: private CompletableFuture<JsonObject> grab(Request request)
+    // SYNC: {
+        // SYNC: CompletableFuture<JsonObject> future = new CompletableFuture<>();
+        // SYNC: enqueue(request, new Callback()
+        // SYNC: {
+            // SYNC: @Override
+            // SYNC: public void onFailure(Call call, IOException e)
+            // SYNC: {
+                // SYNC: future.completeExceptionally(e);
+            // SYNC: }
+
+            // SYNC: @Override
+            // SYNC: public void onResponse(Call call, Response response)
+            // SYNC: {
+                // SYNC: byte[] b;
+                // SYNC: try (Response res = response)
+                // SYNC: {
+                    // SYNC: b = res.body().bytes();
+                // SYNC: }
+                // SYNC: catch (IOException e)
+                // SYNC: {
+                    // SYNC: future.completeExceptionally(e);
+                    // SYNC: return;
+                // SYNC: }
+                // SYNC: try
+                // SYNC: {
+                    // SYNC: if (b.length > 1 && b[0] == 31 && b[1] == (byte) 139)
+                    // SYNC: {
+                        // SYNC: b = new java.util.zip.GZIPInputStream(new ByteArrayInputStream(b)).readNBytes(1 << 24);
+                    // SYNC: }
+                    // SYNC: JsonObject j = gson.fromJson(new String(b, StandardCharsets.UTF_8), JsonObject.class);
+                    // SYNC: future.complete(Objects.requireNonNull(j));
+                // SYNC: }
+                // SYNC: catch (IOException | RuntimeException e)
+                // SYNC: {
+                    // SYNC: future.completeExceptionally(new IllegalStateException(e));
+                // SYNC: }
+            // SYNC: }
+        // SYNC: });
+        // SYNC: return future;
+    // SYNC: }
+
     /** {@code GET /tournament/history?limit=}: finished events, newest first ({@code tournaments[]}, {@code next_before}). */
     public CompletableFuture<JsonObject> getTournamentHistory(int limit)
     {

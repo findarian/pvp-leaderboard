@@ -26,7 +26,9 @@ package com.pvp.leaderboard.perf;
 
 import com.pvp.leaderboard.game.KitRouter;
 import java.util.*;
+import java.util.function.*;
 import javax.inject.*;
+import lombok.extern.slf4j.*;
 import net.runelite.api.Actor;
 import net.runelite.api.Client;
 import net.runelite.api.EquipmentInventorySlot;
@@ -34,28 +36,35 @@ import net.runelite.api.HitsplatID;
 import net.runelite.api.Item;
 import net.runelite.api.ItemContainer;
 import net.runelite.api.Player;
-import net.runelite.api.Prayer;
 import net.runelite.api.Skill;
 import net.runelite.api.events.*;
 import net.runelite.api.gameval.InventoryID;
 import net.runelite.api.gameval.VarbitID;
+import net.runelite.api.kit.KitType;
 import net.runelite.client.callback.ClientThread;
 import net.runelite.client.game.ItemEquipmentStats;
 import net.runelite.client.game.ItemManager;
 import net.runelite.client.game.ItemStats;
 
-/** Feeds each fight's tracker from the client: attacks, hitsplats, hitpoints and magic experience; one fight per
- *  opponent. Every hook keeps its own faults, so a tracker fault never stops a match result; {@link #reset} may come
- *  from another thread. Adapted from PvP Performance Tracker's plugin hooks. */
+/** Feeds each fight's tracker from the client: attacks, hitsplats, hitpoints, magic experience and the local
+ *  player's levels, prayers and worn items; one fight per opponent. Every hook keeps its own faults, so a tracker fault
+ *  never stops a match result; {@link #reset} may come from another thread. Adapted from PvP Performance Tracker's
+ *  plugin hooks. */
+@Slf4j
 @Singleton
 public class PerfTracker
 {
-    private static final int IDLE = 16, GONE = 50;
+    /** Ticks (21 s) without an attack or hit after which a fight ends as Partial; within them the same opponent's
+     *  next attack or hit continues it. */
+    private static final int WINDOW = 35;
+    /** How long an ended fight stays in {@link #live}, in ms. */
+    private static final long SHOWN_MS = 3000;
     private static final Set<Integer> DAMAGE = new HashSet<>(Arrays.asList(HitsplatID.DAMAGE_ME, HitsplatID.DAMAGE_ME_ORANGE,
         HitsplatID.DAMAGE_OTHER_ORANGE, HitsplatID.DAMAGE_OTHER, HitsplatID.DAMAGE_MAX_ME, HitsplatID.DAMAGE_MAX_ME_ORANGE,
         HitsplatID.POISON, HitsplatID.VENOM, HitsplatID.BURN));
     private static final Set<Integer> NOT_HITS = new HashSet<>(Arrays.asList(HitsplatID.HEAL, HitsplatID.POISON,
         HitsplatID.VENOM, HitsplatID.BURN, HitsplatID.DISEASE));
+    private static final Skill[] LEVELS = {Skill.ATTACK, Skill.STRENGTH, Skill.DEFENCE, Skill.RANGED, Skill.MAGIC};
 
     private final Client client;
     private final ClientThread clientThread;
@@ -63,7 +72,14 @@ public class PerfTracker
     private final FightLog fightLog;
     private final Map<String, PerfFight> fights = new LinkedHashMap<>();
     private final Map<Integer, List<PerfFight.Splat>> splats = new HashMap<>();
-    private int magicXp = -1;
+    /** The open fights and those ended in the last 3 s, oldest first; when each ended. */
+    private final List<PerfFight> shown = new ArrayList<>();
+    private final Map<PerfFight, Long> endedAt = new HashMap<>();
+    private volatile Predicate<String> hold = n -> false;
+    LongSupplier clock = System::currentTimeMillis;
+    private int magicXp = -1, hpTick = -1, hpStart;
+    /** The local player's name at the last attack. */
+    private String myName;
 
     @Inject
     public PerfTracker(Client client, ClientThread clientThread, ItemManager itemManager, FightLog fightLog)
@@ -98,14 +114,10 @@ public class PerfTracker
     {
         try
         {
-            String name = (ours ? defender : attacker).getName();
+            String name = (ours ? defender : attacker).getName(), mine = (ours ? attacker : defender).getName();
+            if (mine != null) myName = mine;
             if (name == null) return;
-            PerfFight f = open(name, tick);
-            int prayer = client.getRealSkillLevel(Skill.PRAYER);
-            boolean prayed = false;
-            for (Prayer p : anim.style.prayers()) prayed |= ours && client.getVarbitValue(p.getVarbit()) == 1;
-            f.attack(ours, attacker, defender, anim, tick, assumed(f, anim.style, prayer), prayed, prayer,
-                worn(EquipmentInventorySlot.RING), worn(EquipmentInventorySlot.AMMO));
+            open(name, tick).attack(ours, attacker, defender, anim, tick, self());
         }
         catch (RuntimeException ex)
         {
@@ -186,17 +198,16 @@ public class PerfTracker
             PerfFight f = t instanceof Player ? fights.get(t.getName()) : null;
             Anim a = f == null ? null : Anim.of(me.getAnimation());
             if (f == null || a != null && a.style == Anim.Style.MAGIC) return;
-            int prayer = client.getRealSkillLevel(Skill.PRAYER);
-            f.ghost(me, (Player) t, client.getTickCount(), assumed(f, Anim.Style.MAGIC, prayer), prayer,
-                worn(EquipmentInventorySlot.RING));
+            f.ghost((Player) t, client.getTickCount(), self());
         }
         catch (RuntimeException ex)
         {
         }
     }
 
-    /** Each tick: the last tick's hitsplats matched to attacks; fights idle for 50 ticks kept as Partial. Runs before
-     *  the fight results of the tick are read. */
+    /** Each tick: the local player's hitpoints at its start; the last tick's hitsplats matched to attacks; the local
+     *  player's state for the open fights; fights idle for 35 ticks kept as Partial, unless held; a held fight whose
+     *  hold has ended kept as Partial. Runs before the fight results of the tick are read. */
     public synchronized void onTick()
     {
         try
@@ -204,8 +215,12 @@ public class PerfTracker
             int now = client.getTickCount();
             List<PerfFight.Splat> last = splats.remove(now - 1);
             splats.keySet().removeIf(t -> t < now - 5);
+            int start = hpTick == now - 1 ? hpStart : -1;
+            hpTick = now;
+            hpStart = client.getBoostedSkillLevel(Skill.HITPOINTS);
             Player me = client.getLocalPlayer();
             boolean solo = fights.size() == 1;
+            PerfFight.Self self = fights.isEmpty() ? null : self();
             for (PerfFight f : new ArrayList<>(fights.values()))
             {
                 List<PerfFight.Splat> own = new ArrayList<>();
@@ -213,8 +228,12 @@ public class PerfTracker
                 {
                     if (s.actor == me || f.opponent.equals(s.actor.getName())) own.add(s);
                 }
-                if (!own.isEmpty()) f.settle(now, own, solo);
-                if (now - f.lastTick > GONE) close(f, "partial");
+                if (!own.isEmpty()) f.settle(now, own, solo, start);
+                f.state(now, self);
+                f.endTick();
+                if (held(f.opponent)) f.held = true;
+                else if (f.held) close(f, "partial", null, "left_arena");
+                else if (now - f.lastTick >= WINDOW) close(f, "partial", null, "no_hits=" + WINDOW);
             }
         }
         catch (RuntimeException ex)
@@ -222,15 +241,21 @@ public class PerfTracker
         }
     }
 
-    /** The fight with {@code opponent} ended with {@code result}: kept in All fights; its eight stats for the match
-     *  body, or null when there were none. */
+    /** The fight with {@code opponent} ended with {@code result}: kept with this computer's fights; its eight stats
+     *  for the match body, or null when there were none. */
     public synchronized Map<String, String> finish(String opponent, String result)
+    {
+        return finish(opponent, result, null);
+    }
+
+    /** The same, with the fight's style (its bucket). */
+    public synchronized Map<String, String> finish(String opponent, String result, String style)
     {
         try
         {
             PerfFight f = opponent == null ? null : fights.get(opponent);
             if (f == null) return null;
-            close(f, result);
+            close(f, result, style, "result=" + result);
             return f.values();
         }
         catch (RuntimeException ex)
@@ -244,22 +269,31 @@ public class PerfTracker
     {
         try
         {
-            for (PerfFight f : new ArrayList<>(fights.values())) close(f, "partial");
+            for (PerfFight f : new ArrayList<>(fights.values())) close(f, "partial", null, "reset");
         }
         catch (RuntimeException ex)
         {
         }
         fights.clear();
         splats.clear();
-        magicXp = -1;
+        magicXp = hpTick = -1;
     }
 
-    /** The newest {@code max} open fights, oldest first: each one's opponent, world and both sides' values. */
+    /** The newest {@code max} fights to show, oldest first: the open ones and those ended in the last 3 s (until the
+     *  same opponent's next fight), each with its opponent, world and both sides' values. */
     public synchronized List<FightLog.Fight> live(int max)
     {
+        prune();
         List<FightLog.Fight> out = new ArrayList<>();
-        for (PerfFight f : fights.values()) out.add(new FightLog.Fight(0, f.opponent, "", f.world, f.stats(true), f.stats(false)));
+        for (PerfFight f : shown) out.add(new FightLog.Fight(0, f.opponent, "", f.world, f.stats(true), f.stats(false)));
         return out.subList(Math.max(0, out.size() - max), out.size());
+    }
+
+    /** The fights FightMonitor holds whole (a running tournament match's, in the arena), by opponent; null holds
+     *  none. */
+    public void setHold(Predicate<String> hold)
+    {
+        this.hold = hold == null ? n -> false : hold;
     }
 
     synchronized PerfFight fight(String opponent)
@@ -267,31 +301,74 @@ public class PerfTracker
         return fights.get(opponent);
     }
 
-    /** The opponent's fight; after 16 idle ticks a new one, the old kept as Partial. */
+    /** The opponent's fight; after 35 ticks without an attack or hit a new one, the old kept as Partial, unless the
+     *  fight is held; a held fight whose hold has ended is kept as Partial too. */
     private PerfFight open(String name, int tick)
     {
         PerfFight f = fights.get(name);
-        if (f != null && tick - f.lastTick > IDLE)
+        boolean held = held(name);
+        if (f != null && !held && (f.held || tick - f.lastTick >= WINDOW))
         {
-            close(f, "partial");
+            close(f, "partial", null, f.held ? "left_arena" : "idle_gap=" + (tick - f.lastTick));
             f = null;
         }
         if (f == null)
         {
-            f = new PerfFight(name, client.getWorld(), client.getVarbitValue(VarbitID.BR_INGAME) != 0,
-                client.getBoostedSkillLevel(Skill.DEFENCE), client.getBoostedSkillLevel(Skill.HITPOINTS), tick, this::stats);
+            int world = client.getWorld();
+            boolean lms = client.getVarbitValue(VarbitID.BR_INGAME) != 0;
+            f = new PerfFight(name, world, lms, KitRouter.ARENA_WORLDS.contains(world), lms
+                ? client.getBoostedSkillLevel(Skill.DEFENCE) : client.getRealSkillLevel(Skill.DEFENCE),
+                client.getBoostedSkillLevel(Skill.HITPOINTS), tick, this::stats);
             fights.put(name, f);
+            shown.removeIf(x -> x.opponent.equals(name) && endedAt.remove(x) != null);
+            prune();
+            shown.add(f);
+            log.info("[Perf] fight start opponent={} world={} tick={}", name, world, tick);
         }
+        if (held) f.held = true;
         return f;
     }
 
-    private void close(PerfFight f, String result)
+    /** Whether FightMonitor holds the fight against {@code opponent} now; a fault holds nothing. */
+    private boolean held(String opponent)
+    {
+        try
+        {
+            return hold.test(opponent);
+        }
+        catch (RuntimeException ex)
+        {
+            return false;
+        }
+    }
+
+    /** Drops the fights that ended 3 s ago or more. */
+    private void prune()
+    {
+        long now = clock.getAsLong();
+        shown.removeIf(f -> {
+            Long at = endedAt.get(f);
+            if (at == null || now - at < SHOWN_MS) return false;
+            endedAt.remove(f);
+            return true;
+        });
+    }
+
+    /** Ends {@code f} for {@code reason}, logged with each side's attacks: kept with this computer's fights when it
+     *  had an attack, and shown 3 s more. */
+    private void close(PerfFight f, String result, String style, String reason)
     {
         fights.remove(f.opponent);
+        endedAt.put(f, clock.getAsLong());
+        log.info("[Perf] fight end opponent={} {} my_attacks={} their_attacks={}", f.opponent, reason, f.me.attacks,
+            f.them.attacks);
         if (f.me.attacks + f.them.attacks > 0)
         {
-            fightLog.add(new FightLog.Fight(System.currentTimeMillis() / 1000, f.opponent, result, f.world, f.stats(true),
-                f.stats(false)));
+            FightLog.Fight x = new FightLog.Fight(clock.getAsLong() / 1000, f.opponent, result, f.world,
+                f.stats(true), f.stats(false));
+            x.self = myName == null ? "" : myName;
+            x.style = style == null ? "" : style;
+            fightLog.add(x);
         }
     }
 
@@ -300,10 +377,20 @@ public class PerfTracker
         return fights.size() == 1 ? fights.values().iterator().next() : null;
     }
 
-    private Prayer assumed(PerfFight f, Anim.Style style, int prayer)
+    /** The local player now: boosted levels, active prayers, worn items, ring and ammo, Prayer level and Zeal. */
+    private PerfFight.Self self()
     {
-        return PerfCalc.assumed(style, f.lms, KitRouter.ARENA_WORLDS.contains(f.world), zeal(), prayer,
-            client.getBoostedSkillLevel(Skill.DEFENCE));
+        int[] lv = new int[LEVELS.length], gear = new int[KitType.values().length];
+        for (int i = 0; i < lv.length; i++) lv[i] = client.getBoostedSkillLevel(LEVELS[i]);
+        int prayers = 0;
+        for (int b = 0; b < PerfCalc.PRAYERS.length; b++)
+        {
+            if (client.getVarbitValue(PerfCalc.PRAYERS[b].getVarbit()) == 1) prayers |= 1 << b;
+        }
+        ItemContainer c = client.getItemContainer(InventoryID.WORN);
+        for (int i = 0; i < gear.length; i++) gear[i] = worn(c, i);
+        return new PerfFight.Self(lv, prayers, gear, worn(c, EquipmentInventorySlot.RING.getSlotIdx()),
+            worn(c, EquipmentInventorySlot.AMMO.getSlotIdx()), client.getRealSkillLevel(Skill.PRAYER), zeal());
     }
 
     private boolean zeal()
@@ -312,11 +399,11 @@ public class PerfTracker
             && client.getRealSkillLevel(Skill.STRENGTH) >= 75;
     }
 
-    private int worn(EquipmentInventorySlot slot)
+    /** The item id worn in equipment slot {@code slot}, -1 for none; slots 0-11 are KitType's. */
+    private static int worn(ItemContainer c, int slot)
     {
-        ItemContainer c = client.getItemContainer(InventoryID.WORN);
-        Item i = c == null ? null : c.getItem(slot.getSlotIdx());
-        return i == null ? -1 : i.getId();
+        Item i = c == null ? null : c.getItem(slot);
+        return i == null || i.getId() < 0 ? -1 : i.getId();
     }
 
     /** An item's 13 equipment bonuses, in RuneLite's order; null when unknown. */
